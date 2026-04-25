@@ -67,7 +67,7 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
 # ---------------------------------------------------------------------------
 def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float, cluster_hash: str):
     """
-    Generates a Field Nation mass upload Excel file.
+    Generates a Field Nation mass upload CSV file.
 
     Structure:
       - One row per stop address
@@ -101,15 +101,18 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
     if not kiosk_stops:
         return None, 0
 
-    # Format due date
+    # Format due date as M/D/YYYY without leading zeros, cross-platform.
+    # Was previously using %-m/%-d which is Linux-only and raises ValueError on Windows.
+    def _fmt_date(d):
+        return f"{d.month}/{d.day}/{d.year}"
     try:
-        if hasattr(due, 'strftime'):
-            start_date = due.strftime("%-m/%-d/%Y")
-            end_date   = due.strftime("%-m/%-d/%Y")
+        if hasattr(due, 'year') and hasattr(due, 'month') and hasattr(due, 'day'):
+            start_date = _fmt_date(due)
+            end_date   = _fmt_date(due)
         else:
             due_dt     = datetime.strptime(str(due), "%Y-%m-%d")
-            start_date = due_dt.strftime("%-m/%-d/%Y")
-            end_date   = due_dt.strftime("%-m/%-d/%Y")
+            start_date = _fmt_date(due_dt)
+            end_date   = _fmt_date(due_dt)
     except Exception:
         start_date = str(due)
         end_date   = str(due)

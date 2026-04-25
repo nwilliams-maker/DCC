@@ -1,267 +1,193 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Work Order Dispatch | Terraboost Media</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCDYgNIGcfWPxoux2EILXr60ZK0fZYJPR4&libraries=geometry,drawing"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <style>
-        body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; color: #0f172a; }
-        .brand-gradient { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
-        .form-card { border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15); border: 1px solid #e2e8f0; background: #ffffff; }
-        label { color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.65rem; display: block; margin-bottom: 8px; }
-        .signature-font { font-family: 'Dancing Script', cursive; font-size: 3.5rem; color: #0f172a; border-bottom: 2px solid #94a3b8; background: transparent; width: 100%; padding: 0; height: auto; line-height: 1; box-shadow: none !important; }
-        .spinner { border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top: 3px solid #3b82f6; width: 30px; height: 30px; animation: spin 1s linear infinite; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .status-pill { border: 2px solid #e2e8f0; transition: all 0.2s; cursor: pointer; background: #f8fafc; }
-        input[type="radio"]:checked + .status-pill { border-color: currentColor; transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); background: #ffffff; }
-        .btn-modern { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
-        .no-print { display: block; }
-        @media print { .no-print { display: none !important; } }
-    </style>
-</head>
-<body class="p-4 md:p-8 lg:p-12">
+"""
+fn_utils.py — Terraboost Media Field Nation Utilities
+All Field Nation logic lives here: manager mapping, upload generation, background saves.
+"""
 
-    <div id="captureArea" class="max-w-[1400px] mx-auto form-card">
-        <div class="brand-gradient p-8 text-white flex justify-between items-center no-print">
-            <div class="flex items-center gap-6">
-                <div class="bg-white p-2.5 rounded-xl shadow-lg">
-                    <div class="bg-slate-900 text-white font-black text-3xl px-4 py-2 rounded-lg">TBM</div>
-                </div>
-                <div>
-                    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Terraboost Media</h1>
-                    <p class="text-blue-400 text-[10px] md:text-xs uppercase font-black tracking-[0.25em] opacity-90 mt-1">Route Authorization Portal</p>
-                </div>
-            </div>
-        </div>
+import io
+import threading
+import requests
+from datetime import datetime
+import csv
 
-        <form id="dispatchForm" class="p-6 md:p-10 lg:p-12 space-y-12">
-            <div id="icMode" class="space-y-12">
-                <div class="grid grid-cols-1 lg:grid-cols-12 gap-10">
-                    
-                    <div class="lg:col-span-5 space-y-8">
-                        <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/40 relative overflow-hidden">
-                            <div class="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
-                            <h3 class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-6">Route Authorization</h3>
-                            <div id="summaryZone" class="space-y-4 text-sm text-slate-700"></div>
-                        </div>
-                        
-                        <div class="space-y-4 no-print">
-                            <button type="button" onclick="viewRoute(11)" class="btn-modern w-full bg-slate-900 text-white font-black py-4 rounded-xl shadow-lg uppercase tracking-widest text-xs flex justify-center items-center gap-2">
-                                <span>🗺️</span> View Route Preview
-                            </button>
-                            <button type="button" onclick="copyMapUrl()" class="btn-modern w-full bg-white border-2 border-slate-200 text-slate-600 hover:text-blue-600 font-black py-4 rounded-xl text-[10px] uppercase tracking-[0.15em] flex justify-center items-center gap-2">
-                                <span>🔗</span> Copy Browser Link
-                            </button>
-                        </div>
-                    </div>
 
-                    <div class="lg:col-span-7 space-y-8 bg-white p-8 md:p-10 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/40">
-                        <div class="grid grid-cols-2 gap-5">
-                            <label class="relative">
-                                <input type="radio" name="ic_decision" value="Accepted" class="sr-only" checked onchange="toggleDecisionView()">
-                                <div class="status-pill text-center py-5 rounded-2xl text-emerald-600 font-black text-xs uppercase tracking-widest">Accept Route</div>
-                            </label>
-                            <label class="relative">
-                                <input type="radio" name="ic_decision" value="Declined" class="sr-only" onchange="toggleDecisionView()">
-                                <div class="status-pill text-center py-5 rounded-2xl text-red-600 font-black text-xs uppercase tracking-widest">Decline Route</div>
-                            </label>
-                        </div>
+# ---------------------------------------------------------------------------
+# State → Work Order Manager (by pod)
+# ---------------------------------------------------------------------------
+FN_STATE_MANAGER = {
+    # Orange Pod
+    "AK": "Bernice Makaya", "AZ": "Bernice Makaya", "CA": "Bernice Makaya",
+    "HI": "Bernice Makaya", "ID": "Bernice Makaya", "NV": "Bernice Makaya",
+    "OR": "Bernice Makaya", "WA": "Bernice Makaya",
+    # Green Pod
+    "CO": "Reabetswe Segopa", "DC": "Reabetswe Segopa", "GA": "Reabetswe Segopa",
+    "IN": "Reabetswe Segopa", "KY": "Reabetswe Segopa", "MD": "Reabetswe Segopa",
+    "NJ": "Reabetswe Segopa", "OH": "Reabetswe Segopa", "UT": "Reabetswe Segopa",
+    # Red Pod
+    "CT": "Lee Adams", "DE": "Lee Adams", "MA": "Lee Adams", "ME": "Lee Adams",
+    "NH": "Lee Adams", "NY": "Lee Adams", "PA": "Lee Adams", "RI": "Lee Adams",
+    "VA": "Lee Adams", "VT": "Lee Adams", "WV": "Lee Adams",
+    # Blue Pod
+    "AL": "Elna Burger", "AR": "Elna Burger", "FL": "Elna Burger", "IA": "Elna Burger",
+    "IL": "Elna Burger", "LA": "Elna Burger", "MI": "Elna Burger", "MN": "Elna Burger",
+    "MO": "Elna Burger", "MS": "Elna Burger", "NC": "Elna Burger", "SC": "Elna Burger",
+    "WI": "Elna Burger",
+    # Purple Pod
+    "KS": "Stacey Ferreira", "MT": "Stacey Ferreira", "ND": "Stacey Ferreira",
+    "NE": "Stacey Ferreira", "NM": "Stacey Ferreira", "OK": "Stacey Ferreira",
+    "SD": "Stacey Ferreira", "TN": "Stacey Ferreira", "TX": "Stacey Ferreira",
+    "WY": "Stacey Ferreira",
+}
 
-                        <div id="reason_block" class="hidden space-y-6 pt-4">
-                            <div><label>Counter Offer ($) (Optional)</label><input type="number" id="ic_counter_val" placeholder="0.00" style="width:100%; padding:14px; border-radius:12px; border:1px solid #cbd5e1;"></div>
-                            <div><label>Reason for Decline / Notes</label><textarea id="ic_notes" rows="4" style="width:100%; padding:14px; border-radius:12px; border:1px solid #cbd5e1;"></textarea></div>
-                        </div>
+PAY_PER_STOP = 20.0
 
-                        <div id="signature_block" class="pt-4">
-                            <label class="text-blue-600 font-black mb-6 uppercase text-[10px] tracking-widest">Electronic Signature</label>
-                            <input type="text" id="typed_sig" placeholder="Click Here, Type Legal Name" class="signature-font" oninput="updateLiveSignature(this.value)">
-                            
-                            <div class="flex items-start gap-4 p-6 bg-blue-50/50 rounded-2xl border border-blue-100 mt-8">
-                                <input type="checkbox" id="legal_consent" class="mt-1 h-5 w-5 rounded text-blue-600 cursor-pointer">
-                                <label for="legal_consent" class="normal-case font-medium text-xs text-slate-700 leading-relaxed cursor-pointer select-none">
-                                    I, <span id="live_sig_text" class="text-blue-800 font-black italic border-b border-blue-200 px-1">________________</span>, hereby certify that I am an Independent Contractor and have received and accepted the enclosed route.
-                                </label>
-                            </div>
-                        </div>
-                        
-                        <div class="pt-4">
-                            <button type="button" id="submitBtn" onclick="submitFinalResponse()" class="btn-modern bg-blue-600 text-white font-black py-6 rounded-2xl shadow-xl text-sm uppercase tracking-[0.2em] w-full">Submit Final Response</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div id="successView" class="hidden text-center py-32">
-                <div class="text-7xl mb-6">✅</div>
-                <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Response Recorded</h2>
-                <p class="text-slate-500 mt-4 font-medium">You may now close this window.</p>
-            </div>
-        </form>
-    </div>
 
-    <script>
-        const webAppUrl = "https://script.google.com/macros/s/AKfycbynAIziubArSQ0hVGTvJMpk11a9yLP0kNcSmGpcY7GDNRT25Po5p92K3EDslx9VycKC/exec";
-        const formspreeUrl = "https://formspree.io/f/meerlqll";
-        const PRIMARY_FORMSPREE_EMAIL = "nwilliams@terraboost.biz";
+# ---------------------------------------------------------------------------
+# Background sheet save — never blocks the UI
+# ---------------------------------------------------------------------------
+def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
+    """Fire-and-forget: saves a route to the Field Nation Google Sheet tab.
+    Clears the reverted flag from session_state after the write completes."""
+    cluster_hash = payload.get("cluster_hash")
 
-        window.onload = () => {
-            const urlParams = new URLSearchParams(window.location.search);
-            const routeId = urlParams.get('route'); 
-            if (routeId) {
-                window.currentRouteId = routeId; 
-                document.getElementById('summaryZone').innerHTML = `<p class="text-slate-500 font-bold animate-pulse">Loading intelligence...</p>`;
-                
-                fetch(`${webAppUrl}?action=getRoute&routeId=${routeId}`)
-                    .then(r => r.json())
-                    .then(res => {
-                        if (res.error) {
-                            document.getElementById('summaryZone').innerHTML = `<div class="text-red-500 font-bold">⚠️ ${res.error}</div>`;
-                            return;
-                        }
-                        const d = res.payload; window.payloadData = d;
-                        
-                        document.getElementById('summaryZone').innerHTML = `
-                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3 font-bold uppercase text-[10px] tracking-widest text-slate-400"><span>Route Summary</span></div>
-                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3"><span>Contractor:</span> <span class="font-bold text-slate-900">${d.icn}</span></div>
-                            <div class="flex justify-between text-blue-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>Work Order #:</span> <span>${d.wo}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Due Date:</span> <span class="font-bold text-slate-900">${d.due || 'N/A'}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Unique Locations:</span> <span class="font-bold text-slate-900">${d.lCnt}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Total Tasks:</span> <span class="font-bold text-slate-900">${d.tCnt}</span></div>
-                            <div class="flex justify-between text-emerald-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>Kiosk Installs:</span> <span>${d.kCnt || 0}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Est. Drive Time:</span> <span class="font-bold text-slate-900">${d.time}</span></div>
-                            <div class="flex justify-between pb-3 mb-3"><span>Mileage:</span> <span class="font-medium">${d.mi} Miles</span></div>
-                            <div class="flex justify-between border-t border-slate-200 pt-4 mt-2 font-black text-3xl text-emerald-600"><span>Total Comp:</span> <span>$${d.comp}</span></div>
-                        `;
-                    });
-            }
-        };
+    def _worker():
+        try:
+            requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload}, timeout=15)
+        except Exception:
+            pass
+        finally:
+            # Clear reverted flag once sheet write is done (success or fail)
+            if session_state is not None and cluster_hash:
+                session_state.pop(f"reverted_{cluster_hash}", None)
 
-        async function submitFinalResponse() {
-            const decision = document.querySelector('input[name="ic_decision"]:checked').value;
-            const sig = document.getElementById('typed_sig').value;
-            const consent = document.getElementById('legal_consent').checked;
-            const counter = document.getElementById('ic_counter_val').value;
-            const notes = document.getElementById('ic_notes').value;
+    threading.Thread(target=_worker, daemon=True).start()
 
-            if (decision === 'Accepted' && (!sig || !consent)) return alert("Signature and consent required.");
-            
-            const btn = document.getElementById('submitBtn');
-            btn.disabled = true; 
-            
-            // --- VISUAL LOADING STATE ---
-            if (decision === 'Accepted') {
-                btn.innerHTML = `<div class="flex items-center justify-center gap-3"><div class="spinner" style="width:20px; height:20px; border-width:2px; border-top-color:#ffffff;"></div><span>Assigning Tasks to App...</span></div>`;
-            } else {
-                btn.innerHTML = `<div class="flex items-center justify-center gap-3"><div class="spinner" style="width:20px; height:20px; border-width:2px; border-top-color:#ffffff;"></div><span>Processing Decline...</span></div>`;
-            }
 
-            try {
-                // Pass phone & taskIds to trigger the backend Onfleet logic
-                const gasPayload = {
-                    action: "processDecision", 
-                    routeId: window.currentRouteId,
-                    decision: decision,
-                    signature: sig,
-                    notes: notes,
-                    phone: window.payloadData.phone || "",       
-                    taskIds: window.payloadData.taskIds || ""    
-                };
+# ---------------------------------------------------------------------------
+# Mass upload file generator
+# ---------------------------------------------------------------------------
+def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float, cluster_hash: str):
+    """
+    Generates a Field Nation mass upload Excel file.
 
-                const response = await fetch(webAppUrl, {
-                    method: 'POST',
-                    headers: { "Content-Type": "text/plain;charset=utf-8" },
-                    body: JSON.stringify(gasPayload)
-                });
-                
-                const result = await response.json();
+    Structure:
+      - One row per stop address
+      - One numbered slot (1–5) per unique locationinVenue at that stop
+      - $20 fixed per stop (PAY_PER_STOP)
+      - Work Order Manager resolved by state via FN_STATE_MANAGER
 
-               await fetch(formspreeUrl, {
-                    method: 'POST',
-                    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                    // Subject line for your inbox
-                    _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})`,
-        
-                    // Response Data
-                    "Decision": decision,
-                    "Contractor": window.payloadData.icn,
-                    "Work Order #": window.payloadData.wo,
-                    "Electronic Signature": sig,
-                    "Counter Offer": counter || "None",
-                    "Notes/Reason": notes || "None",
-                    
-                    // Route Intelligence (The data you wanted to include)
-                    "Total Compensation": `$${window.payloadData.comp}`,
-                    "Total Tasks": window.payloadData.tCnt,
-                    "Unique Locations": window.payloadData.lCnt,
-                    "Kiosk Installs": window.payloadData.kCnt || 0,
-                    "Mileage": `${window.payloadData.mi} Miles`,
-                    "Est. Drive Time": window.payloadData.time,
-                    "Due Date": window.payloadData.due || "N/A",
-                    
-                    // System Status
-                    "Onfleet Auto-Assign": result.onfleetSuccess ? "SUCCESS" : "FAILED/SKIPPED",
-                    "Onfleet Msg": result.onfleetMsg || "N/A"
-                })
-            });
+    Custom field mapping per slot:
+      N. Customer Name   → clientCompany
+      1. Venue ID        → venueId  (slot 1 only)
+      N. Location in Venue → taskType + " — " + locationinVenue
 
-                // Hide the form UI
-                document.getElementById('icMode').classList.add('hidden');
-                
-                // --- TRUE DYNAMIC SUCCESS WINDOW ---
-                const successContainer = document.getElementById('successView');
-                if (decision === 'Accepted') {
-                    if (result.onfleetSuccess) {
-                        successContainer.innerHTML = `
-                            <div class="text-7xl mb-6">✅</div>
-                            <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Tasks Assigned!</h2>
-                            <p class="text-slate-500 mt-4 font-medium text-lg">The route has been successfully pushed to your Onfleet app.<br>You may now close this window.</p>
-                        `;
-                    } else {
-                        // ONFLEET FAILED UI
-                        successContainer.innerHTML = `
-                            <div class="text-7xl mb-6">⚠️</div>
-                            <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Route Accepted, BUT...</h2>
-                            <p class="text-red-500 mt-4 font-bold text-lg">We couldn't automatically push the tasks to your Onfleet app.</p>
-                            <p class="text-slate-500 mt-2 font-medium text-sm">Error: ${result.onfleetMsg}</p>
-                            <p class="text-slate-500 mt-6 font-medium text-sm">Our dispatch team has been notified and will manually assign your tasks shortly.</p>
-                        `;
-                    }
-                } else {
-                    successContainer.innerHTML = `
-                        <div class="text-7xl mb-6">✅</div>
-                        <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Response Recorded</h2>
-                        <p class="text-slate-500 mt-4 font-medium text-lg">Your decline has been securely logged.<br>You may now close this window.</p>
-                    `;
-                }
-                successContainer.classList.remove('hidden');
+    Returns:
+      (BytesIO buffer, int stop_count)  or  (None, 0) if no kiosk stops found.
+    """
 
-            } catch (e) {
-                alert("Submission failed. Please try again.");
-                btn.disabled = false; 
-                btn.innerText = "Submit Final Response";
-            }
-        }
+    # Build address → [tasks] grouped by unique locationinVenue — all stops
+    stop_task_map: dict = {}
+    for t in cluster.get('data', []):
+        addr = t.get('full', '')
+        if not addr:
+            continue
+        if addr not in stop_task_map:
+            stop_task_map[addr] = []
+        loc = t.get('location_in_venue', '').strip()
+        existing = [x.get('location_in_venue', '') for x in stop_task_map[addr]]
+        if loc not in existing:
+            stop_task_map[addr].append(t)
 
-        function buildMapsUrl(limit) {
-            if (!window.payloadData || !window.payloadData.locs) return null;
-            const stops = window.payloadData.locs.split('|').slice(0, limit);
-            if (stops.length === 0) return null;
-            
-            // FIX: Using the native '/dir/Stop1/Stop2' format instead of '?api=1'.
-            // This forces Desktop Google Maps to accept the massive list of stops without truncating!
-            const encodedStops = stops.map(stop => encodeURIComponent(stop.trim())).join('/');
-            
-            return `https://www.google.com/maps/dir/${encodedStops}`;
-        }
-        
-        function viewRoute(limit) { const url = buildMapsUrl(limit); if (url) window.open(url, '_blank'); }
-        function copyMapUrl() { const url = buildMapsUrl(25); if (url) { navigator.clipboard.writeText(url); alert("20-Stop Link Copied!"); } }
-        function toggleDecisionView() { const d = document.querySelector('input[name="ic_decision"]:checked').value; document.getElementById('reason_block').classList.toggle('hidden', d !== 'Declined'); document.getElementById('signature_block').classList.toggle('hidden', d === 'Declined'); }
-        function updateLiveSignature(v) { document.getElementById('live_sig_text').innerText = v || "________________"; }
-    </script>
-</body>
-</html>
+    kiosk_stops = [(addr, tasks) for addr, tasks in stop_task_map.items() if tasks]
+    if not kiosk_stops:
+        return None, 0
+
+    # Format due date
+    try:
+        if hasattr(due, 'strftime'):
+            start_date = due.strftime("%-m/%-d/%Y")
+            end_date   = due.strftime("%-m/%-d/%Y")
+        else:
+            due_dt     = datetime.strptime(str(due), "%Y-%m-%d")
+            start_date = due_dt.strftime("%-m/%-d/%Y")
+            end_date   = due_dt.strftime("%-m/%-d/%Y")
+    except Exception:
+        start_date = str(due)
+        end_date   = str(due)
+
+    # Headers: base columns + 5 numbered custom field sets
+    base_headers = [
+        "Location Name", "Address #1", "City", "State", "Postal Code", "Country",
+        "Schedule Type", "Scheduled Start Date", "Scheduled Start Time",
+        "Scheduled End Date", "Scheduled End Time", "Pay Type", "Pay Rate",
+        "Approximate Hours to Complete", "Est. WO-Value", "Work Order Manager", "",
+    ]
+    custom_headers = []
+    for n in range(1, 6):
+        custom_headers.append(f"{n}. Customer Name")
+        if n == 1:
+            custom_headers.append("1. Venue ID")
+        custom_headers.append(f"{n}. Location in Venue")
+
+    all_headers = base_headers + custom_headers
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(all_headers)
+
+    for addr, tasks in kiosk_stops:
+        parts    = [p.strip() for p in addr.split(",")]
+        street   = parts[0] if len(parts) > 0 else addr
+        city     = parts[1] if len(parts) > 1 else cluster.get('city', '')
+        state    = parts[2].strip().upper() if len(parts) > 2 else cluster.get('state', '')
+        zip_code = tasks[0].get('zip', parts[3].strip() if len(parts) > 3 else '')
+
+        venue_name = tasks[0].get('venue_name', 'Terraboost Media')
+        manager    = FN_STATE_MANAGER.get(state, '')
+
+        base_row = [
+            venue_name,
+            street,
+            city,
+            state,
+            zip_code,
+            "US",
+            "Complete work anytime over a date range",
+            start_date,
+            "8:00 AM",
+            end_date,
+            "5:00 PM",
+            "Fixed",
+            PAY_PER_STOP,
+            1.0,
+            PAY_PER_STOP,
+            manager,
+            "",
+        ]
+
+        custom_cols = []
+        for slot_idx, task in enumerate(tasks[:5], 1):
+            task_type    = str(task.get('task_type', 'Kiosk Install')).strip()
+            loc_in_venue = str(task.get('location_in_venue', '')).strip()
+            client       = str(task.get('client_company', '') or '').strip() or 'Terraboost Media'
+            venue_id     = str(task.get('venue_id', '')).strip()
+            combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
+
+            custom_cols.append(client)
+            if slot_idx == 1:
+                custom_cols.append(venue_id)
+            custom_cols.append(combined_loc)
+
+        # Pad empty slots up to 5
+        filled = len(tasks[:5])
+        for slot_idx in range(filled + 1, 6):
+            custom_cols.append("")
+            if slot_idx == 1:
+                custom_cols.append("")
+            custom_cols.append("")
+
+        writer.writerow(base_row + custom_cols)
+
+    # Return as bytes for st.download_button
+    bytes_buf = io.BytesIO(buf.getvalue().encode('utf-8)))
+    bytes_buf.seek(0)
+    return bytes_buf, len(kiosk_stops)

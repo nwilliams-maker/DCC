@@ -755,8 +755,11 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
 
 @st.fragment(run_every=15)
 def auto_sync_checker(pod_name):
-    """Polls every 15s. Checks pod cluster task IDs directly against Accepted/Declined sheets."""
-    # Build set of all task IDs in this pod's clusters
+    """Polls every 15s. Refreshes the sheet cache and triggers a rerun whenever
+    any sheet content changed — not just Accepted/Declined status flips. Previously
+    new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
+    until a user interaction (zooming the map, clicking somewhere, etc.) forced
+    a rerender."""
     pod_clusters = st.session_state.get(f"clusters_{pod_name}", [])
     if not pod_clusters:
         return
@@ -770,42 +773,56 @@ def auto_sync_checker(pod_name):
         return
 
     try:
-        base_url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid="
-        changed = False
-        sent_db = st.session_state.get('sent_db', {})
+        # Force-refresh the cached sheet pull. The cached function has a 15s TTL but
+        # only re-runs when something actively calls it — and nothing else does between
+        # user interactions. By clearing here we guarantee the next call is fresh.
+        fetch_sent_records_from_sheet.clear()
+        fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
 
-        for gid, status_label in [(ACCEPTED_ROUTES_GID, 'accepted'), (DECLINED_ROUTES_GID, 'declined')]:
-            try:
-                df = pd.read_csv(base_url + str(gid))
-                df.columns = [str(c).strip().lower() for c in df.columns]
-                if 'json payload' not in df.columns:
+        # Build a fingerprint of the fields the cards actually display, restricted to
+        # tasks in THIS pod. If the fingerprint differs from last poll, rerun the page.
+        # This catches new routes, comp updates, due-date changes, status flips — any
+        # sheet edit that would change what the dispatcher sees.
+        def _fp(db):
+            parts = []
+            for tid in sorted(pod_tid_set):
+                rec = db.get(tid)
+                if not rec:
                     continue
-                for _, row in df.iterrows():
-                    try:
-                        p = json.loads(row['json payload'])
-                        tids = [t.strip() for t in str(p.get('taskIds', '')).split(',') if t.strip()]
-                        matching = [tid for tid in tids if tid in pod_tid_set]
-                        if matching:
-                            for tid in matching:
-                                current = sent_db.get(tid, {}).get('status', '').lower()
-                                if current != status_label:
-                                    if tid not in sent_db:
-                                        sent_db[tid] = {}
-                                    sent_db[tid]['status'] = status_label
-                                    sent_db[tid]['wo'] = p.get('wo', '')
-                                    changed = True
-                    except:
-                        pass
-            except:
-                pass
+                parts.append(f"{tid}|{rec.get('status','')}|{rec.get('wo','')}|{rec.get('comp','')}|{rec.get('due','')}|{rec.get('time','')}")
+            return hashlib.md5("\n".join(parts).encode()).hexdigest()
 
-        if changed:
-            st.session_state.sent_db = sent_db
-            fetch_sent_records_from_sheet.clear()
+        new_fp = _fp(fresh_sent_db)
+        last_fp_key = f"_auto_sync_fp_{pod_name}"
+        last_fp = st.session_state.get(last_fp_key)
+
+        # First poll: just record the baseline, don't rerun (avoids a rerun storm on init).
+        if last_fp is None:
+            st.session_state[last_fp_key] = new_fp
+            st.session_state.sent_db = fresh_sent_db
+            st.session_state['archived_wos'] = _archived_wos
+            return
+
+        if new_fp != last_fp:
+            st.session_state[last_fp_key] = new_fp
+            st.session_state.sent_db = fresh_sent_db
+            st.session_state['archived_wos'] = _archived_wos
+            # Clear reverted flags for any cluster whose tasks just got new sheet data,
+            # so the traffic cop in run_pod_tab picks up the fresh status.
+            for _c in pod_clusters:
+                _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
+                if any(tid in fresh_sent_db for tid in _c_tids):
+                    _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
+                    if st.session_state.get(f"reverted_{_c_hash}", False):
+                        # Only clear if the sheet now reflects a non-revoked state
+                        for _tid in _c_tids:
+                            if _tid in fresh_sent_db:
+                                st.session_state[f"reverted_{_c_hash}"] = False
+                                break
             st.rerun(scope="app")
 
-    except:
-        pass
+    except Exception as e:
+        _log_err("auto_sync_checker", e)
 
 @st.fragment
 def render_finalization_checklist(cluster_hash, pod_name, prefix="chk"):
@@ -2402,8 +2419,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"sent_ts_{cluster_hash}"] = datetime.now().strftime('%m/%d %I:%M %p')
                 st.session_state[f"contractor_{cluster_hash}"] = ic.get('name', 'Unknown')
                 st.session_state[f"wo_{cluster_hash}"] = wo_val
+                # Stash comp + due locally so the post-dispatch card has correct values
+                # even if the sheet readback is briefly stale (was previously rendering
+                # $0 / N/A for ~15s while the cached fetch_sent_records_from_sheet expired).
+                st.session_state[f"comp_{cluster_hash}"] = final_pay
+                st.session_state[f"due_{cluster_hash}"] = str(due)
                 st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
                 st.session_state[f"reverted_{cluster_hash}"] = False
+                # Force the next render to re-pull the sheet so the new row is visible immediately.
+                fetch_sent_records_from_sheet.clear()
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
@@ -2994,6 +3018,8 @@ def run_pod_tab(pod_name):
         local_ts = st.session_state.get(f"sent_ts_{cluster_hash}", "")
         local_contractor = st.session_state.get(f"contractor_{cluster_hash}", "Unknown")
         local_wo = st.session_state.get(f"wo_{cluster_hash}", local_contractor) # 🌟 Fetch WO
+        local_comp = st.session_state.get(f"comp_{cluster_hash}", 0)
+        local_due = st.session_state.get(f"due_{cluster_hash}", 'N/A')
         is_reverted = st.session_state.get(f"reverted_{cluster_hash}", False)
 
         # NOTE: the next block mutates `c` (the cluster dict in session state) directly
@@ -3006,13 +3032,18 @@ def run_pod_tab(pod_name):
             c['contractor_name'] = sheet_match.get('name', 'Unknown')
             c['route_ts'] = sheet_match.get('time', '') or local_ts
             c['wo'] = sheet_match.get('wo', c['contractor_name'])
-            c['comp'] = sheet_match.get('comp', 0)    # 🌟 NEW
-            c['due'] = sheet_match.get('due', 'N/A')  # 🌟 NEW
+            # Sheet has authoritative values, but fall back to local session state if the
+            # sheet readback hasn't caught up yet (e.g., immediately post-dispatch). This
+            # was previously rendering $0 / N/A on the just-dispatched card for ~15s.
+            c['comp'] = sheet_match.get('comp') or local_comp or 0
+            c['due'] = sheet_match.get('due') or local_due or 'N/A'
         else:
             # 🌟 Apply Fallbacks Instantly
             c['contractor_name'] = local_contractor
             c['wo'] = local_wo
             c['route_ts'] = local_ts
+            c['comp'] = local_comp
+            c['due'] = local_due
         
         # --- 🚦 THE NEW DIGITAL FLOW ---
         if c.get('is_digital') and not sheet_match and route_state != "email_sent" and not is_reverted:

@@ -51,6 +51,11 @@ FIELD_NATION_GID = "1396320527"
 FINALIZED_ROUTES_GID = "1907347870"
 ARCHIVE_GID = "1841508981"  # Read-only side-channel: only used to harvest archived_wo for the WO counter; never used for clustering.
 
+# Routes created before this date are skipped when reading the route database. This
+# was added to cut over the pre-launch migration; rows older than the cutoff should
+# eventually be moved to the Archive tab so this constant can go away.
+MIGRATION_CUTOFF_DATE = "2026-04-20"
+
 # Terraboost Media Brand Palette
 TB_PURPLE = "#633094"
 TB_GREEN = "#76bc21"
@@ -747,13 +752,6 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
 
     st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     # No st.rerun() — callback handles the rerender
-    
-def background_sheet_finalize(cluster_hash):
-    """Silent worker to finalize routes in Google Sheets without freezing the UI."""
-    try:
-        requests.post(GAS_WEB_APP_URL, json={"action": "finalizeRoute", "cluster_hash": cluster_hash}, timeout=15)
-    except Exception as e:
-        _log_err("background_sheet_finalize", e)
 
 @st.fragment(run_every=15)
 def auto_sync_checker(pod_name):
@@ -847,7 +845,15 @@ def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
 
 def revoke_field_nation(cluster_hash, pod_name):
-    """Removes route from Field Nation sheet tab AND resets UI state."""
+    """Removes route from Field Nation sheet tab AND resets UI state.
+
+    Fires two background calls intentionally:
+      1. removeFieldNation — explicit FN tab cleanup (handler in GAS)
+      2. archiveRoute (via move_to_dispatch) — moves the row to Archive
+    The archiveRoute call would already remove the FN row, but the explicit
+    removeFieldNation makes intent legible if you ever wire up FN-only flows
+    that shouldn't archive.
+    """
     import threading
     threading.Thread(target=background_fn_revoke, args=(cluster_hash,), daemon=True).start()
     move_to_dispatch(cluster_hash, "Field Nation", pod_name, action_label="Field Nation Revoked", check_onfleet=True)
@@ -870,6 +876,14 @@ def normalize_state(st_str):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_sent_records_from_sheet():
+    """
+    Returns: (sent_dict, ghost_routes, archived_wos)
+
+    archived_wos was previously written to st.session_state from inside this cached
+    function. That meant on cache hits the function body was skipped and archived_wos
+    never refreshed even though the cached return looked fresh. Now returned in the
+    tuple so callers must explicitly assign it after each call.
+    """
     try:
         # Use safe extraction to prevent KeyError/AttributeError
         if not isinstance(IC_SHEET_URL, str):
@@ -906,12 +920,11 @@ def fetch_sent_records_from_sheet():
                             raw_ts = row.get('date created', '')
                             ts_display = ""
                             
-                            # 🌟 THE FIX: Filter out any routes created before April 20, 2026
+                            # Filter out routes older than the migration cutoff (see top-of-file constant).
                             if pd.notna(raw_ts) and str(raw_ts).strip():
                                 try:
                                     dt_obj = pd.to_datetime(raw_ts)
-                                    # If the date is older than April 20th, skip the row completely!
-                                    if dt_obj < pd.to_datetime("2026-04-20"):
+                                    if dt_obj < pd.to_datetime(MIGRATION_CUTOFF_DATE):
                                         continue 
                                     ts_display = dt_obj.strftime('%m/%d %I:%M %p')
                                 except:
@@ -1011,10 +1024,10 @@ def fetch_sent_records_from_sheet():
         # can move past suffixes that were "freed" when a route was archived.
         # We ONLY read JSON.archived_wo here — never tasks, never status, never anything that
         # could put archived rows back into clustering.
+        _archived_wos = set()
         try:
             _archive_df = pd.read_csv(base_url + str(ARCHIVE_GID))
             _archive_df.columns = [str(c).strip().lower() for c in _archive_df.columns]
-            _archived_wos = set()
             if 'json payload' in _archive_df.columns:
                 for _, _arow in _archive_df.iterrows():
                     try:
@@ -1024,21 +1037,30 @@ def fetch_sent_records_from_sheet():
                             _archived_wos.add(_orig)
                     except Exception:
                         pass
-            st.session_state['archived_wos'] = _archived_wos
         except Exception as _ae:
             _log_err("fetch_sent_records_from_sheet/archive_harvest", _ae)
-            st.session_state.setdefault('archived_wos', set())
 
-        return sent_dict, ghost_routes
+        return sent_dict, ghost_routes, _archived_wos
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
-        return {}, {}
+        return {}, {}, set()
 
 # 🌟 ADDED ttl=3600 so the cache clears every hour to grab fresh traffic data
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_gmaps(home, waypoints):
-    # departure_time=now forces Google to calculate live traffic
-    url = f"https://maps.googleapis.com/maps/api/directions/json?origin={home}&destination={home}&waypoints=optimize:true|{'|'.join(waypoints)}&departure_time=now&key={GOOGLE_MAPS_KEY}"
+    # Encode each waypoint so addresses containing '&', '=', '|' or other reserved
+    # characters don't corrupt the query string. Google's directions API accepts
+    # 'optimize:true|<wp1>|<wp2>...' as the value of the waypoints param — we URL-encode
+    # each piece individually then join with literal '|'.
+    from urllib.parse import quote
+    enc_wp = "optimize:true|" + "|".join(quote(w, safe='') for w in waypoints)
+    enc_home = quote(home, safe='')
+    url = (
+        "https://maps.googleapis.com/maps/api/directions/json"
+        f"?origin={enc_home}&destination={enc_home}"
+        f"&waypoints={enc_wp}"
+        f"&departure_time=now&key={GOOGLE_MAPS_KEY}"
+    )
     try:
         res = requests.get(url, timeout=15).json()
         if res['status'] == 'OK':
@@ -1119,9 +1141,8 @@ def process_digital_pool(master_bar=None):
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
-    if _page >= _MAX_PAGES:
-        _log_err("process_digital_pool", f"hit pagination cap ({_MAX_PAGES} pages)")
-        # Tick timer on every page fetch
+        # Tick timer on every page fetch (was previously nested under the cap-hit branch
+        # below, so it never updated during normal pagination — overlay sat frozen).
         _ov2 = st.session_state.get('_loading_overlay')
         _st2 = st.session_state.get('_loading_start')
         if _ov2 and _st2:
@@ -1137,6 +1158,9 @@ def process_digital_pool(master_bar=None):
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
 <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching tasks... {len(all_tasks_raw)} found</p>
 <div class='dcc-pill'>⏱ {_m2}:{_s2:02d}</div></div>""", unsafe_allow_html=True)
+    if _page >= _MAX_PAGES:
+        _log_err("process_digital_pool", f"hit pagination cap ({_MAX_PAGES} pages)")
+        st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages while fetching Onfleet tasks. Some tasks may be missing.")
         
     prog_bar.progress(0.4, text="🔍 Isolating Digital Service Calls...")
     # Tick digital overlay timer
@@ -1156,8 +1180,9 @@ def process_digital_pool(master_bar=None):
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
     DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
-    fresh_sent_db, _ = fetch_sent_records_from_sheet()
+    fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
     st.session_state.sent_db = fresh_sent_db
+    st.session_state['archived_wos'] = _archived_wos
 
     pool = []
     unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
@@ -1438,17 +1463,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             update_prog(min(len(all_tasks_raw)/500 * 0.4, 0.4), "📡 Fetching tasks...")
         if _page >= _MAX_PAGES:
             _log_err("process_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
+            st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
 
         unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
         all_tasks = list(unique_tasks_dict.values())
-        
-        # --- 🌟 1. DEFINE SPECIFIC DIGITAL TRIGGERS ---
-        # We search for these exact keywords within your data
-        DIGITAL_WHITELIST = ["ins/remove", "offline", "service"]
 
         # PERFORMANCE FIX: Fetch Google Sheets data once before the loop
-        fresh_sent_db, _ = fetch_sent_records_from_sheet()
+        fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
         st.session_state.sent_db = fresh_sent_db
+        st.session_state['archived_wos'] = _archived_wos
 
         pool = []
         for t in all_tasks:
@@ -2385,21 +2408,23 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
-                # Desktop: JS popup. Mobile (≤768px): CSS tap link shown instead.
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
                 # Desktop: fire popup via height=0 script (not blocked by browser)
                 st.components.v1.html(f"<script>if(window.screen.width>768){{window.open('{gmail_url}','_blank');}}</script>", height=0)
-                # Mobile: mailto link opens native mail app with pre-filled draft
+                # Show a visible link unconditionally — desktop users hit by popup blockers
+                # used to get nothing; mobile users use the mailto. Now both have a fallback.
                 _mailto = f"mailto:{ic.get('email','')}?subject={subject_line}&body={body_content}"
-                st.markdown(f"""<style>
-.gmail-tap-link {{ display:none; }}
-@media (max-width: 768px) {{ .gmail-tap-link {{ display:block !important; }} }}
-</style>
-<a class="gmail-tap-link" href="{_mailto}"
-style="display:block;text-align:center;background:#633094;color:white;
-padding:12px;border-radius:10px;font-weight:800;font-size:15px;
-text-decoration:none;margin:4px 0;">📧 Open Email Draft</a>""", unsafe_allow_html=True)
+                st.markdown(f"""<div style="display:flex;gap:8px;margin:6px 0;">
+<a href="{gmail_url}" target="_blank"
+style="flex:1;text-align:center;background:#633094;color:white;
+padding:12px;border-radius:10px;font-weight:800;font-size:14px;
+text-decoration:none;">📧 Open Gmail</a>
+<a href="{_mailto}"
+style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
+padding:12px;border-radius:10px;font-weight:800;font-size:14px;
+text-decoration:none;">📨 Default Mail</a>
+</div>""", unsafe_allow_html=True)
                 time.sleep(1)
                 _link_ph.empty()
                 st.rerun()
@@ -2514,6 +2539,9 @@ def smart_sync_pod(pod_name):
     teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
+    # Match the same membership logic as process_pod so CVS Kiosk Removal tasks pulled
+    # in via Smart Sync still get the is_removal flag (and the correct 10-stop limit).
+    cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
 
     # Fetch all current unassigned tasks
     time_window = int(time.time()*1000) - (45*24*3600*1000)
@@ -2532,11 +2560,13 @@ def smart_sync_pod(pod_name):
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
     if _page >= _MAX_PAGES:
         _log_err("smart_sync_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
+        st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages during Smart Sync. Some new tasks may be missing.")
 
     _bar.progress(0.4, text="🔎 Identifying new tasks...")
 
     # Filter to only NEW tasks for this pod
-    fresh_sent_db, _ = fetch_sent_records_from_sheet()
+    fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
+    st.session_state['archived_wos'] = _archived_wos
     new_pool = []
     unique_tasks = {t['id']: t for t in all_tasks_raw}
 
@@ -2604,6 +2634,14 @@ def smart_sync_pod(pod_name):
         t_status = fresh_sent_db.get(t['id'], {}).get('status', 'ready').lower() if t['id'] in fresh_sent_db else 'ready'
         t_wo = fresh_sent_db.get(t['id'], {}).get('wo', 'none') if t['id'] in fresh_sent_db else 'none'
 
+        # Match process_pod's logic: a task is "removal" only if it's on the CVS Kiosk
+        # Removal team AND its task type contains a removal keyword. Without this, CVS
+        # removal tasks pulled in via Smart Sync would cluster with regular installs and
+        # inherit the 20-stop limit instead of the 10-stop CVS limit.
+        _remov_keywords = ["kiosk removal", "remove kiosk"]
+        _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
+        _is_removal = _is_cvs_team and any(kw in f"{native_details} {custom_task_type}".lower() for kw in _remov_keywords)
+
         new_pool.append({
             "id": t['id'],
             "city": addr.get('city', 'Unknown'),
@@ -2615,6 +2653,8 @@ def smart_sync_pod(pod_name):
             "escalated": is_esc,
             "task_type": tt_val,
             "is_digital": is_digital_task,
+            "is_removal": _is_removal,
+            "boosted_standard": custom_boosted,
             "db_status": t_status,
             "wo": t_wo,
             "venue_name": venue_name,
@@ -2903,7 +2943,8 @@ def run_pod_tab(pod_name):
     cls = st.session_state.get(f"clusters_{pod_name}", [])
 
     # --- KEEPING THE CLEAN AUTO-SYNC LOGIC ---
-    sent_db, ghost_db = fetch_sent_records_from_sheet()
+    sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    st.session_state['archived_wos'] = _archived_wos
     # Merge real-time status updates from auto_sync_checker (overrides stale cache)
     _ss_db = st.session_state.get('sent_db', {})
     for _tid, _info in _ss_db.items():
@@ -2954,7 +2995,13 @@ def run_pod_tab(pod_name):
         local_contractor = st.session_state.get(f"contractor_{cluster_hash}", "Unknown")
         local_wo = st.session_state.get(f"wo_{cluster_hash}", local_contractor) # 🌟 Fetch WO
         is_reverted = st.session_state.get(f"reverted_{cluster_hash}", False)
-        
+
+        # NOTE: the next block mutates `c` (the cluster dict in session state) directly
+        # on every rerender — contractor_name / route_ts / wo / comp / due are refreshed
+        # from the sheet each pass. Once the user types into pay_key/rate_key those
+        # session-state-scoped values take over for input rendering, so the cluster-level
+        # `comp` overwrite here doesn't fight with user edits. Don't rely on these fields
+        # being immutable — they're effectively a sheet-driven cache.
         if sheet_match and not is_reverted:
             c['contractor_name'] = sheet_match.get('name', 'Unknown')
             c['route_ts'] = sheet_match.get('time', '') or local_ts
@@ -3576,7 +3623,7 @@ with tabs[0]:
         st.markdown("<div class='tab-action-btn'>", unsafe_allow_html=True)
         btn_label = "🚀 Sync Routes" if has_global_data else "🚀 Initialize All Pods"
         if st.button(btn_label, key="global_init_btn", use_container_width=True):
-            st.session_state.sent_db, st.session_state.ghost_db = fetch_sent_records_from_sheet()
+            st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'] = fetch_sent_records_from_sheet()
             st.session_state.trigger_pull = True
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -3593,7 +3640,8 @@ with tabs[0]:
     cols = st.columns(len(POD_CONFIGS))
     pod_keys = list(POD_CONFIGS.keys())
     global_map = folium.Map(location=[39.8283, -98.5795], zoom_start=4, tiles="cartodbpositron")
-    current_sent_db, ghost_db = fetch_sent_records_from_sheet()
+    current_sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    st.session_state['archived_wos'] = _archived_wos
 
     for i, pod in enumerate(pod_keys):
         colors = {
@@ -3719,7 +3767,7 @@ with tabs[0]:
         _render_global_card(_g_overlay, "Loading route database...", _g_start)
         _time.sleep(0.05)
         p_bar = bar_placeholder.progress(0, text="📋 Loading route database from Google Sheets...")
-        st.session_state.sent_db, st.session_state.ghost_db = fetch_sent_records_from_sheet()
+        st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'] = fetch_sent_records_from_sheet()
         _render_global_card(_g_overlay, f"Fetching tasks across {len(pod_keys)} pods...", _g_start)
         p_bar.progress(0.03, text=f"⏳ Fetching tasks across {len(pod_keys)} pods...")
         for idx, p in enumerate(pod_keys):
@@ -3751,7 +3799,8 @@ with tabs[6]:
     global_digital = st.session_state.get('global_digital_clusters', [])
     
     # 🌟 THE FIX: Omni-Ghost Sorter for Digital
-    sent_db, ghost_db = fetch_sent_records_from_sheet()
+    sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    st.session_state['archived_wos'] = _archived_wos
     digital_ghosts_list = ghost_db.get("Global_Digital", [])
     
     pod_ghosts, finalized_ghosts, sent_ghosts = [], [], []

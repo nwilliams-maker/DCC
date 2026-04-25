@@ -41,6 +41,14 @@ ACCEPTED_ROUTES_GID = "934075207"
 DECLINED_ROUTES_GID = "600909788"
 FIELD_NATION_GID = "1396320527"
 FINALIZED_ROUTES_GID = "1907347870"
+ARCHIVE_GID = "1841508981"
+
+# Lightweight stderr logger — replaces silent `except: pass` so failures are visible in Railway logs.
+def _log_err(context, exc):
+    try:
+        print(f"[{context}] {type(exc).__name__}: {exc}", flush=True)
+    except Exception:
+        pass
 
 # Terraboost Media Brand Palette
 TB_PURPLE = "#633094"
@@ -668,23 +676,30 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None):
         requests.post(GAS_WEB_APP_URL, json={
             "action": "archiveRoute",
             "cluster_hash": cluster_hash,
-            "taskIds": ",".join(task_ids) if task_ids else "",  # 🌟 Fallback for hash mismatch
+            "taskIds": ",".join(task_ids) if task_ids else "",  # Fallback for hash mismatch
             "payload": payload_json if payload_json else {}
         }, timeout=15)
-    except:
-        pass
+    except Exception as e:
+        _log_err("background_sheet_move/archive", e)
 
-    # 🌟 Onfleet scrub now runs here in the background — UI never waits for this
+    # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
+    # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
     if task_ids:
         try:
             auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+            scrub_payload = json.dumps({"worker": None, "metadata": []})
             for tid in task_ids:
                 try:
-                    requests.get(f"https://onfleet.com/api/v2/tasks/{tid}", headers=auth, timeout=5)
-                except:
-                    pass
-        except:
-            pass
+                    requests.put(
+                        f"https://onfleet.com/api/v2/tasks/{tid}",
+                        headers={**auth, "Content-Type": "application/json"},
+                        data=scrub_payload,
+                        timeout=10,
+                    )
+                except Exception as e:
+                    _log_err(f"background_sheet_move/scrub task={tid}", e)
+        except Exception as e:
+            _log_err("background_sheet_move/scrub-outer", e)
         
 # --- 2. INSTANT REVOKE LOGIC ---
 def background_fn_revoke(cluster_hash):
@@ -694,8 +709,8 @@ def background_fn_revoke(cluster_hash):
             "action": "removeFieldNation",
             "cluster_hash": cluster_hash
         }, timeout=15)
-    except:
-        pass
+    except Exception as e:
+        _log_err("background_fn_revoke", e)
 
 def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None):
     """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background."""
@@ -709,7 +724,8 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
                 task_ids = [t.strip() for t in raw.split(',') if t.strip()]
             elif isinstance(raw, list):
                 task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
-        except:
+        except Exception as e:
+            _log_err("move_to_dispatch/task_ids-parse", e)
             task_ids = None
 
     threading.Thread(
@@ -735,8 +751,8 @@ def background_sheet_finalize(cluster_hash):
     """Silent worker to finalize routes in Google Sheets without freezing the UI."""
     try:
         requests.post(GAS_WEB_APP_URL, json={"action": "finalizeRoute", "cluster_hash": cluster_hash}, timeout=15)
-    except:
-        pass
+    except Exception as e:
+        _log_err("background_sheet_finalize", e)
 
 @st.fragment(run_every=15)
 def auto_sync_checker(pod_name):
@@ -865,7 +881,7 @@ def fetch_sent_records_from_sheet():
             (FIELD_NATION_GID, "field_nation"),
             (DECLINED_ROUTES_GID, "declined"),
             (ACCEPTED_ROUTES_GID, "accepted"),
-            (FINALIZED_ROUTES_GID, "finalized"),
+            (ARCHIVE_GID, "archived"),  # Counted for WO suffix; never overrides an active task's status
         ]
 
         
@@ -906,15 +922,18 @@ def fetch_sent_records_from_sheet():
                             for tid in tids:
                                 tid = tid.strip()
                                 if tid:
+                                    # Skip archived overwrites: if a task already has an active status, keep it.
+                                    if status_label == "archived" and tid in sent_dict:
+                                        continue
                                     # 1. Enforce Contractor name for FN routes
                                     display_name = "Field Nation" if status_label == "field_nation" else c_name
                                     sent_dict[tid] = {
-                                        "name": display_name, 
+                                        "name": display_name,
                                         "status": status_label,
                                         "time": ts_display,
                                         "wo": p.get('wo', display_name),
-                                        "comp": p.get('comp', 0),     
-                                        "due": p.get('due', 'N/A')    
+                                        "comp": p.get('comp', 0),
+                                        "due": p.get('due', 'N/A')
                                     }
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
@@ -998,10 +1017,10 @@ def fetch_sent_records_from_sheet():
 # 🌟 ADDED ttl=3600 so the cache clears every hour to grab fresh traffic data
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_gmaps(home, waypoints):
-    # 🌟 ADDED departure_time=now to force Google to calculate Live Traffic
+    # departure_time=now forces Google to calculate live traffic
     url = f"https://maps.googleapis.com/maps/api/directions/json?origin={home}&destination={home}&waypoints=optimize:true|{'|'.join(waypoints)}&departure_time=now&key={GOOGLE_MAPS_KEY}"
     try:
-        res = requests.get(url).json()
+        res = requests.get(url, timeout=15).json()
         if res['status'] == 'OK':
             mi = sum(l['distance']['value'] for l in res['routes'][0]['legs']) * 0.000621371
             drive_hrs = sum(l['duration']['value'] for l in res['routes'][0]['legs']) / 3600
@@ -1009,25 +1028,30 @@ def get_gmaps(home, waypoints):
             total_hrs = drive_hrs + service_hrs
             waypoint_order = res['routes'][0].get('waypoint_order', list(range(len(waypoints))))
             return round(mi, 1), total_hrs, f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m", waypoint_order
-    except: pass
+    except Exception as e:
+        _log_err("get_gmaps", e)
     return 0, 0, "0h 0m", []
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_worker_task_counts():
-    """Fetch current assigned task count per worker from Onfleet, keyed by phone. Cached 2 min."""
+    """Fetch worker task counts via GAS proxy (which calls Onfleet). Cached 2 min.
+    Moving the Onfleet call to GAS centralizes the credential server-side."""
     try:
-        res = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
+        res = requests.get(
+            GAS_WEB_APP_URL,
+            params={"action": "getWorkerTaskCounts"},
+            timeout=15,
+        )
         if res.status_code != 200:
+            _log_err("fetch_worker_task_counts", f"HTTP {res.status_code}")
             return {}
-        workers = res.json()
-        counts = {}
-        for w in workers:
-            phone = re.sub(r'\D', '', str(w.get('phone', '')))[-10:]
-            task_count = len(w.get('tasks', []))
-            if phone:
-                counts[phone] = task_count
-        return counts
-    except:
+        data = res.json()
+        if not data.get("success"):
+            _log_err("fetch_worker_task_counts", data.get("error", "unknown"))
+            return {}
+        return data.get("counts", {}) or {}
+    except Exception as e:
+        _log_err("fetch_worker_task_counts", e)
         return {}
 
 @st.cache_data(ttl=600)
@@ -1035,7 +1059,9 @@ def load_ic_database(sheet_url):
     try:
         export_url = f"{sheet_url.split('/edit')[0]}/export?format=csv&gid=0"
         return pd.read_csv(export_url)
-    except: return None
+    except Exception as e:
+        _log_err("load_ic_database", e)
+        return None
 
 def process_digital_pool(master_bar=None):
     prog_bar = master_bar if master_bar else st.progress(0)
@@ -1056,22 +1082,27 @@ def process_digital_pool(master_bar=None):
     
     # 1. Fetch Onfleet (ONCE)
     APPROVED_TEAMS = ["a - escalation", "b - boosted campaigns", "b - local campaigns", "c - priority nationals", "cvs kiosk removal", "cvs kiosk removals", "d - digital routes", "n - national campaigns"]
-    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers).json()
+    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
 
     all_tasks_raw = []
     time_window = int(time.time()*1000) - (45*24*3600*1000)
     url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-    
-    while url:
-        response = requests.get(url, headers=headers)
+
+    _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+    _page = 0
+    while url and _page < _MAX_PAGES:
+        _page += 1
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 429:
             time.sleep(2); continue
         if response.status_code != 200: break
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
+    if _page >= _MAX_PAGES:
+        _log_err("process_digital_pool", f"hit pagination cap ({_MAX_PAGES} pages)")
         # Tick timer on every page fetch
         _ov2 = st.session_state.get('_loading_overlay')
         _st2 = st.session_state.get('_loading_start')
@@ -1356,41 +1387,39 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             "c - priority nationals", "cvs kiosk removal", "digital routes", "n - national campaigns"
         ]
 
-        teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers).json()
+        teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
         target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
         esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
         cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
 
         all_tasks_raw = []
-        # Change the 80 to 45 right here:
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={int(time.time()*1000)-(45*24*3600*1000)}"
-        
-        all_tasks_raw = []
-        # 🌟 FIX 1: Change 80 to 45 days
         time_window = int(time.time()*1000) - (45*24*3600*1000)
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-        
-        while url:
-            response = requests.get(url, headers=headers)
-            
+
+        _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+        _page = 0
+        while url and _page < _MAX_PAGES:
+            _page += 1
+            response = requests.get(url, headers=headers, timeout=15)
+
             # Handle Rate Limiting (Error 429) dynamically
             if response.status_code == 429:
                 st.toast("⚠️ Onfleet Throttling... waiting 2 seconds.")
                 time.sleep(2)
                 continue
-            
+
             if response.status_code != 200:
                 st.error(f"Onfleet API Error: {response.json()}")
                 break
-                
+
             res_json = response.json()
             tasks_page = res_json.get('tasks', [])
             all_tasks_raw.extend(tasks_page)
-            
-            # 🚀 OPTIMIZATION: Removed the time.sleep(0.5) here!
-            
+
             url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
             update_prog(min(len(all_tasks_raw)/500 * 0.4, 0.4), "📡 Fetching tasks...")
+        if _page >= _MAX_PAGES:
+            _log_err("process_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
 
         unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
         all_tasks = list(unique_tasks_dict.values())
@@ -2140,10 +2169,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             wo_val = cluster['wo']
         else:
             _base_wo = f"{ic.get('name', 'Unknown')}-{datetime.now().strftime('%m%d%Y')}"
-            # Count how many routes already sent to this IC today
+            # Count UNIQUE WOs (not task entries) already sent to this IC today —
+            # includes archived routes so suffix is monotonic across archive/recreate cycles.
             _local_sent_db = st.session_state.get('sent_db', {})
-            _existing = [info for info in _local_sent_db.values() if str(info.get('wo', '')).startswith(_base_wo)]
-            _wo_num = len(_existing) + 1
+            _existing_wos = {
+                str(info.get('wo', ''))
+                for info in _local_sent_db.values()
+                if str(info.get('wo', '')).startswith(_base_wo)
+            }
+            _wo_num = len(_existing_wos) + 1
             wo_val = f"{_base_wo}-{_wo_num}"
         # 🌟 NEW: Calculate route-level task breakdowns for the email preview
         route_task_counts = {}
@@ -2446,7 +2480,7 @@ def smart_sync_pod(pod_name):
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
         "c - priority nationals", "cvs kiosk removal", "digital routes", "n - national campaigns"
     ]
-    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers).json()
+    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
 
@@ -2454,14 +2488,19 @@ def smart_sync_pod(pod_name):
     time_window = int(time.time()*1000) - (45*24*3600*1000)
     url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
     all_tasks_raw = []
-    while url:
-        response = requests.get(url, headers=headers)
+    _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+    _page = 0
+    while url and _page < _MAX_PAGES:
+        _page += 1
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 429:
             time.sleep(2); continue
         if response.status_code != 200: break
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
+    if _page >= _MAX_PAGES:
+        _log_err("smart_sync_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
 
     _bar.progress(0.4, text="🔎 Identifying new tasks...")
 

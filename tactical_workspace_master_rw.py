@@ -34,14 +34,9 @@ if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
     st.stop()
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/Dispatch-Command-Center-rw/portal-dcc-rw.html"
-GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec"
+# GAS_WEB_APP_URL: deployment URL acts as auth — rotate via redeploy and update the Railway env var.
+GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec"
 IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
-SAVED_ROUTES_GID = "1477617688"
-ACCEPTED_ROUTES_GID = "934075207"
-DECLINED_ROUTES_GID = "600909788"
-FIELD_NATION_GID = "1396320527"
-FINALIZED_ROUTES_GID = "1907347870"
-ARCHIVE_GID = "1841508981"
 
 # Lightweight stderr logger — replaces silent `except: pass` so failures are visible in Railway logs.
 def _log_err(context, exc):
@@ -49,6 +44,12 @@ def _log_err(context, exc):
         print(f"[{context}] {type(exc).__name__}: {exc}", flush=True)
     except Exception:
         pass
+SAVED_ROUTES_GID = "1477617688"
+ACCEPTED_ROUTES_GID = "934075207"
+DECLINED_ROUTES_GID = "600909788"
+FIELD_NATION_GID = "1396320527"
+FINALIZED_ROUTES_GID = "1907347870"
+ARCHIVE_GID = "1841508981"  # Read-only side-channel: only used to harvest archived_wo for the WO counter; never used for clustering.
 
 # Terraboost Media Brand Palette
 TB_PURPLE = "#633094"
@@ -117,20 +118,6 @@ if logo_base64:
     """, unsafe_allow_html=True)
 else:
     st.sidebar.error("Logo file not found! Check the file name.")
-
-# --- HEADER STYLING: light brand BG instead of Streamlit's default dark bar ---
-st.markdown("""
-<style>
-header[data-testid="stHeader"] {
-    background-color: #f1f5f9 !important;
-    box-shadow: none !important;
-    border-bottom: none !important;
-}
-[data-testid="stDecoration"] {
-    display: none !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
 # --- UI STYLING ---
 st.components.v1.html("""
@@ -895,7 +882,7 @@ def fetch_sent_records_from_sheet():
             (FIELD_NATION_GID, "field_nation"),
             (DECLINED_ROUTES_GID, "declined"),
             (ACCEPTED_ROUTES_GID, "accepted"),
-            (ARCHIVE_GID, "archived"),  # Counted for WO suffix; never overrides an active task's status
+            (FINALIZED_ROUTES_GID, "finalized"),
         ]
 
         
@@ -936,18 +923,15 @@ def fetch_sent_records_from_sheet():
                             for tid in tids:
                                 tid = tid.strip()
                                 if tid:
-                                    # Skip archived overwrites: if a task already has an active status, keep it.
-                                    if status_label == "archived" and tid in sent_dict:
-                                        continue
                                     # 1. Enforce Contractor name for FN routes
                                     display_name = "Field Nation" if status_label == "field_nation" else c_name
                                     sent_dict[tid] = {
-                                        "name": display_name,
+                                        "name": display_name, 
                                         "status": status_label,
                                         "time": ts_display,
                                         "wo": p.get('wo', display_name),
-                                        "comp": p.get('comp', 0),
-                                        "due": p.get('due', 'N/A')
+                                        "comp": p.get('comp', 0),     
+                                        "due": p.get('due', 'N/A')    
                                     }
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
@@ -1023,6 +1007,28 @@ def fetch_sent_records_from_sheet():
                         except Exception: continue
             except Exception: continue
             
+        # 🌟 ARCHIVE SIDE-CHANNEL: harvest WOs of archived routes so the WO counter
+        # can move past suffixes that were "freed" when a route was archived.
+        # We ONLY read JSON.archived_wo here — never tasks, never status, never anything that
+        # could put archived rows back into clustering.
+        try:
+            _archive_df = pd.read_csv(base_url + str(ARCHIVE_GID))
+            _archive_df.columns = [str(c).strip().lower() for c in _archive_df.columns]
+            _archived_wos = set()
+            if 'json payload' in _archive_df.columns:
+                for _, _arow in _archive_df.iterrows():
+                    try:
+                        _ap = json.loads(_arow['json payload'])
+                        _orig = str(_ap.get('archived_wo', '') or '').strip()
+                        if _orig and _orig.lower() != 'archived':
+                            _archived_wos.add(_orig)
+                    except Exception:
+                        pass
+            st.session_state['archived_wos'] = _archived_wos
+        except Exception as _ae:
+            _log_err("fetch_sent_records_from_sheet/archive_harvest", _ae)
+            st.session_state.setdefault('archived_wos', set())
+
         return sent_dict, ghost_routes
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
@@ -1048,22 +1054,20 @@ def get_gmaps(home, waypoints):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_worker_task_counts():
-    """Fetch worker task counts via GAS proxy (which calls Onfleet). Cached 2 min.
-    Moving the Onfleet call to GAS centralizes the credential server-side."""
+    """Fetch current assigned task count per worker from Onfleet, keyed by phone. Cached 2 min."""
     try:
-        res = requests.get(
-            GAS_WEB_APP_URL,
-            params={"action": "getWorkerTaskCounts"},
-            timeout=15,
-        )
+        res = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
         if res.status_code != 200:
             _log_err("fetch_worker_task_counts", f"HTTP {res.status_code}")
             return {}
-        data = res.json()
-        if not data.get("success"):
-            _log_err("fetch_worker_task_counts", data.get("error", "unknown"))
-            return {}
-        return data.get("counts", {}) or {}
+        workers = res.json()
+        counts = {}
+        for w in workers:
+            phone = re.sub(r'\D', '', str(w.get('phone', '')))[-10:]
+            task_count = len(w.get('tasks', []))
+            if phone:
+                counts[phone] = task_count
+        return counts
     except Exception as e:
         _log_err("fetch_worker_task_counts", e)
         return {}
@@ -2183,15 +2187,28 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             wo_val = cluster['wo']
         else:
             _base_wo = f"{ic.get('name', 'Unknown')}-{datetime.now().strftime('%m%d%Y')}"
-            # Count UNIQUE WOs (not task entries) already sent to this IC today —
-            # includes archived routes so suffix is monotonic across archive/recreate cycles.
+            # Compute next suffix from the max of (active sent WOs ∪ archived WOs) for this IC today.
+            # Archived suffixes are "consumed" — we never recycle them, so a route created after an
+            # archive will read -2 (or -N+1) instead of clobbering the archived -1.
             _local_sent_db = st.session_state.get('sent_db', {})
-            _existing_wos = {
-                str(info.get('wo', ''))
-                for info in _local_sent_db.values()
-                if str(info.get('wo', '')).startswith(_base_wo)
-            }
-            _wo_num = len(_existing_wos) + 1
+            _archived_wos_set = st.session_state.get('archived_wos', set()) or set()
+            _candidate_wos = set()
+            for _info in _local_sent_db.values():
+                _w = str(_info.get('wo', '') or '')
+                if _w.startswith(_base_wo):
+                    _candidate_wos.add(_w)
+            for _w in _archived_wos_set:
+                if str(_w).startswith(_base_wo):
+                    _candidate_wos.add(str(_w))
+            _max_suffix = 0
+            for _w in _candidate_wos:
+                try:
+                    _suffix = int(str(_w).rsplit('-', 1)[-1])
+                    if _suffix > _max_suffix:
+                        _max_suffix = _suffix
+                except Exception:
+                    pass
+            _wo_num = _max_suffix + 1
             wo_val = f"{_base_wo}-{_wo_num}"
         # 🌟 NEW: Calculate route-level task breakdowns for the email preview
         route_task_counts = {}

@@ -118,6 +118,20 @@ if logo_base64:
 else:
     st.sidebar.error("Logo file not found! Check the file name.")
 
+# --- HEADER STYLING: light brand BG instead of Streamlit's default dark bar ---
+st.markdown("""
+<style>
+header[data-testid="stHeader"] {
+    background-color: #f1f5f9 !important;
+    box-shadow: none !important;
+    border-bottom: none !important;
+}
+[data-testid="stDecoration"] {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- UI STYLING ---
 st.components.v1.html("""
 <script>

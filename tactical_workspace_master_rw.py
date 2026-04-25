@@ -33,9 +33,9 @@ if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
     st.info("I couldn't find your keys in Railway's 'Variables' tab. Please double-check that you added ONFLEET_KEY and GOOGLE_MAPS_KEY there.")
     st.stop()
 
-PORTAL_BASE_URL = "https://nwilliams-maker.github.io/Dispatch-Command-Center-rw/portal-dcc-rw.html"
-GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec"
-IC_SHEET_URL = "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
+PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/Dispatch-Command-Center-rw/portal-dcc-rw.html"
+GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec"
+IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
 SAVED_ROUTES_GID = "1477617688"
 ACCEPTED_ROUTES_GID = "934075207"
 DECLINED_ROUTES_GID = "600909788"

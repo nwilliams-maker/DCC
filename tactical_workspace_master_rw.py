@@ -1180,8 +1180,9 @@ def process_digital_pool(master_bar=None):
     time_window = int(time.time()*1000) - (45*24*3600*1000)
     url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
 
-    _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+    _MAX_PAGES = 200  # was 50; same loop-guard pattern as process_pod
     _page = 0
+    _seen_last_ids = set()
     while url and _page < _MAX_PAGES:
         _page += 1
         response = requests.get(url, headers=headers, timeout=15)
@@ -1190,7 +1191,13 @@ def process_digital_pool(master_bar=None):
         if response.status_code != 200: break
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
+        _next_id = res_json.get('lastId')
+        if _next_id and _next_id in _seen_last_ids:
+            _log_err("process_digital_pool", f"lastId loop detected at {_next_id} (page {_page})")
+            break
+        if _next_id:
+            _seen_last_ids.add(_next_id)
+        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
         # Tick timer on every page fetch (was previously nested under the cap-hit branch
         # below, so it never updated during normal pagination — overlay sat frozen).
         _ov2 = st.session_state.get('_loading_overlay')
@@ -1489,8 +1496,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         time_window = int(time.time()*1000) - (45*24*3600*1000)
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
 
-        _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+        # Cap pagination so a misbehaving lastId can't infinite-loop. 200 pages × 64
+        # tasks/page = 12,800 tasks of headroom — well above any real pod workload.
+        # The loop also breaks early if lastId stops advancing (true infinite-loop guard).
+        _MAX_PAGES = 200
         _page = 0
+        _seen_last_ids = set()
         while url and _page < _MAX_PAGES:
             _page += 1
             response = requests.get(url, headers=headers, timeout=15)
@@ -1509,7 +1520,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             tasks_page = res_json.get('tasks', [])
             all_tasks_raw.extend(tasks_page)
 
-            url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
+            _next_id = res_json.get('lastId')
+            if _next_id and _next_id in _seen_last_ids:
+                # lastId not advancing — Onfleet returned a duplicate cursor. Bail out
+                # so we don't waste pages refetching the same data.
+                _log_err("process_pod", f"lastId loop detected at {_next_id} (page {_page})")
+                break
+            if _next_id:
+                _seen_last_ids.add(_next_id)
+            url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
             update_prog(min(len(all_tasks_raw)/500 * 0.4, 0.4), "📡 Fetching tasks...")
         if _page >= _MAX_PAGES:
             _log_err("process_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
@@ -2151,18 +2170,22 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # Build expandable stop rows with task pills in summary + campaign in expansion
         _dispatch_rows = []
         for addr, metrics in stop_metrics.items():
-            # Icons only for address row summary
+            # Icons only for address row summary (kiosk install gets its own green pill below
+            # to match the right column's make_venue_details styling — was previously a plain
+            # "🛠️ 1" inline icon with no color treatment).
             icon_parts = []
             if metrics['n_ad'] > 0: icon_parts.append("🆕")
             if metrics['c_ad'] > 0: icon_parts.append("🔄")
             if metrics['d_ad'] > 0: icon_parts.append("⚪")
-            if metrics['inst'] > 0: icon_parts.append(f"🛠️ {metrics['inst']}")
             if metrics['remov'] > 0: icon_parts.append(f"🗑️ {metrics['remov']}")
             if metrics['custom']: icon_parts.append("📋")
             if metrics['digi_off'] > 0: icon_parts.append("📵")
-            if metrics['digi_ins'] > 0: icon_parts.append("🔧")
             if metrics['digi_srv'] > 0: icon_parts.append("⚙️")
             pill_str = " ".join(icon_parts)
+            # Green Kiosk pill — matches right column's make_venue_details treatment.
+            k_tag_html = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {metrics['inst']} Kiosk</span>" if metrics['inst'] > 0 else ""
+            # Digital Ins/Rem pill in matching teal — same visual rhythm as the kiosk pill.
+            digi_ins_html = f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {metrics['digi_ins']} Ins/Rem</span>" if metrics['digi_ins'] > 0 else ""
             # Full icon+name for expansion
             expand_parts = []
             if metrics['n_ad'] > 0: expand_parts.append(f"🆕 {metrics['n_ad']} New Ad")
@@ -2213,7 +2236,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 f"<details class='fn-loc-row'>"
                 f"<summary class='fn-loc-summary'>"
                 f"<span class='fn-chevron'>›</span>"
-                f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{display_addr}</span>{esc_inline} &nbsp;{task_pill}{_icon_html}"
+                f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{display_addr}</span>{k_tag_html}{digi_ins_html}{esc_inline} &nbsp;{task_pill}{_icon_html}"
                 f"</summary>{camp_block}</details>"
             )
 
@@ -2639,8 +2662,9 @@ def smart_sync_pod(pod_name):
     time_window = int(time.time()*1000) - (45*24*3600*1000)
     url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
     all_tasks_raw = []
-    _MAX_PAGES = 50  # cap pagination so a misbehaving lastId can't infinite-loop
+    _MAX_PAGES = 200  # was 50; same loop-guard pattern as process_pod
     _page = 0
+    _seen_last_ids = set()
     while url and _page < _MAX_PAGES:
         _page += 1
         response = requests.get(url, headers=headers, timeout=15)
@@ -2649,7 +2673,13 @@ def smart_sync_pod(pod_name):
         if response.status_code != 200: break
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={res_json['lastId']}" if res_json.get('lastId') else None
+        _next_id = res_json.get('lastId')
+        if _next_id and _next_id in _seen_last_ids:
+            _log_err("smart_sync_pod", f"lastId loop detected at {_next_id} (page {_page})")
+            break
+        if _next_id:
+            _seen_last_ids.add(_next_id)
+        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
     if _page >= _MAX_PAGES:
         _log_err("smart_sync_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
         st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages during Smart Sync. Some new tasks may be missing.")
@@ -2833,13 +2863,25 @@ def make_venue_details(data):
         k_tag = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {k_cnt} Kiosk</span>" if k_cnt > 0 else ""
         esc_tag = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_cnt}</span>" if esc_cnt > 0 else ""
         venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>" if venue else ""
-        # Build campaign expansion
+        # Build campaign expansion (matches render_dispatch: client name + task-type badge + esc/boost markers)
         camp_rows = []
         seen = set()
         for t in loc_tasks:
             cmp = t.get('client_company','')
             if not cmp: continue
-            badges = ""
+            # Task type badge — same logic as render_dispatch so both columns show the same thing
+            tt = str(t.get('task_type','')).lower()
+            if t.get('is_digital'):
+                if 'offline' in tt: tt_badge = "📵 Offline"
+                elif 'ins/re' in tt: tt_badge = "🔧 Ins/Rem"
+                else: tt_badge = "⚙️ Service"
+            elif 'install' in tt: tt_badge = "🛠️ Install"
+            elif any(x in tt for x in ['kiosk removal','remove kiosk']): tt_badge = "🗑️ Removal"
+            elif any(x in tt for x in ['continuity','photo retake','swap']): tt_badge = "🔄 Continuity"
+            elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
+            elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
+            else: tt_badge = f"📋 {tt.title()}"
+            badges = f" <span style='font-size:9px;color:#94a3b8;'>{tt_badge}</span>"
             if t.get('escalated'): badges += " ❗"
             bs = str(t.get('boosted_standard','')).lower()
             if 'local plus' in bs: badges += " ⭐"

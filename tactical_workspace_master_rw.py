@@ -179,6 +179,22 @@ div[data-baseweb="select"] div {{
     font-weight: 600 !important;
 }}
 
+/* Override the global white-input rule for the three widgets in render_dispatch:
+   Contractor selectbox, Stop Removal multiselect, Email Content Preview textarea.
+   Default white made them look like detached cards floating above the page; matching
+   page bg lets them blend into the route-card surface. Date/number inputs unaffected. */
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+div[data-testid="stTextArea"] textarea {{
+    background-color: {TB_APP_BG} !important;
+}}
+/* Disabled textarea (when route is locked) gets the same blend so it doesn't shift color */
+div[data-testid="stTextArea"] textarea:disabled {{
+    background-color: {TB_APP_BG} !important;
+    color: #475569 !important;
+    -webkit-text-fill-color: #475569 !important;
+}}
+
 /* Number Input — match date input outline style */
 div[data-testid="stNumberInputContainer"] {{
     border-radius: 8px !important;
@@ -555,7 +571,7 @@ div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab-border"
 /* 1. Ready (Green) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) {{
     background-color: #dcfce7 !important;
-    border: 2px solid #166534 !important;
+    border: 1px solid #166534 !important;
 }}
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) p {{
     color: #166534 !important; 
@@ -564,7 +580,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 2. Flagged (Red) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) {{
     background-color: #fee2e2 !important;
-    border: 2px solid #991b1b !important;
+    border: 1px solid #991b1b !important;
 }}
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) p {{
     color: #991b1b !important; 
@@ -573,7 +589,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 3. Field Nation (Light Yellow BG / Dark Yellow Text) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) {{
     background-color: #fef9c3 !important;
-    border: 2px solid #854d0e !important;
+    border: 1px solid #854d0e !important;
     border-radius: 30px !important;
     margin: 0 5px !important;
 }}
@@ -585,7 +601,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 4. Digital (Teal - Left Column) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) {{
     background-color: #ccfbf1 !important;
-    border: 2px solid #0f766e !important;
+    border: 1px solid #0f766e !important;
     border-radius: 30px !important;
     margin: 0 5px !important;
 }}
@@ -614,7 +630,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 1. Sent (Purple/Blue) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) {{
     background-color: #f3e8ff !important;
-    border: 2px solid #633094 !important;
+    border: 1px solid #633094 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) p {{
@@ -624,7 +640,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 2. Accepted (Green) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) {{
     background-color: #dcfce7 !important;
-    border: 2px solid #166534 !important;
+    border: 1px solid #166534 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) p {{
@@ -634,7 +650,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 3. Declined (Red) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) {{
     background-color: #fee2e2 !important;
-    border: 2px solid #991b1b !important;
+    border: 1px solid #991b1b !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) p {{
@@ -644,7 +660,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 4. Finalized (Orange) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) {{
     background-color: #fffaf5 !important;
-    border: 2px solid #f97316 !important;
+    border: 1px solid #f97316 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) p {{

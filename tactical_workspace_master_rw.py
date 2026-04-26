@@ -206,6 +206,22 @@ div[data-testid="stNumberInputContainer"] svg {{
     background-color: transparent !important;
 }}
 
+/* Email Content Preview (st.text_area) — visible border around the preview */
+div[data-testid="stTextArea"] textarea,
+div[data-testid="stTextAreaRootElement"] textarea,
+div[data-baseweb="textarea"] {{
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important;
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04) !important;
+}}
+
+div[data-testid="stTextArea"] textarea:focus,
+div[data-baseweb="textarea"]:focus-within {{
+    border-color: #633094 !important;
+    box-shadow: 0 0 0 2px rgba(99,48,148,0.15) !important;
+}}
+
 /* GLOBAL TABS CONTAINER - Clean & Floating with Bottom Line */
 .stTabs [data-baseweb="tab-list"] {{ 
     justify-content: center; 

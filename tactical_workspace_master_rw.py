@@ -1266,6 +1266,20 @@ def process_digital_pool(master_bar=None):
     unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
     
     for t in unique_tasks_dict.values():
+        # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
+        # "Start at driver address" / "End at driver's address" tasks for native
+        # Route Plans, bound to a contractor's home address. Real kiosk tasks
+        # always carry a `state` custom field; the pseudo-tasks don't. Require it
+        # so the pseudo-tasks never land in the dispatchable pool.
+        _has_state_cf = any(
+            (str(_f.get('name', '')).strip().lower() == 'state'
+             or str(_f.get('key', '')).strip().lower() == 'state')
+            and str(_f.get('value', '')).strip()
+            for _f in (t.get('customFields') or [])
+        )
+        if not _has_state_cf:
+            continue
+
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
         # 🛡️ DOUBLE-ROUTING GUARD: skip tasks already assigned to a worker.
@@ -1569,6 +1583,20 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         pool = []
         _skipped_assigned = 0
         for t in all_tasks:
+            # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
+            # "Start at driver address" / "End at driver's address" tasks for native
+            # Route Plans, bound to a contractor's home address. Real kiosk tasks
+            # always carry a `state` custom field; the pseudo-tasks don't. Require it
+            # so the pseudo-tasks never land in the dispatchable pool.
+            _has_state_cf = any(
+                (str(_f.get('name', '')).strip().lower() == 'state'
+                 or str(_f.get('key', '')).strip().lower() == 'state')
+                and str(_f.get('value', '')).strip()
+                for _f in (t.get('customFields') or [])
+            )
+            if not _has_state_cf:
+                continue
+
             container = t.get('container', {})
             c_type = str(container.get('type', '')).upper()
 
@@ -2732,6 +2760,20 @@ def smart_sync_pod(pod_name):
 
     for t in unique_tasks.values():
         if str(t['id']).strip() in known_ids:
+            continue
+
+        # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
+        # "Start at driver address" / "End at driver's address" tasks for native
+        # Route Plans, bound to a contractor's home address. Real kiosk tasks
+        # always carry a `state` custom field; the pseudo-tasks don't. Require it
+        # so the pseudo-tasks never land in the dispatchable pool.
+        _has_state_cf = any(
+            (str(_f.get('name', '')).strip().lower() == 'state'
+             or str(_f.get('key', '')).strip().lower() == 'state')
+            and str(_f.get('value', '')).strip()
+            for _f in (t.get('customFields') or [])
+        )
+        if not _has_state_cf:
             continue
 
         container = t.get('container', {})

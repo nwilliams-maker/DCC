@@ -103,7 +103,7 @@
     </div>
 
     <script>
-        const webAppUrl = "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec";
+        const webAppUrl = "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec";
         const formspreeUrl = "https://formspree.io/f/meerlqll";
         const PRIMARY_FORMSPREE_EMAIL = "nwilliams@terraboost.biz";
 
@@ -224,19 +224,25 @@
                 // --- TRUE DYNAMIC SUCCESS WINDOW ---
                 const successContainer = document.getElementById('successView');
                 if (decision === 'Accepted') {
-                    if (result.onfleetSuccess) {
+                    // Bug fix: when GAS returned an error response (e.g. "Link Expired") the
+                    // result object has `error` but not `onfleetMsg`/`onfleetSuccess`, so the
+                    // old code rendered the literal text "undefined". Fall through all the
+                    // possible error fields and provide a final fallback message.
+                    const onfleetOK = result && result.onfleetSuccess === true;
+                    const errMsg = (result && (result.onfleetMsg || result.error || result.routeMsg)) || "Unknown error — please screenshot this and contact dispatch.";
+                    if (onfleetOK) {
                         successContainer.innerHTML = `
                             <div class="text-7xl mb-6">✅</div>
                             <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Tasks Assigned!</h2>
                             <p class="text-slate-500 mt-4 font-medium text-lg">The route has been successfully pushed to your Onfleet app.<br>You may now close this window.</p>
                         `;
                     } else {
-                        // ONFLEET FAILED UI
+                        // ONFLEET FAILED UI — show real error so dispatch can diagnose
                         successContainer.innerHTML = `
                             <div class="text-7xl mb-6">⚠️</div>
                             <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Route Accepted, BUT...</h2>
                             <p class="text-red-500 mt-4 font-bold text-lg">We couldn't automatically push the tasks to your Onfleet app.</p>
-                            <p class="text-slate-500 mt-2 font-medium text-sm">Error: ${result.onfleetMsg}</p>
+                            <p class="text-slate-700 mt-2 font-medium text-sm" style="max-width:600px;margin-left:auto;margin-right:auto;word-break:break-word;">${errMsg}</p>
                             <p class="text-slate-500 mt-6 font-medium text-sm">Our dispatch team has been notified and will manually assign your tasks shortly.</p>
                         `;
                     }

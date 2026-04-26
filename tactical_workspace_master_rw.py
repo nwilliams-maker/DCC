@@ -3076,6 +3076,29 @@ def run_pod_tab(pod_name):
             if c.get('status') == 'Ready': ready.append(c) #
             else: review.append(c) #
 
+    # --- 🐛 DEBUG: bucket routing visibility (collapsed by default, no behavior change) ---
+    # Shows what each cluster's bucket decision was based on. Drop the URL-param check or
+    # remove the whole block once we've confirmed auto-move works.
+    if st.query_params.get("debug") == "1":
+        with st.expander(f"🐛 Bucket debug — {pod_name}", expanded=False):
+            _fp_now = st.session_state.get(f"_auto_sync_fp_{pod_name}", "(unset)")
+            st.caption(f"Last fingerprint: `{_fp_now[:12]}...`  |  sent_db rows: {len(sent_db)}  |  pod_clusters: {len(cls)}")
+            _bucket_map = [("ready", ready), ("review", review), ("sent", sent), ("accepted", accepted),
+                           ("declined", declined), ("finalized", finalized), ("field_nation", field_nation),
+                           ("digital_ready", digital_ready)]
+            for _bname, _blist in _bucket_map:
+                if not _blist:
+                    continue
+                st.markdown(f"**{_bname}** ({len(_blist)})")
+                for _bc in _blist:
+                    _btids = [str(_t['id']).strip() for _t in _bc.get('data', [])]
+                    _bhash = hashlib.md5("".join(sorted(_btids)).encode()).hexdigest()[:8]
+                    _bsm = sent_db.get(next((tid for tid in _btids if tid in sent_db), None))
+                    _brs = st.session_state.get(f"route_state_{hashlib.md5(''.join(sorted(_btids)).encode()).hexdigest()}")
+                    _brev = st.session_state.get(f"reverted_{hashlib.md5(''.join(sorted(_btids)).encode()).hexdigest()}", False)
+                    _bsm_status = _bsm.get('status') if _bsm else "(no sheet match)"
+                    st.text(f"  {_bhash} | {_bc.get('contractor_name','?'):20} | sheet={_bsm_status:10} | route_state={_brs} | reverted={_brev}")
+
     # --- 📊 CATEGORIZED MATH ---
     # Routes
     ready_count = len(ready)

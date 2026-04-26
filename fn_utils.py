@@ -4,6 +4,7 @@ All Field Nation logic lives here: manager mapping, upload generation, backgroun
 """
 
 import io
+import sys
 import threading
 import requests
 from datetime import datetime
@@ -52,8 +53,8 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
     def _worker():
         try:
             requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload}, timeout=15)
-        except Exception:
-            pass
+                except Exception as e:
+            print(f"[fn_utils.save_fn_to_sheet] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
             # Clear reverted flag once sheet write is done (success or fail)
             if session_state is not None and cluster_hash:

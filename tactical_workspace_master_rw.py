@@ -1247,6 +1247,9 @@ def process_digital_pool(master_bar=None):
     for t in unique_tasks_dict.values():
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
+        # 🛡️ DOUBLE-ROUTING GUARD: skip tasks already assigned to a worker.
+        if c_type == 'WORKER' or t.get('worker'):
+            continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids: continue
 
         addr = t.get('destination', {}).get('address', {})
@@ -1543,10 +1546,20 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state['archived_wos'] = _archived_wos
 
         pool = []
+        _skipped_assigned = 0
         for t in all_tasks:
             container = t.get('container', {})
             c_type = str(container.get('type', '')).upper()
-            
+
+            # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
+            # already-assigned tasks through (container=WORKER or worker field set on task).
+            # Skip them explicitly so the supercard count + cluster pool only reflects
+            # tasks actually available to dispatch. Without this, dispatchers can see
+            # phantom availability and accidentally re-dispatch a task to a second IC.
+            if c_type == 'WORKER' or t.get('worker'):
+                _skipped_assigned += 1
+                continue
+
             if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
                 continue
 
@@ -1822,6 +1835,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             pool = rem
 
         st.session_state[f"clusters_{pod_name}"] = clusters
+        if _skipped_assigned > 0:
+            _log_err(f"process_pod/{pod_name}", f"skipped {_skipped_assigned} already-assigned tasks (state=0 leak)")
         if not master_bar: 
             prog_bar.empty()
 
@@ -2698,6 +2713,11 @@ def smart_sync_pod(pod_name):
 
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
+        # 🛡️ DOUBLE-ROUTING GUARD: skip already-assigned tasks (Onfleet's state=0 filter
+        # sometimes leaks WORKER-container tasks). Prevents Smart Sync from pulling in
+        # tasks that another dispatcher (or auto-assign) already gave to a worker.
+        if c_type == 'WORKER' or t.get('worker'):
+            continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids:
             continue
 

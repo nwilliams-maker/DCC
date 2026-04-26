@@ -2164,7 +2164,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         with _inp_b:
             st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
-            st.date_input("Deadline", datetime.now().date()+timedelta(# Lightweight stderr logger), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
+            st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
         final_pay = st.session_state.get(pay_key, 0.0)

@@ -179,20 +179,25 @@ div[data-baseweb="select"] div {{
     font-weight: 600 !important;
 }}
 
-/* Override the global white-input rule for the three widgets in render_dispatch:
-   Contractor selectbox, Stop Removal multiselect, Email Content Preview textarea.
-   Default white made them look like detached cards floating above the page; matching
-   page bg lets them blend into the route-card surface. Date/number inputs unaffected. */
-div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
-div[data-testid="stTextArea"] textarea {{
+/* Color the OPEN dropdown popup (selectbox + multiselect) with the page background.
+   Closed field stays white per the global white-input rule above — only the menu
+   that appears on click picks up the page color so it visually flows from the page
+   instead of looking like a floating white card. */
+div[data-baseweb="popover"] [role="listbox"],
+div[data-baseweb="menu"],
+ul[role="listbox"] {{
     background-color: {TB_APP_BG} !important;
 }}
-/* Disabled textarea (when route is locked) gets the same blend so it doesn't shift color */
-div[data-testid="stTextArea"] textarea:disabled {{
-    background-color: {TB_APP_BG} !important;
-    color: #475569 !important;
-    -webkit-text-fill-color: #475569 !important;
+/* Individual options inside the popup — keep them transparent so the popup bg shows through.
+   Hover/highlight state gets a subtle white tint to indicate selection. */
+div[data-baseweb="popover"] [role="option"],
+ul[role="listbox"] li {{
+    background-color: transparent !important;
+}}
+div[data-baseweb="popover"] [role="option"]:hover,
+ul[role="listbox"] li:hover,
+div[data-baseweb="popover"] [role="option"][aria-selected="true"] {{
+    background-color: rgba(255,255,255,0.6) !important;
 }}
 
 /* Number Input — match date input outline style */

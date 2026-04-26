@@ -38,6 +38,11 @@ PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.
 GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec"
 IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
 
+# --- TUNABLES (hoisted from inline magic numbers) ---
+DEFAULT_DUE_DAYS = 14   # default deadline offset from today when dispatcher hasn't picked one
+RATE_CRITICAL = 24.00   # $/stop — red status
+RATE_WARNING = 21.00    # $/stop — orange status
+
 # Lightweight stderr logger — replaces silent `except: pass` so failures are visible in Railway logs.
 def _log_err(context, exc):
     try:
@@ -2159,14 +2164,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         with _inp_b:
             st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
-            st.date_input("Deadline", datetime.now().date()+timedelta(14), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
+            st.date_input("Deadline", datetime.now().date()+timedelta(# Lightweight stderr logger), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
         final_pay = st.session_state.get(pay_key, 0.0)
         final_rate = st.session_state.get(rate_key, 0.0)
 
-        if final_rate >= 24.00: status_color = "#ef4444"
-        elif final_rate >= 21.00: status_color = "#f97316"
+        if final_rate >= RATE_CRITICAL: status_color = "#ef4444"
+        elif final_rate >= RATE_WARNING: status_color = "#f97316"
         else: status_color = TB_GREEN
 
         # 🌟 BUGFIX: when get_gmaps returns 0 / "0h 0m" (network/API failure or empty IC
@@ -2339,7 +2344,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 if str(t.get('task_type','')).lower() in ["kiosk removal", "remove kiosk"] and "🗑️" not in loc_pills[addr]: 
                     loc_pills[addr] += "🗑️"
 
-        due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(14))
+        due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
         is_already_sent = is_sent or is_declined or st.session_state.get(f"route_state_{cluster_hash}") == "email_sent"
     
         prev_ic_name = cluster.get('contractor_name', 'Unknown')
@@ -2584,6 +2589,7 @@ text-decoration:none;">📨 Default Mail</a>
         if fn_checked and not is_fn:
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
             home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
+            _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
             fn_payload = {
                 "cluster_hash": cluster_hash,
                 "icn": "Field Nation",
@@ -2591,6 +2597,7 @@ text-decoration:none;">📨 Default Mail</a>
                 "state": cluster.get('state', 'Unknown'),
                 "taskIds": ",".join(task_ids),
                 "wo": f"FN-{datetime.now().strftime('%m%d%Y')}",
+                "due": str(_fn_due),
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),
                 "kCnt": cluster.get('inst_count', 0),
@@ -2619,7 +2626,7 @@ text-decoration:none;">📨 Default Mail</a>
         st.info("💡 Route is currently tracked in the Field Nation tab.")
 
         # 🌟 FIELD NATION BUTTONS
-        _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(14))
+        _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(DEFAULT_DUE_DAYS))
         _pay = st.session_state.get(pay_key, 0.0)
         fn_buf, _ = generate_fn_upload(stop_metrics, cluster, _due, _pay, cluster_hash)
 

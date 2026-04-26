@@ -3539,6 +3539,37 @@ def run_pod_tab(pod_name):
 — excludes {_excluded_accepted + _excluded_finalized} accepted+finalized tasks that are still in Onfleet.
             """)
 
+            # 📍 Stop-address breakdown for every excluded route so the dispatcher
+            # can quickly cross-reference and re-route stale ones if needed.
+            def _excluded_section(label, clusters):
+                if not clusters:
+                    return
+                st.markdown(f"**{label} — {len(clusters)} route(s) | {sum(len(c['data']) for c in clusters)} tasks**")
+                for _c in clusters:
+                    _wo = _c.get('wo') or _c.get('contractor_name') or '(no WO)'
+                    _ic = _c.get('contractor_name', '?')
+                    _comp = _c.get('comp', 0)
+                    _due = _c.get('due', 'N/A')
+                    _addrs = []
+                    for _t in _c.get('data', []):
+                        _full = _t.get('full', '').strip()
+                        if _full and _full not in _addrs:
+                            _addrs.append(_full)
+                    _addr_lines = '\n'.join(f"  - {a}" for a in _addrs) or "  (no addresses)"
+                    st.markdown(
+                        f"<div style='font-size:12px; padding:6px 10px; margin:4px 0; "
+                        f"background:#f8fafc; border-left:3px solid #94a3b8; border-radius:4px;'>"
+                        f"<b>{_wo}</b> &middot; {_ic} &middot; \${_comp} &middot; Due {_due} "
+                        f"&middot; {len(_c.get('data', []))} tasks @ {len(_addrs)} stops"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    with st.expander(f"  Stops ({len(_addrs)})", expanded=False):
+                        st.markdown(_addr_lines)
+
+            _excluded_section("❌ Accepted (excluded)", accepted)
+            _excluded_section("🏁 Finalized (excluded)", finalized)
+
     # 🌟 THE FIX: Force spacing before the Map
     st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
     

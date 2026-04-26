@@ -1582,6 +1582,10 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
 
         pool = []
         _skipped_assigned = 0
+        # 📊 ATTRITION COUNTERS: track tasks dropped at each filter gate
+        _skipped_no_state_cf = 0
+        _skipped_wrong_team = 0
+        _skipped_out_of_pod_states = 0
         for t in all_tasks:
             # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
             # "Start at driver address" / "End at driver's address" tasks for native
@@ -1595,6 +1599,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 for _f in (t.get('customFields') or [])
             )
             if not _has_state_cf:
+                _skipped_no_state_cf += 1
                 continue
 
             container = t.get('container', {})
@@ -1610,6 +1615,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 continue
 
             if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
+                _skipped_wrong_team += 1
                 continue
 
             addr = t.get('destination', {}).get('address', {})
@@ -1690,6 +1696,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 t_status = fresh_sent_db[t['id']].get('status', 'ready').lower()
                 t_wo = fresh_sent_db[t['id']].get('wo', 'none')
             
+            if stt not in config['states']:
+                _skipped_out_of_pod_states += 1
+                continue
             if stt in config['states']:
                 _remov_keywords = ["kiosk removal", "remove kiosk"]
                 _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
@@ -1886,6 +1895,17 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state[f"clusters_{pod_name}"] = clusters
         if _skipped_assigned > 0:
             _log_err(f"process_pod/{pod_name}", f"skipped {_skipped_assigned} already-assigned tasks (state=0 leak)")
+
+        # 📊 Save attrition funnel to session state for the supercard expander.
+        st.session_state[f'_attrition_{pod_name}'] = {
+            'raw_fetched': len(all_tasks_raw),
+            'after_dedup': len(all_tasks),
+            'skipped_no_state_cf': _skipped_no_state_cf,
+            'skipped_assigned_worker': _skipped_assigned,
+            'skipped_wrong_team': _skipped_wrong_team,
+            'skipped_out_of_pod_states': _skipped_out_of_pod_states,
+            'final_pool': len(pool),
+        }
         if not master_bar: 
             prog_bar.empty()
 
@@ -2935,7 +2955,12 @@ def smart_sync_pod(pod_name):
 
 
 def make_venue_details(data):
-    """Build expandable venue location rows from cluster task data."""
+    """Build expandable venue location rows from cluster task data.
+
+    Mirrors the rich dispatch-view rendering so Sent/Accepted/Declined/Finalized
+    show the same per-stop pills (Kiosk count, digital Ins/Rem, escalation, total
+    Tasks) and per-task-type icon badges (🆕/🔄/⚪/🛠️/🗑️) as the Ready/Flagged tabs.
+    """
     u_locs = []
     for t in data:
         if t['full'] not in u_locs: u_locs.append(t['full'])
@@ -2943,18 +2968,52 @@ def make_venue_details(data):
     for loc in u_locs:
         loc_tasks = [t for t in data if t['full'] == loc]
         venue = next((t.get('venue_name','') for t in loc_tasks if t.get('venue_name')), '')
-        k_cnt = sum(1 for t in loc_tasks if 'install' in str(t.get('task_type','')).lower())
+
+        # Per-stop metrics (same buckets the dispatch view computes)
+        n_ad = c_ad = d_ad = inst = remov = digi_ins = digi_off = digi_srv = 0
+        custom_types = {}
+        for t in loc_tasks:
+            tt = str(t.get('task_type','')).lower()
+            if t.get('is_digital'):
+                if 'offline' in tt: digi_off += 1
+                elif 'ins/re' in tt: digi_ins += 1
+                else: digi_srv += 1
+            elif 'install' in tt: inst += 1
+            elif any(x in tt for x in ['kiosk removal','remove kiosk']): remov += 1
+            elif any(x in tt for x in ['continuity','photo retake','swap']): c_ad += 1
+            elif any(x in tt for x in ['default','pull down']): d_ad += 1
+            elif any(x in tt for x in ['new ad','art change','top']) or not tt: n_ad += 1
+            else:
+                _label = tt.title() or 'Other'
+                custom_types[_label] = custom_types.get(_label, 0) + 1
+        t_count = len(loc_tasks)
         esc_cnt = sum(1 for t in loc_tasks if t.get('escalated'))
-        k_tag = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {k_cnt} Kiosk</span>" if k_cnt > 0 else ""
+
+        # Headline pills — match dispatch view layout
+        k_tag = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {inst} Kiosk</span>" if inst > 0 else ""
+        digi_ins_tag = f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {digi_ins} Ins/Rem</span>" if digi_ins > 0 else ""
         esc_tag = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_cnt}</span>" if esc_cnt > 0 else ""
+        t_pill = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{t_count} Tasks</span>" if t_count else ""
+
+        # Compact icon row with per-task-type counts (🆕/🔄/⚪/🛠️/🗑️ and digital variants)
+        icon_parts = []
+        if n_ad > 0: icon_parts.append(f"🆕 {n_ad}")
+        if c_ad > 0: icon_parts.append(f"🔄 {c_ad}")
+        if d_ad > 0: icon_parts.append(f"⚪ {d_ad}")
+        if remov > 0: icon_parts.append(f"🗑️ {remov}")
+        if digi_off > 0: icon_parts.append(f"📵 {digi_off}")
+        if digi_srv > 0: icon_parts.append(f"⚙️ {digi_srv}")
+        for cn, cnt in custom_types.items(): icon_parts.append(f"📋 {cnt} {cn}")
+        icon_html = f" <span style='font-size:11px;color:#94a3b8;'>{' '.join(icon_parts)}</span>" if icon_parts else ""
+
         venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>" if venue else ""
-        # Build campaign expansion (matches render_dispatch: client name + task-type badge + esc/boost markers)
+
+        # Build campaign expansion (client name + task-type badge + esc/boost markers)
         camp_rows = []
         seen = set()
         for t in loc_tasks:
             cmp = t.get('client_company','')
             if not cmp: continue
-            # Task type badge — same logic as render_dispatch so both columns show the same thing
             tt = str(t.get('task_type','')).lower()
             if t.get('is_digital'):
                 if 'offline' in tt: tt_badge = "📵 Offline"
@@ -2980,7 +3039,7 @@ def make_venue_details(data):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>{k_tag}{esc_tag}"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>{k_tag}{digi_ins_tag}{esc_tag} &nbsp;{t_pill}{icon_html}"
             f"</summary>{camp_block}</details>"
         )
     return "".join(rows)
@@ -3100,13 +3159,58 @@ def run_pod_tab(pod_name):
         if not is_initialized:
             # STATE 1: Not loaded yet
             init_clicked = st.button(f"🚀 Initialize Data", key=f"init_{pod_name}", use_container_width=True)
+            sync_clicked = False
         else:
             # STATE 2: Loaded — smart sync for new tasks only
             init_clicked = False
-            if st.button("🔄 Check New Tasks", key=f"reopt_{pod_name}", use_container_width=True):
-                smart_sync_pod(pod_name)
-                st.rerun()
+            sync_clicked = st.button("🔄 Check New Tasks", key=f"reopt_{pod_name}", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # 🌟 Check New Tasks: same full-width overlay as Initialize so the dispatcher
+    # sees the spin-card + timer instead of a bare progress bar while smart_sync_pod runs.
+    if is_initialized and sync_clicked:
+        import time as _time
+        _start = _time.time()
+
+        def _render_sync_card(overlay, pod, start):
+            elapsed = int(_time.time() - start)
+            m = elapsed // 60
+            s = elapsed % 60
+            overlay.markdown(f"""
+                <style>
+                    @keyframes spin {{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
+                    .dcc-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;
+                        padding:36px 32px;text-align:center;margin:20px 0;}}
+                    .dcc-spin{{width:44px;height:44px;border:4px solid #e2e8f0;
+                        border-top:4px solid #633094;border-radius:50%;
+                        animation:spin 0.8s linear infinite;margin:0 auto 16px auto;}}
+                    .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;
+                        color:#633094;background:#f3e8ff;border-radius:20px;
+                        padding:4px 14px;margin-top:12px;}}
+                </style>
+                <div class='dcc-card'>
+                    <div class='dcc-spin'></div>
+                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {pod} Pod</p>
+                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Scanning Onfleet for tasks not yet tracked...</p>
+                    <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        sync_overlay = st.empty()
+        _render_sync_card(sync_overlay, pod_name, _start)
+
+        # Stash so smart_sync_pod could tick the timer if we wire it up later.
+        st.session_state['_loading_overlay'] = sync_overlay
+        st.session_state['_loading_start'] = _start
+        st.session_state['_loading_pod'] = pod_name
+
+        smart_sync_pod(pod_name)
+
+        sync_overlay.empty()
+        st.session_state.pop('_loading_overlay', None)
+        st.session_state.pop('_loading_start', None)
+        st.session_state.pop('_loading_pod', None)
+        st.rerun()
 
     # 🌟 FULL-WIDTH LOADING UI — outside columns so bar spans the page
     if not is_initialized and init_clicked:
@@ -3305,6 +3409,10 @@ def run_pod_tab(pod_name):
     # Tasks
     tasks_static = sum(len(c['data']) for c in active_cls if not c.get('is_digital'))
     tasks_digital = sum(len(c['data']) for c in active_cls if c.get('is_digital'))
+
+    # 📊 Supercard-excluded buckets (visible in Awaiting Confirmation but not counted in TASKS card)
+    _excluded_accepted = sum(len(c['data']) for c in accepted)
+    _excluded_finalized = sum(len(c['data']) for c in finalized)
     
     # Stops
     stops_static = sum(c['stops'] for c in active_cls if not c.get('is_digital'))
@@ -3389,6 +3497,48 @@ def run_pod_tab(pod_name):
                 </div>
             </div>
         """, unsafe_allow_html=True)
+
+    # --- 📊 TASK ATTRITION EXPANDER (collapsed by default) ---
+    _attr = st.session_state.get(f'_attrition_{pod_name}')
+    if _attr:
+        with st.expander(f"📊 Task attrition — {pod_name} Pod", expanded=False):
+            _raw = _attr.get('raw_fetched', 0)
+            _ded = _attr.get('after_dedup', 0)
+            _no_cf = _attr.get('skipped_no_state_cf', 0)
+            _wrk = _attr.get('skipped_assigned_worker', 0)
+            _team = _attr.get('skipped_wrong_team', 0)
+            _oops = _attr.get('skipped_out_of_pod_states', 0)
+            _pool = _attr.get('final_pool', 0)
+            _sup_total = tasks_static + tasks_digital
+            st.markdown(f"""
+**Raw → Pool funnel (this pod's slice of the Onfleet pull)**
+
+| Step | Count | Drop |
+|---|---:|---:|
+| 1. Raw fetched from Onfleet (`tasks/all?state=0`, last 45d) | **{_raw}** | — |
+| 2. After dedup by task ID | {_ded} | {max(0, _raw - _ded)} |
+| 3. After driver-home filter (require `state` custom field) | {_ded - _no_cf} | {_no_cf} |
+| 4. After assigned-worker leak filter | {_ded - _no_cf - _wrk} | {_wrk} |
+| 5. After approved-team filter | {_ded - _no_cf - _wrk - _team} | {_team} |
+| 6. After in-pod-states filter | **{_pool}** | {_oops} |
+
+**Pool → Supercard math (across buckets)**
+
+| Bucket | Tasks | In supercard? |
+|---|---:|---|
+| Ready | {sum(len(c['data']) for c in ready)} | ✅ |
+| Flagged (review) | {sum(len(c['data']) for c in review)} | ✅ |
+| Sent | {sum(len(c['data']) for c in sent)} | ✅ |
+| Declined | {sum(len(c['data']) for c in declined)} | ✅ |
+| Field Nation | {sum(len(c['data']) for c in field_nation)} | ✅ |
+| Digital Ready | {sum(len(c['data']) for c in digital_ready)} | ✅ |
+| Accepted | {_excluded_accepted} | ❌ excluded |
+| Finalized | {_excluded_finalized} | ❌ excluded |
+
+**Supercard TASKS total: {_sup_total}**  (static {tasks_static} + digital {tasks_digital})
+— excludes {_excluded_accepted + _excluded_finalized} accepted+finalized tasks that are still in Onfleet.
+            """)
+
     # 🌟 THE FIX: Force spacing before the Map
     st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
     

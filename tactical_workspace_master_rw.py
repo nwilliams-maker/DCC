@@ -151,6 +151,12 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 .stApp {{ background-color: {TB_APP_BG} !important; color: #000000 !important; font-family: 'Inter', sans-serif !important; }}
+/* Streamlit injects a fixed-position header bar by default with a dark/black background.
+   Recolor it to match the page so the logo doesn't sit on a black strip. Header still
+   exists (Streamlit needs it for menu/toolbar), it's just visually invisible now. */
+header[data-testid="stHeader"] {{ background-color: {TB_APP_BG} !important; }}
+header[data-testid="stHeader"]::before {{ background-color: {TB_APP_BG} !important; }}
+div[data-testid="stToolbar"] {{ background-color: transparent !important; }}
 .main .block-container {{ max-width: 1400px !important; padding-top: 1rem; padding-left: 1.5rem; padding-right: 1.5rem; }}
 
 /* =========================================
@@ -517,6 +523,33 @@ div.refresh-btn-container > div > button,
 /* =========================================
    SUB-TAB PILL STYLING (Column-Targeting Method)
    ========================================= */
+
+/* 🌟 SIZE OVERRIDES for both Dispatch + Awaiting columns.
+   Default Streamlit tabs were too padded to fit 4 pills inside a half-page column at
+   100% zoom — text overflow forced horizontal scroll arrows on the sides. Tighter
+   padding, smaller font, no-wrap, and hidden scroll arrows put them all on one line. */
+div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab-list"] {{
+    overflow-x: hidden !important;
+    flex-wrap: nowrap !important;
+    gap: 4px !important;
+    padding: 6px !important;
+}}
+div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab"] {{
+    padding: 4px 10px !important;
+    min-width: 0 !important;
+    flex-shrink: 1 !important;
+    flex-basis: auto !important;
+}}
+div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab"] p {{
+    font-size: 12px !important;
+    white-space: nowrap !important;
+    margin: 0 !important;
+}}
+/* Hide the < > scroll buttons that show up when content overflows */
+div[data-testid="stColumn"] div[data-testid="stTabs"] button[role="button"][aria-label*="scroll"],
+div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab-border"] + div > button {{
+    display: none !important;
+}}
 
 /* --- LEFT COLUMN: Dispatch Tabs --- */
 /* 1. Ready (Green) */
@@ -1788,6 +1821,29 @@ def get_digi_badges(cluster_data):
             else: icons.add('⚙️')
     return "".join(sorted(list(icons)))
 
+
+# 🌟 Reusable pill helper for route card titles (Sent/Accepted/Declined/Finalized expanders
+# and the Dispatch column big card). Returns a string like " | 🛠️ 5 Kiosk" for static
+# routes or " | 🔧 3 Ins/2 Rem" for digital ones — empty string when no relevant tasks.
+# Color is enforced via the surrounding markdown's CSS where needed.
+def get_task_pill(cluster_data):
+    if not cluster_data:
+        return ""
+    is_digi = any(t.get('is_digital') for t in cluster_data)
+    if is_digi:
+        ins_n = sum(1 for t in cluster_data if t.get('is_digital') and 'install' in str(t.get('task_type','')).lower() and 'ins/re' not in str(t.get('task_type','')).lower())
+        rem_n = sum(1 for t in cluster_data if t.get('is_digital') and ('remov' in str(t.get('task_type','')).lower() or 'remove' in str(t.get('task_type','')).lower()))
+        insrem_n = sum(1 for t in cluster_data if t.get('is_digital') and 'ins/re' in str(t.get('task_type','')).lower())
+        parts = []
+        if ins_n > 0: parts.append(f"{ins_n} Ins")
+        if rem_n > 0: parts.append(f"{rem_n} Rem")
+        if insrem_n > 0: parts.append(f"{insrem_n} Ins/Rem")
+        return f" | 🔧 {' / '.join(parts)}" if parts else ""
+    # Static kiosk path: count install tasks
+    k_n = sum(1 for t in cluster_data if 'install' in str(t.get('task_type','')).lower())
+    return f" | 🛠️ {k_n} Kiosk" if k_n > 0 else ""
+
+
 # 🌟 NEW HELPER: Groups clusters by State, then sorts them by geographical proximity
 def group_and_sort_by_proximity(bucket):
     if not bucket: return []
@@ -1956,8 +2012,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             ic_new = ic_opts[selected_label]
             _, h, _, _ = get_gmaps(ic_new.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
+            # 🌟 BUGFIX: Apply same $20/stop floor used in init logic. Without this, when
+            # gmaps fails (network error, bad IC location, etc.) the comp/rate fields zero out
+            # and the dispatcher loses the displayed data even though the route is real.
+            if new_pay == 0:
+                new_pay = round(20.0 * cluster.get('stops', 1), 2)
             st.session_state[pay_key] = new_pay
-            st.session_state[rate_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 0
+            st.session_state[rate_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
             st.session_state[last_sel_key] = selected_label
 
     # --- 4. INITIAL SETUP (FIXED SAVING LOGIC) ---
@@ -2058,6 +2119,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         elif final_rate >= 21.00: status_color = "#f97316"
         else: status_color = TB_GREEN
 
+        # 🌟 BUGFIX: when get_gmaps returns 0 / "0h 0m" (network/API failure or empty IC
+        # location), don't render literal zeros. Show "—" so dispatchers know the value
+        # didn't come from a real measurement, and rely on the floor-seeded comp/rate
+        # values for the dispatch decision instead.
+        _t_display = t_str if t_str and t_str not in ("0h 0m", "N/A") else "—"
+        _mi_display = f"{mi} mi" if mi and mi > 0 else "—"
+
         st.markdown(f"""
 <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:8px;">
     <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
@@ -2068,8 +2136,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         </div>
         <div style="text-align:right;">
             <div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Drive Time</div>
-            <div style="font-size:20px; font-weight:900; color:#0f172a;">{t_str}</div>
-            <div style="font-size:10px; color:#94a3b8; margin-top:1px;">Round Trip: {mi} mi</div>
+            <div style="font-size:20px; font-weight:900; color:#0f172a;">{_t_display}</div>
+            <div style="font-size:10px; color:#94a3b8; margin-top:1px;">Round Trip: {_mi_display}</div>
         </div>
     </div>
 </div>
@@ -3412,10 +3480,11 @@ def run_pod_tab(pod_name):
                     comp, due = c.get('comp', 0), c.get('due', 'N/A')
                     tasks_cnt, stops_cnt = len(c['data']), c['stops']
                     wo_display = c.get('wo', ic_name)
+                    _pill_sent = get_task_pill(c.get('data', []))
                     
                     exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}"):
                             _venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
@@ -3573,7 +3642,8 @@ def run_pod_tab(pod_name):
                     comp_dec = c.get('comp', 0)
                     due_dec = c.get('due', 'N/A')
                     stops_dec, tasks_dec = c['stops'], len(c['data'])
-                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}"):
+                    _pill_dec = get_task_pill(c.get('data', []))
+                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}"):
                         u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
                         _dec_venues = venue_section(make_venue_details(c['data']))
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)

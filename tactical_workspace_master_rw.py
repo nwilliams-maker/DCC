@@ -179,27 +179,6 @@ div[data-baseweb="select"] div {{
     font-weight: 600 !important;
 }}
 
-/* Color the OPEN dropdown popup (selectbox + multiselect) with the page background.
-   Closed field stays white per the global white-input rule above — only the menu
-   that appears on click picks up the page color so it visually flows from the page
-   instead of looking like a floating white card. */
-div[data-baseweb="popover"] [role="listbox"],
-div[data-baseweb="menu"],
-ul[role="listbox"] {{
-    background-color: {TB_APP_BG} !important;
-}}
-/* Individual options inside the popup — keep them transparent so the popup bg shows through.
-   Hover/highlight state gets a subtle white tint to indicate selection. */
-div[data-baseweb="popover"] [role="option"],
-ul[role="listbox"] li {{
-    background-color: transparent !important;
-}}
-div[data-baseweb="popover"] [role="option"]:hover,
-ul[role="listbox"] li:hover,
-div[data-baseweb="popover"] [role="option"][aria-selected="true"] {{
-    background-color: rgba(255,255,255,0.6) !important;
-}}
-
 /* Number Input — match date input outline style */
 div[data-testid="stNumberInputContainer"] {{
     border-radius: 8px !important;

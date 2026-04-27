@@ -3877,7 +3877,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i, c, pod_name)
                     
         with t_flagged:
@@ -3896,7 +3896,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
@@ -3916,7 +3916,7 @@ def run_pod_tab(pod_name):
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     
-                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -3954,7 +3954,7 @@ def run_pod_tab(pod_name):
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}"):
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
@@ -3984,7 +3984,7 @@ def run_pod_tab(pod_name):
                     
                     exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]"):
                             _venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
@@ -4018,7 +4018,7 @@ def run_pod_tab(pod_name):
                     
                     exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4076,7 +4076,7 @@ def run_pod_tab(pod_name):
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
                     exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "")):
+                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4107,7 +4107,7 @@ def run_pod_tab(pod_name):
                     with exp_col:
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
-                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "")):
+                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4143,7 +4143,7 @@ def run_pod_tab(pod_name):
                     due_dec = c.get('due', 'N/A')
                     stops_dec, tasks_dec = c['stops'], len(c['data'])
                     _pill_dec = get_task_pill(c.get('data', []))
-                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}"):
+                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]"):
                         u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
                         _dec_venues = venue_section(make_venue_details(c['data']))
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
@@ -4181,7 +4181,7 @@ def run_pod_tab(pod_name):
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
                     exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "")):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4210,7 +4210,7 @@ def run_pod_tab(pod_name):
                     with exp_col:
                         _gfk_total = g.get('kCnt', 0) or 0
                         _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "")):
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4622,7 +4622,7 @@ with tabs[6]:
                         _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
                         _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}"):
+                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+8000, c, "Global_Digital")
                             
             with t_flagged:
@@ -4637,7 +4637,7 @@ with tabs[6]:
                         _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
                         _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}"):
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
             with t_fn:
@@ -4652,7 +4652,7 @@ with tabs[6]:
                         _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
                         _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}"):
+                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:
@@ -4681,7 +4681,7 @@ with tabs[6]:
                         
                         exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                                 u_locs, _dslv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -4704,7 +4704,7 @@ with tabs[6]:
                         
                         exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs

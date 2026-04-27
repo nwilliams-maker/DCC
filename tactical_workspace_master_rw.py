@@ -1075,11 +1075,13 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     else:
         st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
-    # Force an explicit rerun so the revoke-confirmation popover unmounts.
-    # Streamlit's auto-rerun after on_click leaves the popover in its open state
-    # client-side; an explicit st.rerun() forces a clean React re-mount that
-    # closes the popover instead of leaving the "Are you sure?" prompt visible.
-    st.rerun()
+    # No st.rerun() — calling it inside an on_click callback is a no-op in this
+    # Streamlit version (emits a warning, does nothing). The on_click flow already
+    # auto-reruns the page; popover open/closed state is client-side only and
+    # not controllable from server. Closing the revoke prompt cleanly would
+    # require restructuring the call sites away from on_click=move_to_dispatch
+    # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
+    # outside a callback context and rerun works normally.
 
 @st.fragment(run_every=15)
 def auto_sync_checker(pod_name):
@@ -5930,6 +5932,8 @@ with tabs[6]:
 # --- FOOTER ---
 
 # --- FOOTER ---
+
+# --- FOOTER ---
 st.markdown("---")
 st.markdown(
     """
@@ -5940,3 +5944,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+

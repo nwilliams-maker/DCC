@@ -1014,6 +1014,8 @@ def fetch_sent_records_from_sheet():
                             
                             raw_ts = row.get('date created', '')
                             ts_display = ""
+                            dt_obj = None  # 📌 reset per row so the history append never
+                                            # picks up a stale timestamp from a previous iteration.
                             
                             # Filter out routes older than the migration cutoff (see top-of-file constant).
                             if pd.notna(raw_ts) and str(raw_ts).strip():
@@ -1048,7 +1050,7 @@ def fetch_sent_records_from_sheet():
                                         "name": display_name,
                                         "time": ts_display,
                                         "wo": p.get('wo', display_name),
-                                        "raw_ts": dt_obj if 'dt_obj' in dir() and dt_obj is not None else None,
+                                        "raw_ts": dt_obj,
                                     })
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
@@ -1494,11 +1496,11 @@ def process_digital_pool(master_bar=None):
                 if d_rate > 50.0:
                     status = "Flagged"
 
-        # Anchor-based boosted-tier (see process_pod for rationale).
-        _d_anc_bs = str(anc.get('boosted_standard', '')).lower()
-        if 'local plus' in _d_anc_bs:
+        # Any-match boosted-tier (see process_pod for rationale).
+        _d_boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in group if x.get('boosted_standard')]
+        if any('local plus' in v for v in _d_boosted_vals):
             _d_boosted_tag = 'local plus'
-        elif 'boosted' in _d_anc_bs:
+        elif any('boosted' in v for v in _d_boosted_vals):
             _d_boosted_tag = 'boosted'
         else:
             _d_boosted_tag = ''
@@ -1913,16 +1915,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             # 🌟 CLEANUP: No need to loop again; the anchor already knows!
             route_is_digital = anc_is_digital
             
-            # Cluster's boosted tier comes from the ANCHOR task (the task that defined
-            # this route). Previously this was an any-match across every task in the
-            # cluster, which falsely tagged routes as boosted whenever a single boosted
-            # task happened to fall within the cluster radius — even when the route was
-            # really a pulldown/default route. Anchor-based attribution keeps boosted
-            # routes boosted and pulldown routes pulldown.
-            _anc_bs = str(anc.get('boosted_standard', '')).lower()
-            if 'local plus' in _anc_bs:
+            # Route is tagged boosted/local-plus if ANY task in the cluster has that tier.
+            # The header pill ensures the dispatcher sees boosted routes immediately,
+            # even when the boosted task is a single one inside a mostly-pulldown cluster.
+            # Drill-down to the specific stop + campaign happens via make_venue_details,
+            # which counts boosted tasks per location and per campaign row.
+            _boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in g_data if x.get('boosted_standard')]
+            if any('local plus' in v for v in _boosted_vals):
                 _boosted_tag = 'local plus'
-            elif 'boosted' in _anc_bs:
+            elif any('boosted' in v for v in _boosted_vals):
                 _boosted_tag = 'boosted'
             else:
                 _boosted_tag = ''
@@ -2143,10 +2144,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             stop_metrics[addr] = {
                 't_count': 0, 'n_ad': 0, 'c_ad': 0, 'd_ad': 0,
                 'inst': 0, 'remov': 0, 'digi_off': 0, 'digi_ins': 0, 'digi_srv': 0,
-                'custom': {}, 'esc': False, 'is_new': False, 'venue_name': ''
+                'custom': {}, 'esc': False, 'is_new': False, 'venue_name': '',
+                'boost_cnt': 0, 'lplus_cnt': 0,
             }
         stop_metrics[addr]['t_count'] += 1
         if t.get('escalated'): stop_metrics[addr]['esc'] = True
+        # Per-stop boosted/local-plus task counts so the stop row can show 🔥 N / ⭐ N
+        # pills alongside the kiosk and escalation indicators.
+        _t_bs = str(t.get('boosted_standard','')).lower()
+        if 'local plus' in _t_bs: stop_metrics[addr]['lplus_cnt'] += 1
+        elif 'boosted' in _t_bs: stop_metrics[addr]['boost_cnt'] += 1
         if t.get('is_new'): stop_metrics[addr]['is_new'] = True
         if not stop_metrics[addr]['venue_name'] and t.get('venue_name'):
             stop_metrics[addr]['venue_name'] = t.get('venue_name', '')
@@ -2386,6 +2393,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             k_tag_html = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {metrics['inst']} Kiosk</span>" if metrics['inst'] > 0 else ""
             # Digital Ins/Rem pill in matching teal — same visual rhythm as the kiosk pill.
             digi_ins_html = f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {metrics['digi_ins']} Ins/Rem</span>" if metrics['digi_ins'] > 0 else ""
+            # Boosted / Local Plus pills — count of tasks at THIS stop with that tier.
+            boost_html = f" <span style='color:#dc2626;font-weight:800;font-size:10px;'>🔥 {metrics['boost_cnt']}</span>" if metrics.get('boost_cnt', 0) > 0 else ""
+            lplus_html = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐ {metrics['lplus_cnt']}</span>" if metrics.get('lplus_cnt', 0) > 0 else ""
             # Full icon+name for expansion
             expand_parts = []
             if metrics['n_ad'] > 0: expand_parts.append(f"🆕 {metrics['n_ad']} New Ad")
@@ -2404,14 +2414,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{metrics['venue_name']} — </span>" if metrics.get('venue_name') else ""
             task_pill = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{metrics['t_count']} Tasks</span>"
             pill_html = f"<span style='font-size:11px;color:#94a3b8;'> — {pill_str}</span>" if pill_str else ""
-            # Campaign expansion
+            # Campaign expansion: aggregate by (campaign, task_type) with × N count
+            # plus per-group escalation/boost/local-plus counters. Same shape as
+            # make_venue_details so Sent/Accepted/Declined/Finalized/FN tabs match
+            # what dispatchers see here in Ready/Flagged.
+            from collections import defaultdict as _dd
             loc_tasks = [t for t in cluster['data'] if t.get('full') == addr]
-            camp_rows = []
-            seen_c = set()
+            _camp_groups = _dd(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
             for t in loc_tasks:
                 cmp = t.get('client_company','')
                 if not cmp: continue
-                # Task type for this specific task
                 tt = str(t.get('task_type','')).lower()
                 if t.get('is_digital'):
                     if 'offline' in tt: tt_badge = "📵 Offline"
@@ -2423,20 +2435,37 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
                 elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
                 else: tt_badge = f"📋 {tt.title()}"
-                badges = f" <span style='font-size:9px;color:#94a3b8;'>{tt_badge}</span>"
-                if t.get('escalated'): badges += " ❗"
+                key = (cmp, tt_badge)
+                grp = _camp_groups[key]
+                grp['cmp'] = cmp
+                grp['tt_badge'] = tt_badge
+                grp['count'] += 1
+                if t.get('escalated'): grp['esc'] += 1
                 bs = str(t.get('boosted_standard','')).lower()
-                if 'local plus' in bs: badges += " ⭐"
-                elif 'boosted' in bs: badges += " 🔥"
-                row = f"<div style='font-size:10px;color:#64748b;padding-left:4px;margin-top:2px;'>• {cmp}{badges}</div>"
-                if row not in seen_c: seen_c.add(row); camp_rows.append(row)
+                if 'local plus' in bs: grp['lplus'] += 1
+                elif 'boosted' in bs: grp['boost'] += 1
+            camp_rows = []
+            for (cmp, tt_badge), grp in _camp_groups.items():
+                cnt = grp['count']
+                count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
+                esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
+                boost_pill = f" <span style='color:#dc2626;font-weight:800;'>🔥 {grp['boost']}</span>" if grp['boost'] > 0 else ""
+                lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
+                row = (
+                    f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
+                    f"• <span style='color:#0f172a;font-weight:600;'>{cmp}</span>"
+                    f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>"
+                    f"{count_suffix}{esc_pill}{boost_pill}{lplus_pill}"
+                    f"</div>"
+                )
+                camp_rows.append(row)
             camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else ""
             _icon_html = f"<span style='font-size:13px;margin-left:6px;'>{pill_str}</span>" if pill_str else ""
             _dispatch_rows.append(
                 f"<details class='fn-loc-row'>"
                 f"<summary class='fn-loc-summary'>"
                 f"<span class='fn-chevron'>›</span>"
-                f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{display_addr}</span>{k_tag_html}{digi_ins_html}{esc_inline} &nbsp;{task_pill}{_icon_html}"
+                f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{display_addr}</span>{k_tag_html}{digi_ins_html}{boost_html}{lplus_html}{esc_inline} &nbsp;{task_pill}{_icon_html}"
                 f"</summary>{camp_block}</details>"
             )
 
@@ -3046,11 +3075,11 @@ def smart_sync_pod(pod_name):
                 remaining.append(t)
         unmatched = remaining
 
-        # Anchor-based boosted-tier (see process_pod for rationale).
-        _ss_anc_bs = str(anc.get('boosted_standard', '')).lower()
-        if 'local plus' in _ss_anc_bs:
+        # Any-match boosted-tier (see process_pod for rationale).
+        _ss_boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in group if x.get('boosted_standard')]
+        if any('local plus' in v for v in _ss_boosted_vals):
             _ss_boosted_tag = 'local plus'
-        elif 'boosted' in _ss_anc_bs:
+        elif any('boosted' in v for v in _ss_boosted_vals):
             _ss_boosted_tag = 'boosted'
         else:
             _ss_boosted_tag = ''
@@ -3737,10 +3766,14 @@ def run_pod_tab(pod_name):
     # 🌟 THE FIX: Prevent IndexError if there are Ghost routes but no Live routes!
     map_center = cls[0]['center'] if cls else [39.8283, -98.5795]
     m = folium.Map(location=map_center, zoom_start=6 if cls else 4, tiles="cartodbpositron")
-    for c in ready: folium.CircleMarker(c['center'], radius=8, color=TB_GREEN, fill=True, opacity=0.8).add_to(m)
-    for c in digital_ready: folium.CircleMarker(c['center'], radius=8, color="#0f766e", fill=True, opacity=0.8).add_to(m)
-    for c in sent: folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
-    for c in review: folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
+    # 🗺️ Map shows only the operational buckets the dispatcher acts on:
+    # Ready, Flagged (review), Field Nation, Sent. Accepted/Declined/Finalized
+    # are deliberately excluded so the map stays a working surface, not a history view.
+    # Digital is excluded too — it has its own dedicated map below.
+    for c in ready:        folium.CircleMarker(c['center'], radius=8, color=TB_GREEN,   fill=True, opacity=0.8).add_to(m)
+    for c in review:       folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
+    for c in field_nation: folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
+    for c in sent:         folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
     # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
     # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
     # Streamlit script, causing the "page keeps refreshing" experience.
@@ -3880,8 +3913,10 @@ def run_pod_tab(pod_name):
                     digi_pill = " 🔌" if c.get('is_digital') else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
                     remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if c.get('remov_count', 0) > 0 else ""
+                    _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                    boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     
-                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{esc_pill}"):
+                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -3916,7 +3951,10 @@ def run_pod_tab(pod_name):
                         current_state = c['state']
                         st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
                     
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops"):
+                    _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                    _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
+                    _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}"):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
@@ -4581,7 +4619,10 @@ with tabs[6]:
                         if c['state'] != current_state:
                             current_state = c['state']
                             st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
-                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops"):
+                        _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                        _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
+                        _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}"):
                             render_dispatch(i+8000, c, "Global_Digital")
                             
             with t_flagged:
@@ -4593,7 +4634,10 @@ with tabs[6]:
                         if c['state'] != current_state:
                             current_state = c['state']
                             st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
-                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops"):
+                        _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                        _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
+                        _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}"):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
             with t_fn:
@@ -4605,7 +4649,10 @@ with tabs[6]:
                         if c['state'] != current_state:
                             current_state = c['state']
                             st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
-                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops"):
+                        _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                        _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
+                        _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}"):
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:

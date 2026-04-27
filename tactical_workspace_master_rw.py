@@ -853,6 +853,20 @@ div.mini-btn button {{
 }}
 
 
+/* =========================================
+   MULTISELECT — hide empty "No results" dropdown
+   =========================================
+   Streamlit's multiselect popup keeps showing the empty dropdown panel with
+   "No results" centered text after every option has been selected. Hide it:
+   target popovers/listboxes that contain ZERO real role="option" children. */
+ul[role="listbox"]:not(:has(li[role="option"])),
+ul[role="listbox"]:not(:has([role="option"])) {{
+    display: none !important;
+}}
+div[data-baseweb="popover"]:not(:has([role="option"])) {{
+    display: none !important;
+}}
+
 @media (max-width: 768px) {{
     div[data-testid="stHorizontalBlock"] {{ flex-direction: column !important; }}
     div[data-testid="stColumn"] {{ width: 100% !important; min-width: 100% !important; flex: 1 1 100% !important; }}
@@ -1061,7 +1075,11 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     else:
         st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
-    # No st.rerun() — callback handles the rerender
+    # Force an explicit rerun so the revoke-confirmation popover unmounts.
+    # Streamlit's auto-rerun after on_click leaves the popover in its open state
+    # client-side; an explicit st.rerun() forces a clean React re-mount that
+    # closes the popover instead of leaving the "Are you sure?" prompt visible.
+    st.rerun()
 
 @st.fragment(run_every=15)
 def auto_sync_checker(pod_name):

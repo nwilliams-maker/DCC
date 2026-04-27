@@ -1068,15 +1068,27 @@ def auto_sync_checker(pod_name):
         _log_err("auto_sync_checker", e)
 
 @st.fragment
-def render_finalization_checklist(cluster_hash, pod_name, prefix="chk"):
-    """Isolates checkbox reruns so the whole page doesn't reload, making checks instant."""
+def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False):
+    """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
+
+    is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
+    items — \"Dispatched in Route Planning\" and \"Packing list created\". The OnFleet
+    optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
-    cc1, cc2, cc3 = st.columns(3)
-    chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-    chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-    chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-    
-    if chk1 and chk2 and chk3:
+    if is_fn:
+        # FN routes don\'t go through OnFleet route planning — drop that step.
+        cc1, cc2 = st.columns(2)
+        chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+        chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+        _all_checked = chk1 and chk2
+    else:
+        cc1, cc2, cc3 = st.columns(3)
+        chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+        chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+        chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+        _all_checked = chk1 and chk2 and chk3
+
+    if _all_checked:
         if st.button("🏁 Finalize Route", key=f"finbtn_{prefix}_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
             # 1. 🚀 SYNCHRONOUS SHEET UPDATE
             with st.spinner("Archiving to Google Sheets..."):
@@ -1120,7 +1132,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
-from fn_utils import FN_STATE_MANAGER, generate_fn_upload, save_fn_to_sheet
+from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
 
 # --- UTILITIES ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -3349,16 +3361,20 @@ text-decoration:none;">📨 Default Mail</a>
             )
 
         # 🌟 UNIQUE KEY
-        if st.button("📢 Mark as Posted (Move to Sent)", key=f"posted_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
-            with st.spinner("Moving route to Sent database..."):
+        if st.button("📢 Assigned FN Rep (Move to Accepted)", key=f"posted_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+            with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
                 try:
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "postFieldNationRoute", "cluster_hash": cluster_hash}, timeout=25).json()
+                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "cluster_hash": cluster_hash}, timeout=25).json()
                     if res.get("success"):
-                        st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
+                        # Local state: route moves to Accepted (treated as already accepted by the FN rep).
+                        # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened
+                        # 2-item finalization checklist (no Onfleet step) kicks in on next render.
                         st.session_state[f"contractor_{cluster_hash}"] = "Field Nation"
-                        st.session_state[f"sent_ts_{cluster_hash}"] = datetime.now().strftime('%m/%d %I:%M %p')
-                        st.session_state[f"sync_{cluster_hash}"] = res.get("routeId") 
-                        st.toast("🚀 Moved to Sent in Google Sheets!")
+                        st.session_state.pop(f"route_state_{cluster_hash}", None)
+                        st.session_state[f"reverted_{cluster_hash}"] = True
+                        # Force the next render to re-pull the sheet so the new Accepted row is visible.
+                        fetch_sent_records_from_sheet.clear()
+                        st.toast("✅ Assigned to FN Rep — moved to Accepted!")
                         st.rerun()
                     else:
                         st.error(f"Sheet Error: {res.get('error')}")
@@ -4449,6 +4465,92 @@ def run_pod_tab(pod_name):
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
+
+                # 📦 COMBINED CSV section — multi-select FN routes and download a single
+                # CSV with all their stops. Routes that have been included in a download
+                # get a checkmark in their expander label. They\'re still in the FN tab
+                # (so you can still click "Assigned FN Rep" per route) but visually flagged
+                # so you don\'t re-export them by accident.
+                _fn_exported = st.session_state.setdefault('_fn_exported', {})
+                _fn_route_lookup = {}  # hash -> cluster
+                _fn_options = []
+                for _fc in sorted_fn:
+                    _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
+                    if not _fc_tids:
+                        continue
+                    _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
+                    _fn_route_lookup[_fc_hash] = _fc
+                    _fn_options.append(_fc_hash)
+                _fn_select_key = f"fn_combined_select_{pod_name}"
+                _fn_label_for = lambda h: (
+                    f"{'✓ ' if h in _fn_exported else ''}{_fn_route_lookup[h].get('city','?')}, {_fn_route_lookup[h].get('state','?')} "
+                    f"— {_fn_route_lookup[h].get('stops',0)} stops · {len(_fn_route_lookup[h].get('data',[]))} tasks"
+                    + (f" · exported {_fn_exported[h]}" if h in _fn_exported else "")
+                )
+                st.markdown(
+                    "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
+                    "padding:8px 12px;margin:6px 0;'>"
+                    "<div style='font-size:9px;font-weight:900;color:#854d0e;text-transform:uppercase;letter-spacing:0.08em;'>"
+                    "📦 Combined FN CSV</div>"
+                    "<div style='font-size:11px;color:#475569;'>Select multiple FN routes, download a single CSV with every stop. ✓ marks routes already exported.</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                st.multiselect(
+                    "Select FN routes for combined CSV",
+                    options=_fn_options,
+                    format_func=_fn_label_for,
+                    key=_fn_select_key,
+                    label_visibility="collapsed",
+                    placeholder="Select FN routes to include in the combined CSV...",
+                )
+                _fn_selected = st.session_state.get(_fn_select_key, []) or []
+                _fn_dl_col, _fn_clear_col = st.columns([4, 1])
+                with _fn_dl_col:
+                    if _fn_selected:
+                        # Build clusters annotated with their hash so generate_combined_fn_upload
+                        # can echo back which were included.
+                        _fn_to_export = []
+                        for _h in _fn_selected:
+                            _cluster = _fn_route_lookup.get(_h)
+                            if _cluster:
+                                _ann = dict(_cluster)
+                                _ann['_cluster_hash'] = _h
+                                _fn_to_export.append(_ann)
+                        try:
+                            _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = generate_combined_fn_upload(_fn_to_export)
+                        except Exception as _fe:
+                            _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
+                            _log_err("fn_combined", _fe)
+                        if _fn_combined_buf is None:
+                            st.button(f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)", disabled=True, use_container_width=True, key=f"fn_dl_disabled_{pod_name}")
+                        else:
+                            if st.download_button(
+                                label=f"📥 Download Combined CSV ({len(_fn_selected)} routes · {_fn_combined_stops} stops)",
+                                data=_fn_combined_buf,
+                                file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
+                                mime="text/csv",
+                                key=f"fn_dl_combined_{pod_name}",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                                for _h in _fn_included_hashes:
+                                    _fn_exported[_h] = _ts
+                                st.session_state['_fn_exported'] = _fn_exported
+                                st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
+                    else:
+                        st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key=f"fn_dl_empty_{pod_name}")
+                with _fn_clear_col:
+                    if st.button("↻ Reset", key=f"fn_reset_exported_{pod_name}", help="Clear the ✓ exported flags for this pod\'s FN routes (re-enables them in the multiselect badge but doesn\'t change anything else)", use_container_width=True):
+                        # Drop only this pod\'s FN-route hashes from the exported map.
+                        for _h in list(_fn_exported.keys()):
+                            if _h in _fn_route_lookup:
+                                _fn_exported.pop(_h, None)
+                        st.session_state['_fn_exported'] = _fn_exported
+                        st.rerun()
+                st.divider()
+
                 current_state = None
                 for i, c in enumerate(sorted_fn):
                     if c['state'] != current_state:
@@ -4462,7 +4564,9 @@ def run_pod_tab(pod_name):
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     
-                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+                    _fn_exp_check = "✓ " if _fn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
+                    with st.expander(_fn_exp_check + f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -4622,7 +4726,8 @@ def run_pod_tab(pod_name):
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        _acc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
+                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4635,7 +4740,7 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(cluster_hash, pod_name, "chk")
+                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -4653,14 +4758,15 @@ def run_pod_tab(pod_name):
                     with exp_col:
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
-                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
+                        _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
+                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(ghost_hash, pod_name, "g_chk")
+                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -5194,6 +5300,85 @@ with tabs[6]:
                 if not d_fn: st.info("No tasks in Field Nation.")
                 else:
                     sorted_d_fn = group_and_sort_by_proximity(d_fn)
+
+                    # 📦 Combined FN CSV — Digital pool. Same flow as the per-pod FN tab.
+                    _fn_exported = st.session_state.setdefault('_fn_exported', {})
+                    _fn_route_lookup = {}
+                    _fn_options = []
+                    for _fc in sorted_d_fn:
+                        _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
+                        if not _fc_tids:
+                            continue
+                        _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
+                        _fn_route_lookup[_fc_hash] = _fc
+                        _fn_options.append(_fc_hash)
+                    _fn_select_key = "fn_combined_select_Global_Digital"
+                    _fn_label_for = lambda h: (
+                        f"{'✓ ' if h in _fn_exported else ''}{_fn_route_lookup[h].get('city','?')}, {_fn_route_lookup[h].get('state','?')} "
+                        f"— {_fn_route_lookup[h].get('stops',0)} stops · {len(_fn_route_lookup[h].get('data',[]))} tasks"
+                        + (f" · exported {_fn_exported[h]}" if h in _fn_exported else "")
+                    )
+                    st.markdown(
+                        "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
+                        "padding:8px 12px;margin:6px 0;'>"
+                        "<div style='font-size:9px;font-weight:900;color:#854d0e;text-transform:uppercase;letter-spacing:0.08em;'>"
+                        "📦 Combined FN CSV</div>"
+                        "<div style='font-size:11px;color:#475569;'>Select multiple FN routes, download a single CSV with every stop. ✓ marks routes already exported.</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.multiselect(
+                        "Select FN routes for combined CSV",
+                        options=_fn_options,
+                        format_func=_fn_label_for,
+                        key=_fn_select_key,
+                        label_visibility="collapsed",
+                        placeholder="Select FN routes to include in the combined CSV...",
+                    )
+                    _fn_selected = st.session_state.get(_fn_select_key, []) or []
+                    _fn_dl_col, _fn_clear_col = st.columns([4, 1])
+                    with _fn_dl_col:
+                        if _fn_selected:
+                            _fn_to_export = []
+                            for _h in _fn_selected:
+                                _cluster = _fn_route_lookup.get(_h)
+                                if _cluster:
+                                    _ann = dict(_cluster)
+                                    _ann['_cluster_hash'] = _h
+                                    _fn_to_export.append(_ann)
+                            try:
+                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = generate_combined_fn_upload(_fn_to_export)
+                            except Exception as _fe:
+                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
+                                _log_err("fn_combined_digital", _fe)
+                            if _fn_combined_buf is None:
+                                st.button(f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)", disabled=True, use_container_width=True, key="fn_dl_disabled_digital")
+                            else:
+                                if st.download_button(
+                                    label=f"📥 Download Combined CSV ({len(_fn_selected)} routes · {_fn_combined_stops} stops)",
+                                    data=_fn_combined_buf,
+                                    file_name=f"FN_Combined_DIGITAL_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
+                                    mime="text/csv",
+                                    key="fn_dl_combined_digital",
+                                    type="primary",
+                                    use_container_width=True,
+                                ):
+                                    _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                                    for _h in _fn_included_hashes:
+                                        _fn_exported[_h] = _ts
+                                    st.session_state['_fn_exported'] = _fn_exported
+                                    st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
+                        else:
+                            st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key="fn_dl_empty_digital")
+                    with _fn_clear_col:
+                        if st.button("↻ Reset", key="fn_reset_exported_digital", help="Clear the ✓ exported flags for the Digital FN routes", use_container_width=True):
+                            for _h in list(_fn_exported.keys()):
+                                if _h in _fn_route_lookup:
+                                    _fn_exported.pop(_h, None)
+                            st.session_state['_fn_exported'] = _fn_exported
+                            st.rerun()
+                    st.divider()
+
                     current_state = None
                     for i, c in enumerate(sorted_d_fn):
                         if c['state'] != current_state:
@@ -5202,7 +5387,9 @@ with tabs[6]:
                         _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
                         _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        _dfn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+                        _dfn_exp_check = "✓ " if _dfn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
+                        with st.expander(_dfn_exp_check + f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:
@@ -5289,7 +5476,8 @@ with tabs[6]:
                         _dins_pill = f" | 🔧 {_dins_cnt} Ins/Rem" if _dins_cnt > 0 else ""
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
+                            _dacc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
+                            with st.expander(_dacc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
                                 u_locs, _dalv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -5298,7 +5486,7 @@ with tabs[6]:
                                         _dalv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
                                 _dal_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dal_venues}</div>""", unsafe_allow_html=True)
-                                render_finalization_checklist(cluster_hash, "Global_Digital", "d_chk")
+                                render_finalization_checklist(cluster_hash, "Global_Digital", "d_chk", is_fn=(ic_name == "Field Nation"))
                         with btn_col:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
@@ -5314,14 +5502,15 @@ with tabs[6]:
                         with exp_col:
                             _gins_cnt = g.get('digi_ins', 0) or 0
                         _gins_pill = f" | 🔧 {_gins_cnt} Ins/Rem" if _gins_cnt > 0 else ""
-                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}"):
+                        _dgacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
+                        with st.expander(_dgacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}"):
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs
                                 u_locs = list(dict.fromkeys(task_locs))
                                 _dag_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dag_venues}</div>""", unsafe_allow_html=True)
-                                render_finalization_checklist(ghost_hash, "Global_Digital", "g_chk_d")
+                                render_finalization_checklist(ghost_hash, "Global_Digital", "g_chk_d", is_fn=(g_ic_name == "Field Nation"))
                         with btn_col:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)

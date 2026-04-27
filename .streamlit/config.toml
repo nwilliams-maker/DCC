@@ -3,3 +3,13 @@ primaryColor = "#633094"
 backgroundColor = "#f1f5f9"
 secondaryBackgroundColor = "#ffffff"
 textColor = "#0f172a"
+
+# Apr 27 2026 — added [server] block to harden the WebSocket against Railway's edge
+# proxy closing idle connections, which was forcing fresh sessions every ~13 minutes
+# and reverting every pod to the Initialize button. Diagnostic showed a clean ws-close
+# with no errors — classic signature of an upstream idle timeout.
+[server]
+headless = true
+enableWebsocketCompression = false
+enableXsrfProtection = false
+enableCORS = false

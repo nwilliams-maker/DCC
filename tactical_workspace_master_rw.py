@@ -3308,7 +3308,11 @@ text-decoration:none;">📨 Default Mail</a>
                 "city": cluster.get('city', 'Unknown'),
                 "state": cluster.get('state', 'Unknown'),
                 "taskIds": ",".join(task_ids),
-                "wo": f"FN-{datetime.now().strftime('%m%d%Y')}",
+                # WO# unique per route. Was previously just FN-MMDDYYYY which gave every
+                # route created on the same day the same WO — fetch_sent_records_from_sheet
+                # then collapsed them into one ghost route on refresh. Suffix with the
+                # first 6 chars of cluster_hash so each route gets a stable, unique WO.
+                "wo": f"FN-{datetime.now().strftime('%m%d%Y')}-{cluster_hash[:6].upper()}",
                 "due": str(_fn_due),
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),
@@ -4505,8 +4509,7 @@ def run_pod_tab(pod_name):
                     placeholder="Select FN routes to include in the combined CSV...",
                 )
                 _fn_selected = st.session_state.get(_fn_select_key, []) or []
-                _fn_dl_col, _fn_clear_col = st.columns([4, 1])
-                with _fn_dl_col:
+                if True:
                     if _fn_selected:
                         # Build clusters annotated with their hash so generate_combined_fn_upload
                         # can echo back which were included.
@@ -4541,14 +4544,6 @@ def run_pod_tab(pod_name):
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
                         st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key=f"fn_dl_empty_{pod_name}")
-                with _fn_clear_col:
-                    if st.button("↻ Reset", key=f"fn_reset_exported_{pod_name}", help="Clear the ✓ exported flags for this pod\'s FN routes (re-enables them in the multiselect badge but doesn\'t change anything else)", use_container_width=True):
-                        # Drop only this pod\'s FN-route hashes from the exported map.
-                        for _h in list(_fn_exported.keys()):
-                            if _h in _fn_route_lookup:
-                                _fn_exported.pop(_h, None)
-                        st.session_state['_fn_exported'] = _fn_exported
-                        st.rerun()
                 st.divider()
 
                 current_state = None
@@ -5336,8 +5331,7 @@ with tabs[6]:
                         placeholder="Select FN routes to include in the combined CSV...",
                     )
                     _fn_selected = st.session_state.get(_fn_select_key, []) or []
-                    _fn_dl_col, _fn_clear_col = st.columns([4, 1])
-                    with _fn_dl_col:
+                    if True:
                         if _fn_selected:
                             _fn_to_export = []
                             for _h in _fn_selected:
@@ -5370,13 +5364,6 @@ with tabs[6]:
                                     st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                         else:
                             st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key="fn_dl_empty_digital")
-                    with _fn_clear_col:
-                        if st.button("↻ Reset", key="fn_reset_exported_digital", help="Clear the ✓ exported flags for the Digital FN routes", use_container_width=True):
-                            for _h in list(_fn_exported.keys()):
-                                if _h in _fn_route_lookup:
-                                    _fn_exported.pop(_h, None)
-                            st.session_state['_fn_exported'] = _fn_exported
-                            st.rerun()
                     st.divider()
 
                     current_state = None

@@ -2960,9 +2960,18 @@ def smart_sync_pod(pod_name):
 def make_venue_details(data):
     """Build expandable venue location rows from cluster task data.
 
-    Mirrors the rich dispatch-view rendering so Sent/Accepted/Declined/Finalized
-    show the same per-stop pills (Kiosk count, digital Ins/Rem, escalation, total
-    Tasks) and per-task-type icon badges (🆕/🔄/⚪/🛠️/🗑️) as the Ready/Flagged tabs.
+    Per-stop header pills (only shown when count > 0):
+      🛠️ {N} Kiosk     — install count (green)
+      🔧 {N} Ins/Rem   — digital ins/rem count (teal)
+      🔥 {N}           — boosted standard task count (red)
+      ⭐ {N}              — local plus task count (amber)
+      ❗ {N}              — escalation count (red)
+      {N} Tasks              — total task count (purple pill)
+
+    Each campaign row: • {campaign}  {task-type badge}  {markers}
+    Task-type badge is 🛠️ Install / 🔄 Continuity / ⚪ Default / 🗑️ Removal /
+    🆕 New Ad / 🔧 Ins/Rem / 📵 Offline / ⚙️ Service / 📋 Custom.
+    Markers are ❗ escalation, 🔥 boosted, ⭐ local plus.
     """
     u_locs = []
     for t in data:
@@ -2972,8 +2981,9 @@ def make_venue_details(data):
         loc_tasks = [t for t in data if t['full'] == loc]
         venue = next((t.get('venue_name','') for t in loc_tasks if t.get('venue_name')), '')
 
-        # Per-stop metrics (same buckets the dispatch view computes)
+        # Per-stop metrics — same buckets the dispatch view computes.
         n_ad = c_ad = d_ad = inst = remov = digi_ins = digi_off = digi_srv = 0
+        boost_cnt = lplus_cnt = 0
         custom_types = {}
         for t in loc_tasks:
             tt = str(t.get('task_type','')).lower()
@@ -2989,31 +2999,30 @@ def make_venue_details(data):
             else:
                 _label = tt.title() or 'Other'
                 custom_types[_label] = custom_types.get(_label, 0) + 1
+            # Boosted Standard tier: 'local plus' is its own subtype, otherwise any
+            # 'boosted'-containing value counts as boosted.
+            _bs = str(t.get('boosted_standard','')).lower()
+            if 'local plus' in _bs: lplus_cnt += 1
+            elif 'boosted' in _bs: boost_cnt += 1
         t_count = len(loc_tasks)
         esc_cnt = sum(1 for t in loc_tasks if t.get('escalated'))
 
-        # Headline pills — match dispatch view layout
-        k_tag = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {inst} Kiosk</span>" if inst > 0 else ""
-        digi_ins_tag = f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {digi_ins} Ins/Rem</span>" if digi_ins > 0 else ""
-        esc_tag = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_cnt}</span>" if esc_cnt > 0 else ""
-        t_pill = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{t_count} Tasks</span>" if t_count else ""
-
-        # Compact icon row with per-task-type counts (🆕/🔄/⚪/🛠️/🗑️ and digital variants)
-        icon_parts = []
-        if n_ad > 0: icon_parts.append(f"🆕 {n_ad}")
-        if c_ad > 0: icon_parts.append(f"🔄 {c_ad}")
-        if d_ad > 0: icon_parts.append(f"⚪ {d_ad}")
-        if remov > 0: icon_parts.append(f"🗑️ {remov}")
-        if digi_off > 0: icon_parts.append(f"📵 {digi_off}")
-        if digi_srv > 0: icon_parts.append(f"⚙️ {digi_srv}")
-        for cn, cnt in custom_types.items(): icon_parts.append(f"📋 {cnt} {cn}")
-        icon_html = f" <span style='font-size:11px;color:#94a3b8;'>{' '.join(icon_parts)}</span>" if icon_parts else ""
+        # Header pills — match dispatch view layout, plus boost/local-plus counts.
+        k_tag       = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {inst} Kiosk</span>" if inst > 0 else ""
+        digi_ins_tag= f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {digi_ins} Ins/Rem</span>" if digi_ins > 0 else ""
+        boost_tag   = f" <span style='color:#dc2626;font-weight:800;font-size:10px;'>🔥 {boost_cnt}</span>" if boost_cnt > 0 else ""
+        lplus_tag   = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐ {lplus_cnt}</span>" if lplus_cnt > 0 else ""
+        esc_tag     = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_cnt}</span>" if esc_cnt > 0 else ""
+        t_pill      = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{t_count} Tasks</span>" if t_count else ""
 
         venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>" if venue else ""
 
-        # Build campaign expansion (client name + task-type badge + esc/boost markers)
-        camp_rows = []
-        seen = set()
+        # Campaign expansion: aggregate by (campaign, task type) so multiple tasks for
+        # the same client+type at one stop collapse into one row with COUNTS — and the
+        # marker pills (escalation, boosted, local plus) carry their per-group counts
+        # too, mirroring the header style.
+        from collections import defaultdict
+        camp_groups = defaultdict(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
         for t in loc_tasks:
             cmp = t.get('client_company','')
             if not cmp: continue
@@ -3028,21 +3037,40 @@ def make_venue_details(data):
             elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
             elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
             else: tt_badge = f"📋 {tt.title()}"
-            badges = f" <span style='font-size:9px;color:#94a3b8;'>{tt_badge}</span>"
-            if t.get('escalated'): badges += " ❗"
+            key = (cmp, tt_badge)
+            grp = camp_groups[key]
+            grp['cmp'] = cmp
+            grp['tt_badge'] = tt_badge
+            grp['count'] += 1
+            if t.get('escalated'): grp['esc'] += 1
             bs = str(t.get('boosted_standard','')).lower()
-            if 'local plus' in bs: badges += " ⭐"
-            elif 'boosted' in bs: badges += " 🔥"
-            row = f"<div style='font-size:10px;color:#64748b;padding-left:4px;margin-top:2px;'>• {cmp}{badges}</div>"
-            if row not in seen:
-                seen.add(row)
-                camp_rows.append(row)
+            if 'local plus' in bs: grp['lplus'] += 1
+            elif 'boosted' in bs: grp['boost'] += 1
+
+        camp_rows = []
+        for (cmp, tt_badge), grp in camp_groups.items():
+            cnt = grp['count']
+            count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
+            esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
+            boost_pill = f" <span style='color:#dc2626;font-weight:800;'>🔥 {grp['boost']}</span>" if grp['boost'] > 0 else ""
+            lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
+            row = (
+                f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
+                f"• <span style='color:#0f172a;font-weight:600;'>{cmp}</span>"
+                f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>"
+                f"{count_suffix}"
+                f"{esc_pill}{boost_pill}{lplus_pill}"
+                f"</div>"
+            )
+            camp_rows.append(row)
         camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else ""
+
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>{k_tag}{digi_ins_tag}{esc_tag} &nbsp;{t_pill}{icon_html}"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>"
+            f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
     return "".join(rows)

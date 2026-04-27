@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from streamlit_folium import st_folium
 import folium
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 
@@ -414,26 +415,80 @@ div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-te
 /* =========================================
    2. REVOKE / RE-ROUTE BUTTON — small pill
    ========================================= */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button {{
-    height: 28px !important;
-    min-height: 28px !important;
-    padding: 0 10px !important;
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    border-radius: 20px !important;
-    border: 1px solid #e2e8f0 !important;
-    background-color: #f8fafc !important;
-    color: #64748b !important;
-    box-shadow: none !important;
-    line-height: 1 !important;
-    margin-top: 4px !important;
+/* 📌 Revoke/re-route popover — the ↩️ emoji IS the button.
+   Streamlit's actual DOM (verified live, Apr 27 2026):
+     stPopover > div(unnamed) > button[stPopoverButton] > div(flex) > [label][caret]
+   So we use `button[data-testid="stPopoverButton"]` (descendant, not direct-child) and
+   target the caret via [data-testid="stIconMaterial"]. The :has() guard keeps the
+   styling scoped to the btn_col next to an expander column — leaves the standalone
+   "Confirm Field Nation Revocation" popover untouched. */
+
+/* Strip the popover wrapper + its unnamed inner div of any chrome/spacing. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > div {{
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: none !important;
     width: auto !important;
+    box-shadow: none !important;
 }}
 
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button:hover {{
-    background-color: #f3e8ff !important;
-    border-color: #633094 !important;
-    color: #633094 !important;
+/* The button itself: wipe Streamlit defaults, size to the emoji glyph. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] {{
+    all: unset !important;
+    cursor: pointer !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: auto !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 4px 0 0 0 !important;
+    font-size: 18px !important;
+    line-height: 1 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    transition: transform 0.15s ease !important;
+}}
+
+/* Strip every nested div/span/p inside the button — these carry padding/gap. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] div,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] span,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] p {{
+    padding: 0 !important;
+    margin: 0 !important;
+    gap: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    line-height: 1 !important;
+}}
+
+/* Kill the dropdown caret (Streamlit renders it as <span data-testid="stIconMaterial">expand_more</span>). */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] [data-testid="stIconMaterial"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] svg {{
+    display: none !important;
+}}
+/* And collapse the empty caret-container div so it doesn't reserve gap space. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] > div > div:last-child {{
+    display: none !important;
+}}
+
+/* Hover: scale only — no pill, no border, no shadow, no purple. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:hover,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:focus,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:active {{
+    transform: scale(1.25) !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: inherit !important;
+    outline: none !important;
 }}
 
 /* Main Expander Container */
@@ -552,17 +607,17 @@ div.refresh-btn-container > div > button,
 div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab-list"] {{
     overflow-x: hidden !important;
     flex-wrap: nowrap !important;
-    gap: 4px !important;
-    padding: 6px !important;
+    gap: 6px !important;
+    padding: 8px !important;
 }}
 div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab"] {{
-    padding: 4px 10px !important;
+    padding: 6px 16px !important;
     min-width: 0 !important;
     flex-shrink: 1 !important;
     flex-basis: auto !important;
 }}
 div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab"] p {{
-    font-size: 12px !important;
+    font-size: 13px !important;
     white-space: nowrap !important;
     margin: 0 !important;
 }}
@@ -576,7 +631,7 @@ div[data-testid="stColumn"] div[data-testid="stTabs"] [data-baseweb="tab-border"
 /* 1. Ready (Green) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) {{
     background-color: #dcfce7 !important;
-    border: 1px solid #166534 !important;
+    border: 2.5px solid #166534 !important;
 }}
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) p {{
     color: #166534 !important; 
@@ -585,7 +640,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 2. Flagged (Red) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) {{
     background-color: #fee2e2 !important;
-    border: 1px solid #991b1b !important;
+    border: 2.5px solid #991b1b !important;
 }}
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) p {{
     color: #991b1b !important; 
@@ -594,7 +649,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 3. Field Nation (Light Yellow BG / Dark Yellow Text) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) {{
     background-color: #fef9c3 !important;
-    border: 1px solid #854d0e !important;
+    border: 2.5px solid #854d0e !important;
     border-radius: 30px !important;
     margin: 0 5px !important;
 }}
@@ -606,7 +661,7 @@ div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb
 /* 4. Digital (Teal - Left Column) */
 div[data-testid="stColumn"]:nth-child(1) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) {{
     background-color: #ccfbf1 !important;
-    border: 1px solid #0f766e !important;
+    border: 2.5px solid #0f766e !important;
     border-radius: 30px !important;
     margin: 0 5px !important;
 }}
@@ -635,7 +690,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 1. Sent (Purple/Blue) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) {{
     background-color: #f3e8ff !important;
-    border: 1px solid #633094 !important;
+    border: 2.5px solid #633094 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(1) p {{
@@ -645,7 +700,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 2. Accepted (Green) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) {{
     background-color: #dcfce7 !important;
-    border: 1px solid #166534 !important;
+    border: 2.5px solid #166534 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(2) p {{
@@ -655,7 +710,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 3. Declined (Red) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) {{
     background-color: #fee2e2 !important;
-    border: 1px solid #991b1b !important;
+    border: 2.5px solid #991b1b !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(3) p {{
@@ -665,7 +720,7 @@ div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb
 /* 4. Finalized (Orange) */
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) {{
     background-color: #fffaf5 !important;
-    border: 1px solid #f97316 !important;
+    border: 2.5px solid #f97316 !important;
     border-radius: 30px !important;
 }}
 div[data-testid="stColumn"]:nth-child(2) div[data-testid="stTabs"] [data-baseweb="tab"]:nth-of-type(4) p {{
@@ -772,32 +827,78 @@ def background_fn_revoke(cluster_hash):
     except Exception as e:
         _log_err("background_fn_revoke", e)
 
-def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None):
-    """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background."""
+def _onfleet_get_state(tid, auth_header):
+    """GET an Onfleet task and return (tid, is_completed). Defaults to NOT completed
+    on any error so we err on the side of unassigning (safer for the dispatcher)."""
+    try:
+        r = requests.get(f"https://onfleet.com/api/v2/tasks/{tid}", headers=auth_header, timeout=4)
+        if r.status_code == 200:
+            t = r.json()
+            # Onfleet task state: 0=Unassigned, 1=Assigned, 2=Active, 3=Completed
+            is_done = (t.get('state') == 3) or bool((t.get('completionDetails') or {}).get('success'))
+            return (tid, is_done)
+    except Exception as e:
+        _log_err(f"_onfleet_get_state task={tid}", e)
+    return (tid, False)
 
-    # 1. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub both happen off the main thread
-    task_ids = None
+
+def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None, check_completed=False):
+    """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background.
+
+    Apr 27 2026 — completion-aware unassign (gated by check_completed=True):
+      Sent/Declined tasks are still in Onfleet state=0 (unassigned), so the old behavior
+      is correct for them — pass check_completed=False (default) and every task_id is
+      unassigned, with a simple toast.
+      Accepted/Finalized routes have tasks actively assigned to a contractor that may
+      be partially complete. Pass check_completed=True from those buttons; we then GET
+      each task in parallel and skip any with state=3 / completionDetails.success.
+      Completed work stays attributed to the contractor; only outstanding tasks are
+      returned to the pool. The toast reports the outstanding count + city/state."""
+
+    # 1. Parse all task IDs from cluster_data (str CSV or list of dicts).
+    all_task_ids = []
     if check_onfleet and cluster_data:
         try:
             raw = cluster_data.get('taskIds', '') or cluster_data.get('data', [])
             if isinstance(raw, str):
-                task_ids = [t.strip() for t in raw.split(',') if t.strip()]
+                all_task_ids = [t.strip() for t in raw.split(',') if t.strip()]
             elif isinstance(raw, list):
-                task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
+                all_task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
         except Exception as e:
             _log_err("move_to_dispatch/task_ids-parse", e)
-            task_ids = None
+            all_task_ids = []
 
+    # 2. Pick which task_ids actually get unassigned.
+    #    - check_completed=False → unassign all (Sent/Declined behavior, unchanged).
+    #    - check_completed=True  → parallel GET, skip any task already completed.
+    outstanding_ids = list(all_task_ids)
+    completed_count = 0
+    if check_completed and all_task_ids:
+        try:
+            auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+            with ThreadPoolExecutor(max_workers=min(10, len(all_task_ids))) as ex:
+                results = list(ex.map(lambda tid: _onfleet_get_state(tid, auth), all_task_ids))
+            outstanding_ids = []
+            for tid, is_done in results:
+                if is_done:
+                    completed_count += 1
+                else:
+                    outstanding_ids.append(tid)
+        except Exception as e:
+            _log_err("move_to_dispatch/state-check", e)
+            outstanding_ids = list(all_task_ids)  # fallback: unassign everything
+
+    # 3. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub.
     threading.Thread(
         target=background_sheet_move,
-        args=(cluster_hash, cluster_data, task_ids),
+        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None),
         daemon=True
     ).start()
 
-    # 2. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
+    # 4. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
     st.session_state[f"reverted_{cluster_hash}"] = True
 
-    # 3. 🧠 INSTANT RESET: Clear all state for this route
+    # 5. 🧠 INSTANT RESET: Clear all state for this route
     st.session_state.pop(f"route_state_{cluster_hash}", None)
     st.session_state.pop(f"sent_ts_{cluster_hash}", None)
     st.session_state.pop(f"contractor_{cluster_hash}", None)
@@ -819,7 +920,22 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     except Exception as _e:
         _log_err('move_to_dispatch/action-record', _e)
 
-    st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+    # 6. Toast — completion-aware variant only when check_completed=True.
+    if check_completed:
+        _city = (cluster_data.get('city') if cluster_data else '') or ''
+        _state = (cluster_data.get('state') if cluster_data else '') or ''
+        _header = (f"{_city} {_state}").strip() or "Dispatch"
+        n_out = len(outstanding_ids)
+        if n_out > 0:
+            _plural = 's' if n_out != 1 else ''
+            _kept = f" ({completed_count} completed kept)" if completed_count else ""
+            st.toast(f"✅ {n_out} Task{_plural} Unassigned from \"{ic_name}\": {_header}{_kept}")
+        elif completed_count > 0:
+            st.toast(f"✅ Route removed from \"{ic_name}\" — all {completed_count} tasks already completed.")
+        else:
+            st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+    else:
+        st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     # No st.rerun() — callback handles the rerender
 
 @st.fragment(run_every=15)
@@ -3877,7 +3993,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i, c, pod_name)
                     
         with t_flagged:
@@ -3896,7 +4012,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
@@ -3916,7 +4032,7 @@ def run_pod_tab(pod_name):
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     
-                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}"):
+                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -3954,7 +4070,7 @@ def run_pod_tab(pod_name):
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}"):
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
@@ -3982,9 +4098,9 @@ def run_pod_tab(pod_name):
                     wo_display = c.get('wo', ic_name)
                     _pill_sent = get_task_pill(c.get('data', []))
                     
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]"):
                             _venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
@@ -4005,7 +4121,7 @@ def run_pod_tab(pod_name):
     {_venues_html}
 </div>""", unsafe_allow_html=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
+                        with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
                 else:
@@ -4016,9 +4132,9 @@ def run_pod_tab(pod_name):
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4043,7 +4159,7 @@ def run_pod_tab(pod_name):
     {_gvenues_html}
 </div>""", unsafe_allow_html=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
+                        with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
                             
@@ -4074,9 +4190,9 @@ def run_pod_tab(pod_name):
                             _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
                     _k_total = sum(_k_by_addr.values())
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "")):
+                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4093,9 +4209,9 @@ def run_pod_tab(pod_name):
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
+                        with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                            st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4103,11 +4219,11 @@ def run_pod_tab(pod_name):
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
-                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "")):
+                        with st.expander(f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4118,9 +4234,9 @@ def run_pod_tab(pod_name):
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
+                        with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                            st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                     
         with t_dec:
             unified_dec = unify_and_sort_by_date(declined, [], live_hashes)
@@ -4137,18 +4253,18 @@ def run_pod_tab(pod_name):
                 ic_name = c.get('contractor_name', 'Unknown')
                 task_ids = [str(tid['id']).strip() for tid in c['data']]
                 cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
-                exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                 with exp_col:
                     comp_dec = c.get('comp', 0)
                     due_dec = c.get('due', 'N/A')
                     stops_dec, tasks_dec = c['stops'], len(c['data'])
                     _pill_dec = get_task_pill(c.get('data', []))
-                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}"):
+                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]"):
                         u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
                         _dec_venues = venue_section(make_venue_details(c['data']))
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
                 with btn_col:
-                    with st.popover("↩️", use_container_width=True):
+                    with st.popover("↩️"):
                         st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                         st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
                     
@@ -4179,9 +4295,9 @@ def run_pod_tab(pod_name):
                             _fk_by_addr[_venue] = _fk_by_addr.get(_venue, 0) + 1
                     _fk_total = sum(_fk_by_addr.values())
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "")):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4195,9 +4311,9 @@ def run_pod_tab(pod_name):
                             _fin_venues = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_fin_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
-                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Re-Route", key=f"quick_reroute_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                        with st.popover("↩️"):
+                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                            st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4206,11 +4322,11 @@ def run_pod_tab(pod_name):
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         _gfk_total = g.get('kCnt', 0) or 0
                         _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "")):
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -4218,6 +4334,10 @@ def run_pod_tab(pod_name):
                             _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             g_ic_name_fin = g.get('contractor_name', 'Unknown')
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        with st.popover("↩️"):
+                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                            st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                 
 # --- START ---
 if "ic_df" not in st.session_state:
@@ -4622,7 +4742,7 @@ with tabs[6]:
                         _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
                         _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}"):
+                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+8000, c, "Global_Digital")
                             
             with t_flagged:
@@ -4637,7 +4757,7 @@ with tabs[6]:
                         _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
                         _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}"):
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
             with t_fn:
@@ -4652,7 +4772,7 @@ with tabs[6]:
                         _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
                         _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}"):
+                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]"):
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:
@@ -4679,9 +4799,9 @@ with tabs[6]:
                         tasks_cnt, stops_cnt = len(c['data']), c['stops']
                         wo_display = c.get('wo', ic_name)
                         
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                                 u_locs, _dslv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -4691,7 +4811,7 @@ with tabs[6]:
                                 _ds_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
-                            with st.popover("↩️", use_container_width=True):
+                            with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
                     else:
@@ -4702,9 +4822,9 @@ with tabs[6]:
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                         
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}"):
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs
@@ -4712,7 +4832,7 @@ with tabs[6]:
                                 _dsg_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dsg_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
-                            with st.popover("↩️", use_container_width=True):
+                            with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
             
@@ -4737,7 +4857,7 @@ with tabs[6]:
                         
                         _dins_cnt = sum(1 for tk in c['data'] if 'ins' in str(tk.get('task_type','')).lower() or 'rem' in str(tk.get('task_type','')).lower())
                         _dins_pill = f" | 🔧 {_dins_cnt} Ins/Rem" if _dins_cnt > 0 else ""
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
                             with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "")):
                                 u_locs, _dalv = [], []
@@ -4750,7 +4870,7 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dal_venues}</div>""", unsafe_allow_html=True)
                                 render_finalization_checklist(cluster_hash, "Global_Digital", "d_chk")
                         with btn_col:
-                            with st.popover("↩️", use_container_width=True):
+                            with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
                     else:
@@ -4760,7 +4880,7 @@ with tabs[6]:
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                         
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
                             _gins_cnt = g.get('digi_ins', 0) or 0
                         _gins_pill = f" | 🔧 {_gins_cnt} Ins/Rem" if _gins_cnt > 0 else ""
@@ -4773,7 +4893,7 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dag_venues}</div>""", unsafe_allow_html=True)
                                 render_finalization_checklist(ghost_hash, "Global_Digital", "g_chk_d")
                         with btn_col:
-                            with st.popover("↩️", use_container_width=True):
+                            with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
 
@@ -4792,7 +4912,7 @@ with tabs[6]:
                     task_ids = [str(t['id']).strip() for t in c['data']]
                     cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
                     ic_name = c.get('contractor_name', 'Unknown')
-                    exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         comp_ddec = c.get('comp', 0); due_ddec = c.get('due', 'N/A')
                         stops_ddec, tasks_ddec = c['stops'], len(c['data'])
@@ -4800,7 +4920,7 @@ with tabs[6]:
                             _ddec_venues = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_ddec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_ddec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_ddec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_ddec}</div></div></div>{_ddec_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
-                        with st.popover("↩️", use_container_width=True):
+                        with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
                     
@@ -4825,7 +4945,7 @@ with tabs[6]:
                         
                         _dfins_cnt = sum(1 for tk in c['data'] if 'ins' in str(tk.get('task_type','')).lower() or 'rem' in str(tk.get('task_type','')).lower())
                         _dfins_pill = f" | 🔧 {_dfins_cnt} Ins/Rem" if _dfins_cnt > 0 else ""
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
                             with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "")):
                                 u_locs, _dflv = [], []
@@ -4837,9 +4957,9 @@ with tabs[6]:
                                 _dfl_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dfl_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
-                            with st.popover("↩️", use_container_width=True):
-                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Re-Route", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                                st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c, "check_completed": True})
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4848,7 +4968,7 @@ with tabs[6]:
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                         
-                        exp_col, btn_col = st.columns([8.5, 1.5], vertical_alignment="center")
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
                             _gdfins_cnt = g.get('digi_ins', 0) or 0
                         _gdfins_pill = f" | 🔧 {_gdfins_cnt} Ins/Rem" if _gdfins_cnt > 0 else ""
@@ -4859,6 +4979,10 @@ with tabs[6]:
                                 u_locs = list(dict.fromkeys(task_locs))
                                 _dgf_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dgf_venues}</div>""", unsafe_allow_html=True)
+                        with btn_col:
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                                st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                         
 # --- FINAL FOOTER (End of File) ---
 st.markdown("---")

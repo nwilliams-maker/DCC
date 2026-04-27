@@ -1330,11 +1330,27 @@ def fetch_sent_records_from_sheet():
                         if _act in ('Revoked', 'Re-Routed', 'Ghost Archived'):
                             _ic = str(_ap.get('archive_ic', '') or _ap.get('icn', '') or '')
                             _ats = _ap.get('archive_ts', '')
+                            _dt = pd.Timestamp.min
                             try:
-                                _dt = pd.to_datetime(_ats) if _ats else pd.Timestamp.min
+                                if _ats:
+                                    _parsed = pd.to_datetime(_ats, errors='coerce', utc=True)
+                                    # Make tz-naive so it can sort against sheet "Date Created"
+                                    # values (which parse without a timezone). pandas 2.x raises
+                                    # TypeError on tz_convert(None); tz_localize(None) is the
+                                    # supported call to strip tz from a tz-aware Timestamp.
+                                    if pd.notna(_parsed):
+                                        try:
+                                            _dt = _parsed.tz_localize(None)
+                                        except (TypeError, AttributeError):
+                                            _dt = _parsed
                             except Exception:
                                 _dt = pd.Timestamp.min
-                            _ts_display = _dt.strftime('%m/%d %I:%M %p') if _dt is not pd.Timestamp.min and pd.notna(_dt) else ''
+                            _ts_display = ''
+                            try:
+                                if pd.notna(_dt) and _dt is not pd.Timestamp.min:
+                                    _ts_display = _dt.strftime('%m/%d %I:%M %p')
+                            except Exception:
+                                _ts_display = ''
                             _hist_status = 'revoked' if _act == 'Revoked' else ('re-routed' if _act == 'Re-Routed' else 'ghost-archived')
                             _tids_str = str(_ap.get('taskIds', ''))
                             for _tid in _tids_str.replace('|', ',').split(','):
@@ -1353,9 +1369,22 @@ def fetch_sent_records_from_sheet():
         except Exception as _ae:
             _log_err("fetch_sent_records_from_sheet/archive_harvest", _ae)
 
-        # Sort each task's events chronologically (oldest first).
+        # Sort each task's events chronologically (oldest first). The key strips any
+        # accidental tz from raw_ts so a single tz-aware value can\'t poison the sort
+        # and trigger the outer "Failed to fetch portal records" catch.
+        def _sort_key(e):
+            ts = e.get('raw_ts') or pd.Timestamp.min
+            try:
+                if pd.notna(ts) and getattr(ts, 'tzinfo', None) is not None:
+                    return ts.tz_localize(None)
+            except Exception:
+                pass
+            return ts if pd.notna(ts) else pd.Timestamp.min
         for _tid, _evts in history_db.items():
-            _evts.sort(key=lambda e: (e.get('raw_ts') or pd.Timestamp.min))
+            try:
+                _evts.sort(key=_sort_key)
+            except Exception as _se:
+                _log_err(f"history_db sort tid={_tid}", _se)
         return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")

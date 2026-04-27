@@ -816,53 +816,32 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
     except Exception as e:
         _log_err("background_sheet_move/archive", e)
 
-    # Onfleet cleanup — ORDER MATTERS:
-    #   1. DELETE the route plan first (detaches tasks from the route bundle). Onfleet
-    #      rejects `PUT worker:null` on tasks that are still part of an active route plan
-    #      with errors like "Cannot modify task assigned to a route" — earlier versions
-    #      did task PUTs first and silently failed, so the worker kept seeing the route.
-    #   2. PUT each task with worker:null and metadata=[] to return it to the team pool.
-    #   3. Log non-200 responses so silent failures stop being silent (was previously a
-    #      bare `try/except` that ate the error response).
-    auth = None
-    if task_ids or (isinstance(payload_json, dict) and payload_json.get('onfleet_route_id')):
+    # Onfleet scrub: PUT worker:null + metadata:[] on each task that was passed in.
+    # task_ids has already been filtered to OUTSTANDING tasks by move_to_dispatch when
+    # check_completed=True (Accepted/Finalized callsites) — completed tasks stay
+    # attributed to the contractor and never reach this loop. For Sent/Declined revokes,
+    # check_completed=False so every task_id gets unassigned (state=0 already, no-op
+    # in practice but harmless).
+    # Status codes are logged so non-200 responses (auth, rate limit, etc.) stop being
+    # silent — earlier the bare try/except ate the response body.
+    if task_ids:
         try:
             auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+            scrub_payload = json.dumps({"worker": None, "metadata": []})
+            for tid in task_ids:
+                try:
+                    r = requests.put(
+                        f"https://onfleet.com/api/v2/tasks/{tid}",
+                        headers={**auth, "Content-Type": "application/json"},
+                        data=scrub_payload,
+                        timeout=10,
+                    )
+                    if r.status_code != 200:
+                        _log_err(f"background_sheet_move/scrub task={tid}", f"HTTP {r.status_code}: {r.text[:300]}")
+                except Exception as e:
+                    _log_err(f"background_sheet_move/scrub task={tid}", e)
         except Exception as e:
-            _log_err("background_sheet_move/auth", e)
-            auth = None
-
-    # 1. DELETE route plan first.
-    onfleet_route_id = None
-    if isinstance(payload_json, dict):
-        onfleet_route_id = payload_json.get('onfleet_route_id') or None
-    if auth and onfleet_route_id:
-        try:
-            r = requests.delete(
-                f"https://onfleet.com/api/v2/routePlans/{onfleet_route_id}",
-                headers={**auth, "Content-Type": "application/json"},
-                timeout=10,
-            )
-            if r.status_code not in (200, 204):
-                _log_err(f"background_sheet_move/delete-routePlan id={onfleet_route_id}", f"HTTP {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            _log_err(f"background_sheet_move/delete-routePlan id={onfleet_route_id}", e)
-
-    # 2. PUT each task to unassign worker + clear WO/PAY metadata so it returns to pool.
-    if auth and task_ids:
-        scrub_payload = json.dumps({"worker": None, "metadata": []})
-        for tid in task_ids:
-            try:
-                r = requests.put(
-                    f"https://onfleet.com/api/v2/tasks/{tid}",
-                    headers={**auth, "Content-Type": "application/json"},
-                    data=scrub_payload,
-                    timeout=10,
-                )
-                if r.status_code != 200:
-                    _log_err(f"background_sheet_move/scrub task={tid}", f"HTTP {r.status_code}: {r.text[:300]}")
-            except Exception as e:
-                _log_err(f"background_sheet_move/scrub task={tid}", e)
+            _log_err("background_sheet_move/scrub-outer", e)
         
 # --- 2. INSTANT REVOKE LOGIC ---
 def background_fn_revoke(cluster_hash):

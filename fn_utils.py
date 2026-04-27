@@ -85,9 +85,14 @@ def _fn_window():
         return "", ""
 
 
-def _fn_stop_rows(cluster: dict, start_date: str, end_date: str):
+def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: int = 1):
     """Yield one CSV row per unique stop address in this cluster. Used by both
-    generate_fn_upload (single cluster) and generate_combined_fn_upload (many)."""
+    generate_fn_upload (single cluster) and generate_combined_fn_upload (many).
+
+    bundle_number: integer that becomes the value of the "Bundle" column for every
+    row from this cluster. The combined generator passes 1, 2, 3, ... for each
+    cluster so the dispatcher can sort/group all rows belonging to one route in the
+    final spreadsheet. Single-cluster generate_fn_upload always passes 1."""
     stop_task_map: dict = {}
     for t in cluster.get('data', []):
         addr = t.get('full', '')
@@ -113,6 +118,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str):
         manager    = FN_STATE_MANAGER.get(state, '')
 
         base_row = [
+            bundle_number,
             venue_name,
             street,
             city,
@@ -158,6 +164,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str):
 
 def _fn_csv_headers():
     base_headers = [
+        "Bundle",
         "Location Name", "Address #1", "City", "State", "Postal Code", "Country",
         "Schedule Type", "Scheduled Start Date", "Scheduled Start Time",
         "Scheduled End Date", "Scheduled End Time", "Pay Type", "Pay Rate",
@@ -236,8 +243,10 @@ def generate_combined_fn_upload(clusters: list):
 
     total_stops = 0
     included_hashes = []
-    for cluster in clusters or []:
-        rows = list(_fn_stop_rows(cluster, start_date, end_date))
+    # Number each cluster 1, 2, 3, ... so every row carries its parent route\'s
+    # bundle index. Sort by Bundle in the final spreadsheet to group them back.
+    for _bundle_idx, cluster in enumerate(clusters or [], start=1):
+        rows = list(_fn_stop_rows(cluster, start_date, end_date, bundle_number=_bundle_idx))
         ch = cluster.get('_cluster_hash') or cluster.get('cluster_hash') or ''
         included_hashes.append(ch)
         if rows:

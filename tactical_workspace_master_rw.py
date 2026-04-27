@@ -803,6 +803,11 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None):
         try:
             auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
             scrub_payload = json.dumps({"worker": None, "metadata": []})
+            # Apr 27 2026 — bookend the scrub loop with start/end log lines so we can
+            # tell if the loop is running at all (silent no-PUT vs. PUTs returning 200).
+            _scrub_total = len(task_ids)
+            _scrub_ok = 0
+            _log_err("background_sheet_move/scrub-start", f"scrubbing {_scrub_total} tasks for cluster {cluster_hash}")
             for tid in task_ids:
                 try:
                     _r = requests.put(
@@ -811,16 +816,16 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None):
                         data=scrub_payload,
                         timeout=10,
                     )
-                    # Apr 27 2026 — log non-200 responses so silent Onfleet failures
-                    # (route-plan constraint, auth, validation, rate limit) surface in
-                    # Railway logs. NO behavior change — just visibility.
-                    if _r.status_code != 200:
+                    if _r.status_code == 200:
+                        _scrub_ok += 1
+                    else:
                         _body = ""
                         try: _body = _r.text[:300]
                         except Exception: _body = ""
                         _log_err(f"background_sheet_move/scrub task={tid}", f"HTTP {_r.status_code}: {_body}")
                 except Exception as e:
                     _log_err(f"background_sheet_move/scrub task={tid}", e)
+            _log_err("background_sheet_move/scrub-end", f"scrubbed {_scrub_ok}/{_scrub_total} successfully for cluster {cluster_hash}")
         except Exception as e:
             _log_err("background_sheet_move/scrub-outer", e)
         
@@ -896,17 +901,40 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             _log_err("move_to_dispatch/state-check", e)
             outstanding_ids = list(all_task_ids)  # fallback: unassign everything
 
-    # 3. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub.
+    # 3. Onfleet unassign — SYNCHRONOUS parallel PUTs on the main thread. The daemon-
+    # thread version was failing silently (Streamlit thread context issues, no Railway
+    # log output), so the worker kept seeing routes after revoke. This runs the PUTs
+    # inline; toast at the bottom of this function reflects the real result.
+    if outstanding_ids:
+        try:
+            _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
+            _put_payload = json.dumps({"worker": None, "metadata": []})
+            def _do_put(tid):
+                try:
+                    r = requests.put(f"https://onfleet.com/api/v2/tasks/{tid}", headers=_put_auth, data=_put_payload, timeout=8)
+                    if r.status_code != 200:
+                        _log_err(f"move_to_dispatch/unassign task={tid}", f"HTTP {r.status_code}: {r.text[:200]}")
+                    return (tid, r.status_code)
+                except Exception as e:
+                    _log_err(f"move_to_dispatch/unassign task={tid}", e)
+                    return (tid, -1)
+            with ThreadPoolExecutor(max_workers=min(10, len(outstanding_ids))) as _ex:
+                _put_results = list(_ex.map(_do_put, outstanding_ids))
+        except Exception as e:
+            _log_err("move_to_dispatch/unassign-outer", e)
+
+    # 4. Fire-and-forget the SHEET archival to GAS in a background thread (no Onfleet
+    # work — pass task_ids=None so background_sheet_move skips its own scrub block).
     threading.Thread(
         target=background_sheet_move,
-        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None),
+        args=(cluster_hash, cluster_data, None),
         daemon=True
     ).start()
 
-    # 4. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
+    # 5. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
     st.session_state[f"reverted_{cluster_hash}"] = True
 
-    # 5. 🧠 INSTANT RESET: Clear all state for this route
+    # 6. 🧠 INSTANT RESET: Clear all state for this route
     st.session_state.pop(f"route_state_{cluster_hash}", None)
     st.session_state.pop(f"sent_ts_{cluster_hash}", None)
     st.session_state.pop(f"contractor_{cluster_hash}", None)

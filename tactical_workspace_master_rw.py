@@ -1264,6 +1264,11 @@ def fetch_sent_records_from_sheet():
         sent_dict = {}
         # 🌟 THE FIX: Add Global_Digital to the dictionary!
         ghost_routes = {"Blue": [], "Green": [], "Orange": [], "Purple": [], "Red": [], "Global_Digital": [], "UNKNOWN": []}
+        # 📤 FN-Posted hydration: cluster_hash → display timestamp for any FN
+        # row whose JSON payload has fn_posted_ts (set by GAS markFNPosted).
+        # Merged into st.session_state['_fn_posted'] at end-of-function so any
+        # local additions made between this read and the next GAS sync survive.
+        fn_posted_dict = {}
         # 📜 HISTORY DB: per-task event list, in chronological order across every
         # sheet tab a task ever appeared in. Used by render_dispatch to show "declined by X",
         # "removed from Field Nation on Y", etc. on Ready cards so dispatchers see the
@@ -1300,6 +1305,18 @@ def fetch_sent_records_from_sheet():
                             else:
                                 continue # Skip empty date rows just to be safe
                             
+                            # 📤 Harvest fn_posted_ts so the FN tab's Sent group
+                            # survives reloads. Only relevant for the Field Nation tab.
+                            if status_label == "field_nation":
+                                _fp_ts_raw = p.get('fn_posted_ts')
+                                _fp_hash = p.get('cluster_hash')
+                                if _fp_ts_raw and _fp_hash:
+                                    try:
+                                        _fp_dt = pd.to_datetime(_fp_ts_raw)
+                                        fn_posted_dict[_fp_hash] = _fp_dt.strftime('%m/%d %I:%M %p')
+                                    except Exception:
+                                        fn_posted_dict[_fp_hash] = str(_fp_ts_raw)
+
                             # 1. Live Task Matching
                             for tid in tids:
                                 tid = tid.strip()
@@ -1474,6 +1491,16 @@ def fetch_sent_records_from_sheet():
                 _evts.sort(key=_sort_key)
             except Exception as _se:
                 _log_err(f"history_db sort tid={_tid}", _se)
+        # Merge sheet-side FN-posted timestamps into session_state. Use merge
+        # (not replace) so a click that fired the GAS write but hasn't been
+        # read back yet doesn't get clobbered by a stale read.
+        try:
+            _ss_fp = st.session_state.get('_fn_posted', {}) or {}
+            for _fp_h, _fp_ts in fn_posted_dict.items():
+                _ss_fp.setdefault(_fp_h, _fp_ts)
+            st.session_state['_fn_posted'] = _ss_fp
+        except Exception as _fpe:
+            _log_err("fn_posted_hydrate", _fpe)
         return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
@@ -4561,10 +4588,86 @@ def run_pod_tab(pod_name):
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
                         st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key=f"fn_dl_empty_{pod_name}")
+
+                # 📤 POSTED TO FIELD NATION — same multiselect drives this button.
+                # Moves each selected route into the "Sent" section below within
+                # this FN tab. Tracking is session-scoped (st.session_state['_fn_posted']
+                # keyed by cluster hash → timestamp) — no GAS write, since per the
+                # ownership model 1 Associate owns the FN tab and there's no
+                # cross-contamination with other surfaces.
+                _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+                if _fn_selected:
+                    _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+                    if st.button(
+                        f"📤 Posted to Field Nation ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                        key=f"fn_post_btn_{pod_name}",
+                        use_container_width=True,
+                        type="secondary",
+                        disabled=(len(_newly_posting) == 0),
+                    ):
+                        _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                        for _h in _fn_selected:
+                            _fn_posted_dict[_h] = _ts
+                        st.session_state['_fn_posted'] = _fn_posted_dict
+                        # 📤 Fire-and-forget GAS write so the Sent group survives
+                        # reloads and is shared across Associate sessions. Background
+                        # thread — UI doesn't wait. Single POST batches all hashes.
+                        try:
+                            _hashes_csv = ",".join(_fn_selected)
+                            threading.Thread(
+                                target=lambda: requests.post(
+                                    GAS_WEB_APP_URL,
+                                    json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                    timeout=15,
+                                ),
+                                daemon=True,
+                            ).start()
+                        except Exception as _fpe:
+                            _log_err("markFNPosted/pod", _fpe)
+                        st.toast(f"📤 Marked {len(_newly_posting)} route(s) as Posted to Field Nation.")
+                        st.rerun()
+                else:
+                    st.button(
+                        "📤 Posted to Field Nation (none selected)",
+                        key=f"fn_post_btn_empty_{pod_name}",
+                        use_container_width=True,
+                        disabled=True,
+                    )
                 st.divider()
 
+                # Partition the FN routes into Pending (not yet posted) and Sent (posted).
+                # Render Pending first, then Sent — each with its own banner header.
+                _fn_pending_list, _fn_sent_list = [], []
+                for _c in sorted_fn:
+                    _ch = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in _c.get('data', [])])).encode()).hexdigest()
+                    (_fn_sent_list if _ch in _fn_posted_dict else _fn_pending_list).append(_c)
+                _fn_ordered = _fn_pending_list + _fn_sent_list
+
+                if _fn_pending_list:
+                    st.markdown(
+                        "<div style='background:#fffbeb; border-left:3px solid #f59e0b; "
+                        "padding:6px 12px; margin:6px 0 4px 0; border-radius:6px;'>"
+                        f"<span style='font-size:11px; font-weight:900; color:#92400e; "
+                        "text-transform:uppercase; letter-spacing:0.08em;'>📋 Pending Post — "
+                        f"{len(_fn_pending_list)} route(s)</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
                 current_state = None
-                for i, c in enumerate(sorted_fn):
+                _entered_sent_zone = False
+                for i, c in enumerate(_fn_ordered):
+                    # Inject the "Sent" banner at the boundary between pending and sent.
+                    if (not _entered_sent_zone) and i == len(_fn_pending_list) and _fn_sent_list:
+                        st.markdown(
+                            "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
+                            "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
+                            f"<span style='font-size:11px; font-weight:900; color:#065f46; "
+                            "text-transform:uppercase; letter-spacing:0.08em;'>📤 Sent — Posted to Field Nation · "
+                            f"{len(_fn_sent_list)} route(s)</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                        current_state = None  # reset so the first state-header re-renders inside the Sent zone
+                        _entered_sent_zone = True
                     if c['state'] != current_state:
                         current_state = c['state']
                         st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
@@ -5513,10 +5616,79 @@ with tabs[6]:
                                     st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                         else:
                             st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key="fn_dl_empty_digital")
+
+                    # 📤 POSTED TO FIELD NATION — Digital tab. Same flow / state key as the
+                    # per-pod FN tab so the Sent set is shared across pods (one Associate
+                    # owns the whole FN view).
+                    _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+                    if _fn_selected:
+                        _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+                        if st.button(
+                            f"📤 Posted to Field Nation ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                            key="fn_post_btn_digital",
+                            use_container_width=True,
+                            type="secondary",
+                            disabled=(len(_newly_posting) == 0),
+                        ):
+                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                            for _h in _fn_selected:
+                                _fn_posted_dict[_h] = _ts
+                            st.session_state['_fn_posted'] = _fn_posted_dict
+                            # 📤 Persist via GAS so Sent group survives reload (see pod FN handler).
+                            try:
+                                _hashes_csv = ",".join(_fn_selected)
+                                threading.Thread(
+                                    target=lambda: requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                        timeout=15,
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            except Exception as _fpe:
+                                _log_err("markFNPosted/digital", _fpe)
+                            st.toast(f"📤 Marked {len(_newly_posting)} digital route(s) as Posted to Field Nation.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "📤 Posted to Field Nation (none selected)",
+                            key="fn_post_btn_empty_digital",
+                            use_container_width=True,
+                            disabled=True,
+                        )
                     st.divider()
 
+                    # Partition into Pending Post + Sent (Posted to Field Nation).
+                    _fn_pending_list, _fn_sent_list = [], []
+                    for _c in sorted_d_fn:
+                        _ch = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in _c.get('data', [])])).encode()).hexdigest()
+                        (_fn_sent_list if _ch in _fn_posted_dict else _fn_pending_list).append(_c)
+                    _fn_ordered = _fn_pending_list + _fn_sent_list
+
+                    if _fn_pending_list:
+                        st.markdown(
+                            "<div style='background:#fffbeb; border-left:3px solid #f59e0b; "
+                            "padding:6px 12px; margin:6px 0 4px 0; border-radius:6px;'>"
+                            f"<span style='font-size:11px; font-weight:900; color:#92400e; "
+                            "text-transform:uppercase; letter-spacing:0.08em;'>📋 Pending Post — "
+                            f"{len(_fn_pending_list)} route(s)</span></div>",
+                            unsafe_allow_html=True,
+                        )
+
                     current_state = None
-                    for i, c in enumerate(sorted_d_fn):
+                    _entered_sent_zone = False
+                    for i, c in enumerate(_fn_ordered):
+                        if (not _entered_sent_zone) and i == len(_fn_pending_list) and _fn_sent_list:
+                            st.markdown(
+                                "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
+                                "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
+                                f"<span style='font-size:11px; font-weight:900; color:#065f46; "
+                                "text-transform:uppercase; letter-spacing:0.08em;'>📤 Sent — Posted to Field Nation · "
+                                f"{len(_fn_sent_list)} route(s)</span></div>",
+                                unsafe_allow_html=True,
+                            )
+                            current_state = None
+                            _entered_sent_zone = True
                         if c['state'] != current_state:
                             current_state = c['state']
                             st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
@@ -5728,6 +5900,7 @@ with tabs[6]:
                             _gdfins_cnt = g.get('digi_ins', 0) or 0
                         _gdfins_pill = f" | 🔧 {_gdfins_cnt} Ins/Rem" if _gdfins_cnt > 0 else ""
                         with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}"):
+                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs

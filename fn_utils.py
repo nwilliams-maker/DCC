@@ -102,19 +102,24 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
     if not kiosk_stops:
         return None, 0
 
-    # Format due date as M/D/YYYY without leading zeros, cross-platform.
+    # Format date as M/D/YYYY without leading zeros, cross-platform.
     # Was previously using %-m/%-d which is Linux-only and raises ValueError on Windows.
     def _fmt_date(d):
         return f"{d.month}/{d.day}/{d.year}"
+    # Field Nation requires Start Date != End Date.
+    # Per dispatcher policy: Start = today + 2 days, End = today + 14 days (2 weeks).
+    # Both anchored on today's date — the route's due date is no longer used to set
+    # the FN window, since FN uploads need a fixed 2-week scheduling window regardless
+    # of the contractor-facing due date.
     try:
-        if hasattr(due, 'year') and hasattr(due, 'month') and hasattr(due, 'day'):
-            start_date = _fmt_date(due)
-            end_date   = _fmt_date(due)
-        else:
-            due_dt     = datetime.strptime(str(due), "%Y-%m-%d")
-            start_date = _fmt_date(due_dt)
-            end_date   = _fmt_date(due_dt)
-    except Exception:
+        _now    = datetime.now()
+        start_dt = _now + timedelta(days=2)
+        end_dt   = _now + timedelta(days=14)
+        start_date = _fmt_date(start_dt)
+        end_date   = _fmt_date(end_dt)
+    except Exception as e:
+        print(f"[fn_utils.generate_fn_upload date format] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        # Fall back to a safe 2-week window from now if anything goes wrong.
         start_date = str(due)
         end_date   = str(due)
 

@@ -785,14 +785,20 @@ div.mini-btn button {{
 """, unsafe_allow_html=True)
 
 # --- 1. BACKGROUND THREAD WORKER ---
-def background_sheet_move(cluster_hash, payload_json, task_ids=None):
-    """Silent worker to update Google Sheets AND scrub Onfleet — never blocks the UI."""
+def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_label="Revoked", ic_name=""):
+    """Silent worker to update Google Sheets AND scrub Onfleet — never blocks the UI.
+
+    Apr 27 2026 — also stamps action_label + ic_name into the Archive row so the
+    Ready-card history banner can recover Revoked/Re-Routed events after a session
+    reset (was previously session-only via st.session_state[\'_actions_*\'])."""
     try:
         requests.post(GAS_WEB_APP_URL, json={
             "action": "archiveRoute",
             "cluster_hash": cluster_hash,
             "taskIds": ",".join(task_ids) if task_ids else "",  # Fallback for hash mismatch
-            "payload": payload_json if payload_json else {}
+            "payload": payload_json if payload_json else {},
+            "action_label": action_label,
+            "ic_name": ic_name,
         }, timeout=15)
     except Exception as e:
         _log_err("background_sheet_move/archive", e)
@@ -891,7 +897,7 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # 3. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub.
     threading.Thread(
         target=background_sheet_move,
-        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None),
+        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None, action_label, ic_name),
         daemon=True
     ).start()
 
@@ -1243,9 +1249,10 @@ def fetch_sent_records_from_sheet():
             except Exception: continue
             
         # 🌟 ARCHIVE SIDE-CHANNEL: harvest WOs of archived routes so the WO counter
-        # can move past suffixes that were "freed" when a route was archived.
-        # We ONLY read JSON.archived_wo here — never tasks, never status, never anything that
-        # could put archived rows back into clustering.
+        # can move past suffixes that were "freed" when a route was archived. We also
+        # harvest revoke/re-route HISTORY events (Apr 27 2026) so the Ready-card history
+        # banner survives session resets — was previously session-only via _actions_*.
+        # Tasks/status are still NEVER read into clustering — only into history_db.
         _archived_wos = set()
         try:
             _archive_df = pd.read_csv(base_url + str(ARCHIVE_GID))
@@ -1257,6 +1264,29 @@ def fetch_sent_records_from_sheet():
                         _orig = str(_ap.get('archived_wo', '') or '').strip()
                         if _orig and _orig.lower() != 'archived':
                             _archived_wos.add(_orig)
+                        # History harvest: Revoked / Re-Routed / Ghost Archived events
+                        _act = str(_ap.get('archive_action', '') or '').strip()
+                        if _act in ('Revoked', 'Re-Routed', 'Ghost Archived'):
+                            _ic = str(_ap.get('archive_ic', '') or _ap.get('icn', '') or '')
+                            _ats = _ap.get('archive_ts', '')
+                            try:
+                                _dt = pd.to_datetime(_ats) if _ats else pd.Timestamp.min
+                            except Exception:
+                                _dt = pd.Timestamp.min
+                            _ts_display = _dt.strftime('%m/%d %I:%M %p') if _dt is not pd.Timestamp.min and pd.notna(_dt) else ''
+                            _hist_status = 'revoked' if _act == 'Revoked' else ('re-routed' if _act == 'Re-Routed' else 'ghost-archived')
+                            _tids_str = str(_ap.get('taskIds', ''))
+                            for _tid in _tids_str.replace('|', ',').split(','):
+                                _tid = _tid.strip()
+                                if not _tid:
+                                    continue
+                                history_db.setdefault(_tid, []).append({
+                                    'status': _hist_status,
+                                    'name': _ic,
+                                    'time': _ts_display,
+                                    'wo': _orig,
+                                    'raw_ts': _dt,
+                                })
                     except Exception:
                         pass
         except Exception as _ae:
@@ -2180,32 +2210,47 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # 📜 Route history banner — documents the 3 events that matter when a route
     # comes back to Ready: Declined (from the contractor portal, sourced from the sheet),
     # Revoked (dispatcher pulled it back), Re-Routed (dispatcher moved it to a new IC).
+    # Apr 27 2026 — Revoked/Re-Routed are now ALSO sheet-backed via Archive, so the
+    # banner survives session resets. Session-state actions are still merged in for
+    # instant feedback before the GAS round-trip lands.
     if not is_sent and not is_declined:
         _events = []
+        _seen = set()
 
-        # 1. Declined events from the sheet history (one per sheet row).
+        # 1. Declined / Revoked / Re-Routed events from sheet-backed history_db.
         _hist_db = st.session_state.get('_history_db', {})
-        _seen_dec = set()
+        _STATUS_TO_KIND = {
+            'declined':       'Declined',
+            'revoked':        'Revoked',
+            'ghost-archived': 'Revoked',  # archived ghost rows are conceptually revokes
+            're-routed':      'Re-Routed',
+        }
         for _tid in task_ids:
             for _h in _hist_db.get(_tid, []):
-                if _h.get('status') != 'declined':
+                _kind = _STATUS_TO_KIND.get(_h.get('status', ''))
+                if not _kind:
                     continue
-                _key = (_h.get('name',''), _h.get('time',''), _h.get('wo',''))
-                if _key in _seen_dec:
+                _key = (_kind, _h.get('name',''), _h.get('time',''), _h.get('wo',''))
+                if _key in _seen:
                     continue
-                _seen_dec.add(_key)
+                _seen.add(_key)
                 _events.append({
-                    'kind': 'Declined',
+                    'kind': _kind,
                     'ic':   _h.get('name',''),
                     'wo':   _h.get('wo',''),
                     'time': _h.get('time',''),
                     'ts':   _h.get('raw_ts'),
                 })
 
-        # 2. Revoked / Re-Routed actions from session state (set by move_to_dispatch).
+        # 2. Revoked / Re-Routed actions from session state (instant feedback before
+        # the GAS archiveRoute round-trip lands in the sheet).
         for _a in st.session_state.get(f'_actions_{cluster_hash}', []):
             _act = _a.get('action','')
             if _act in ('Revoked', 'Re-Routed'):
+                _key = (_act, _a.get('ic',''), _a.get('time',''), '')
+                if _key in _seen:
+                    continue
+                _seen.add(_key)
                 _events.append({
                     'kind': _act,
                     'ic':   _a.get('ic',''),

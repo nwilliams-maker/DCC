@@ -414,18 +414,27 @@ div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-te
 /* =========================================
    2. REVOKE / RE-ROUTE BUTTON — small pill
    ========================================= */
-/* 📌 Revoke/re-route popover — the ↩️ emoji IS the button. No box, no border, no
-   background, no padding. The clickable area is exactly the size of the glyph itself. */
-/* Strip the popover wrapper of any chrome/spacing */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] {{
+/* 📌 Revoke/re-route popover — the ↩️ emoji IS the button.
+   Streamlit's actual DOM (verified live, Apr 27 2026):
+     stPopover > div(unnamed) > button[stPopoverButton] > div(flex) > [label][caret]
+   So we use `button[data-testid="stPopoverButton"]` (descendant, not direct-child) and
+   target the caret via [data-testid="stIconMaterial"]. The :has() guard keeps the
+   styling scoped to the btn_col next to an expander column — leaves the standalone
+   "Confirm Field Nation Revocation" popover untouched. */
+
+/* Strip the popover wrapper + its unnamed inner div of any chrome/spacing. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > div {{
     padding: 0 !important;
     margin: 0 !important;
-    width: auto !important;
     background: transparent !important;
     border: none !important;
+    width: auto !important;
+    box-shadow: none !important;
 }}
-/* The button itself: reset everything, then size to the emoji content. */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button {{
+
+/* The button itself: wipe Streamlit defaults, size to the emoji glyph. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] {{
     all: unset !important;
     cursor: pointer !important;
     display: inline-flex !important;
@@ -436,40 +445,49 @@ div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child
     min-width: 0 !important;
     min-height: 0 !important;
     padding: 0 !important;
-    margin: 6px 0 0 0 !important;
+    margin: 4px 0 0 0 !important;
     font-size: 18px !important;
     line-height: 1 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
     transition: transform 0.15s ease !important;
 }}
-/* Strip margin/padding from the markdown <p> wrapper around the emoji. */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button p,
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button > div {{
-    margin: 0 !important;
+
+/* Strip every nested div/span/p inside the button — these carry padding/gap. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] div,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] span,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] p {{
     padding: 0 !important;
-    line-height: 1 !important;
+    margin: 0 !important;
+    gap: 0 !important;
     background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    line-height: 1 !important;
 }}
-/* Hover: scale only, no background pill, no border, no shadow. */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button:hover {{
+
+/* Kill the dropdown caret (Streamlit renders it as <span data-testid="stIconMaterial">expand_more</span>). */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] [data-testid="stIconMaterial"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] svg {{
+    display: none !important;
+}}
+/* And collapse the empty caret-container div so it doesn't reserve gap space. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"] > div > div:last-child {{
+    display: none !important;
+}}
+
+/* Hover: scale only — no pill, no border, no shadow, no purple. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:hover,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:focus,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) button[data-testid="stPopoverButton"]:active {{
     transform: scale(1.25) !important;
     background: transparent !important;
     border: none !important;
     box-shadow: none !important;
     color: inherit !important;
-}}
-/* Hide the popover's dropdown caret entirely — Nick wants just the ↩️ icon, no chrome.
-   Streamlit renders the caret as either an <svg>, a Material-Symbols <span>, or a generic
-   <i>/icon container depending on version, so we catch all variants. Applied globally so
-   every revoke/re-route popover is bare regardless of column structure — the click still
-   opens the popover, only the caret glyph is gone. */
-div[data-testid="stPopover"] > button svg,
-div[data-testid="stPopover"] > button [class*="material-symbols"],
-div[data-testid="stPopover"] > button [class*="MaterialIcon"],
-div[data-testid="stPopover"] > button [data-testid*="Icon"],
-div[data-testid="stPopover"] > button > i,
-div[data-testid="stPopover"] > button [aria-label*="caret" i],
-div[data-testid="stPopover"] > button [aria-label*="dropdown" i] {{
-    display: none !important;
+    outline: none !important;
 }}
 
 /* Main Expander Container */

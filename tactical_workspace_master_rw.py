@@ -805,12 +805,20 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None):
             scrub_payload = json.dumps({"worker": None, "metadata": []})
             for tid in task_ids:
                 try:
-                    requests.put(
+                    _r = requests.put(
                         f"https://onfleet.com/api/v2/tasks/{tid}",
                         headers={**auth, "Content-Type": "application/json"},
                         data=scrub_payload,
                         timeout=10,
                     )
+                    # Apr 27 2026 — log non-200 responses so silent Onfleet failures
+                    # (route-plan constraint, auth, validation, rate limit) surface in
+                    # Railway logs. NO behavior change — just visibility.
+                    if _r.status_code != 200:
+                        _body = ""
+                        try: _body = _r.text[:300]
+                        except Exception: _body = ""
+                        _log_err(f"background_sheet_move/scrub task={tid}", f"HTTP {_r.status_code}: {_body}")
                 except Exception as e:
                     _log_err(f"background_sheet_move/scrub task={tid}", e)
         except Exception as e:

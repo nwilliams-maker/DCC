@@ -4871,6 +4871,44 @@ if "ic_df" not in st.session_state:
 # --- HEADER ROW ---
 st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 
+# 🔍 DEBUG: Worker task-count diagnostics — only renders when ?debug=1 is in the URL.
+# Shows the raw Onfleet /workers?analytics=true response shape so we can see why
+# the contractor 🔵{N} task counts are coming back as 0 for everyone. Once the
+# field name / response shape is confirmed, fetch_worker_task_counts() can be
+# patched and this block can stay dormant (or be removed) — it's behind a query
+# param so end-users never see it.
+if st.query_params.get("debug") == "1":
+    with st.sidebar.expander("🔍 Worker API Debug", expanded=False):
+        if st.button("Probe /workers?analytics=true", key="_dbg_workers_probe"):
+            try:
+                _r = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
+                st.write(f"**HTTP**: {_r.status_code}")
+                if _r.status_code == 200:
+                    _data = _r.json()
+                    st.write(f"**Worker count**: {len(_data)}")
+                    if _data:
+                        _w0 = _data[0]
+                        st.write("**First worker keys**:", sorted(_w0.keys()))
+                        st.write("**phone**:", _w0.get('phone'))
+                        st.write("**tasks (raw)**:", _w0.get('tasks'))
+                        st.write("**tasks type**:", type(_w0.get('tasks')).__name__)
+                        _tasks = _w0.get('tasks') or []
+                        st.write("**len(tasks)**:", len(_tasks) if isinstance(_tasks, list) else "(not a list)")
+                        # Show analytics blob if it exists — Onfleet sometimes nests counts there
+                        st.write("**analytics field**:", _w0.get('analytics'))
+                        # Sample of task counts across all workers, so we can see if SOMEONE has tasks
+                        _all_counts = [(w.get('name', '?'), len(w.get('tasks') or [])) for w in _data]
+                        _nonzero = [(n, c) for n, c in _all_counts if c > 0]
+                        st.write(f"**Workers with tasks > 0**: {len(_nonzero)} / {len(_data)}")
+                        if _nonzero:
+                            st.write("**Top 5 by count**:", sorted(_nonzero, key=lambda x: -x[1])[:5])
+                else:
+                    st.write("**Response body**:", _r.text[:500])
+            except Exception as _e:
+                st.error(f"{type(_e).__name__}: {_e}")
+        st.caption("Add `?debug=1` to the URL to see this panel. Click Probe to inspect Onfleet's response shape — tells us which field holds the task count and whether phone matches our IC database.")
+
+
 # Updated Main Tabs
 tabs = st.tabs(["Global", "Blue Pod", "Green Pod", "Orange Pod", "Purple Pod", "Red Pod", "Digital"])
 # --- TAB 0: GLOBAL CONTROL ---
@@ -5582,8 +5620,8 @@ with tabs[6]:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                        
-# --- FINAL FOOTER (End of File) ---
+
+# --- FOOTER ---
 st.markdown("---")
 st.markdown(
     """
@@ -5591,6 +5629,6 @@ st.markdown(
         Tactical Workspace Master • 2026 Digital Logistics Interface • <b>v2.4.0</b><br>
         <i>All digital and static route data is synced in real-time.</i>
     </div>
-    """, 
+    """,
     unsafe_allow_html=True
-    )
+)

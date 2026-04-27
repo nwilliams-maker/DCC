@@ -915,17 +915,46 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             _log_err("move_to_dispatch/state-check", e)
             outstanding_ids = list(all_task_ids)  # fallback: unassign everything
 
-    # 3. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub.
+    # 3. Onfleet unassign — route through GAS `unassignTasks` action so we get the
+    # same rate-limit backoff + per-task error reporting that assignTasksToWorker uses.
+    # Python posts once; GAS does the per-task PUTs with onfleetFetchWithBackoff and
+    # 70ms throttling, then returns {unassigned, total, errors:[{task,status,body}]}.
+    unassign_ok = 0
+    unassign_fail = []  # list of (tid, status, body[:80])
+    if check_onfleet and outstanding_ids:
+        try:
+            _gres = requests.post(
+                GAS_WEB_APP_URL,
+                json={
+                    "action": "unassignTasks",
+                    "taskIds": ",".join(outstanding_ids),
+                },
+                timeout=45,  # GAS may take a few seconds for large routes
+            ).json()
+            unassign_ok = int(_gres.get('unassigned', 0))
+            for _err in (_gres.get('errors') or []):
+                unassign_fail.append((
+                    str(_err.get('task', '')),
+                    int(_err.get('status', -1)),
+                    str(_err.get('body', ''))[:80],
+                ))
+        except Exception as e:
+            _log_err("move_to_dispatch/gas-unassign", e)
+            unassign_fail = [(tid, -1, str(e)[:80]) for tid in outstanding_ids]
+
+    # 4. 🚀 FIRE AND FORGET: Sheet archival only — Onfleet PUTs already done above.
+    # Pass task_ids=None so background_sheet_move skips its Onfleet loop (would be
+    # redundant now and would bury its own failures in stdout).
     threading.Thread(
         target=background_sheet_move,
-        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None, action_label, ic_name),
+        args=(cluster_hash, cluster_data, None, action_label, ic_name),
         daemon=True
     ).start()
 
-    # 4. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
+    # 5. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
     st.session_state[f"reverted_{cluster_hash}"] = True
 
-    # 5. 🧠 INSTANT RESET: Clear all state for this route
+    # 6. 🧠 INSTANT RESET: Clear all state for this route
     st.session_state.pop(f"route_state_{cluster_hash}", None)
     st.session_state.pop(f"sent_ts_{cluster_hash}", None)
     st.session_state.pop(f"contractor_{cluster_hash}", None)
@@ -947,7 +976,9 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     except Exception as _e:
         _log_err('move_to_dispatch/action-record', _e)
 
-    # 6. Toast — completion-aware variant only when check_completed=True.
+    # 7. Toast — completion-aware variant when check_completed=True. If any unassign
+    #    PUT came back non-200, also fire a separate red toast surfacing the failure
+    #    count + first error body so the dispatcher can act (vs. quietly missing it).
     if check_completed:
         _city = (cluster_data.get('city') if cluster_data else '') or ''
         _state = (cluster_data.get('state') if cluster_data else '') or ''
@@ -955,14 +986,23 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         n_out = len(outstanding_ids)
         if n_out > 0:
             _plural = 's' if n_out != 1 else ''
-            _kept = f" ({completed_count} completed kept)" if completed_count else ""
-            st.toast(f"✅ {n_out} Task{_plural} Unassigned from \"{ic_name}\": {_header}{_kept}")
+            st.toast(f"{n_out} Task{_plural} Unassigned from \"{ic_name}\": {_header}")
         elif completed_count > 0:
-            st.toast(f"✅ Route removed from \"{ic_name}\" — all {completed_count} tasks already completed.")
+            st.toast(f"All tasks for \"{ic_name}\" already completed — nothing to unassign.")
         else:
-            st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+            st.toast(f"{action_label}: route moved back to Dispatch.")
     else:
         st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+
+    # Surface Onfleet unassign failures so they aren\'t silent. Examples we expect:
+    # HTTP 401 (auth), 404 (stale task ID), 4xx (route plan constraint or validation),
+    # -1 (network). The dispatcher sees this immediately instead of finding out later
+    # when the worker still has the route in their app.
+    if unassign_fail:
+        _first_status = unassign_fail[0][1]
+        _first_body = unassign_fail[0][2]
+        _msg = f"⚠️ Onfleet unassign failed for {len(unassign_fail)} task(s). First error: HTTP {_first_status} — {_first_body}"
+        st.toast(_msg, icon="⚠️")
     # No st.rerun() — callback handles the rerender
 
 @st.fragment(run_every=15)

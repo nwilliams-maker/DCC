@@ -2600,9 +2600,17 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             
     # --- 3. CONTRACTOR FILTERING (100 MILES) ---
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
-    ic_opts = {} 
+    ic_opts = {}
     v_ics = pd.DataFrame()
-    _worker_counts = st.session_state.get('_worker_counts', {})
+    # 🔵 Lazy-init worker task counts so the badge works on first page load too.
+    # Previously _worker_counts was only populated at the END of process_pod /
+    # smart_sync_pod, so any render_dispatch call before those (or after a hard
+    # reload that reset session_state) would silently fall back to {} and every
+    # contractor would show 🔵0. The cached fetch (@st.cache_data ttl=120) means
+    # this is a single ~200ms call once per dispatcher session, not per cluster.
+    if '_worker_counts' not in st.session_state:
+        st.session_state['_worker_counts'] = fetch_worker_task_counts()
+    _worker_counts = st.session_state['_worker_counts']
 
     if not ic_df.empty:
         ic_df.columns = [str(c).strip().lower() for c in ic_df.columns]

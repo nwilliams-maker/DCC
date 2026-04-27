@@ -4878,8 +4878,72 @@ st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Cent
 # patched and this block can stay dormant (or be removed) — it's behind a query
 # param so end-users never see it.
 if st.query_params.get("debug") == "1":
-    with st.expander("🔍 Worker API Debug", expanded=True):
-        if st.button("Probe /workers?analytics=true", key="_dbg_workers_probe"):
+    with st.expander("🔍 IC ↔ Worker Phone-Match Debug", expanded=True):
+        if st.button("🔗 Cross-reference IC database with Onfleet workers", key="_dbg_ic_xref"):
+            try:
+                _r = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
+                if _r.status_code != 200:
+                    st.error(f"Onfleet HTTP {_r.status_code}: {_r.text[:300]}")
+                else:
+                    _data = _r.json()
+                    # Build worker phone → count map (same logic as fetch_worker_task_counts)
+                    _wcounts = {}
+                    for _w in _data:
+                        _wphone = re.sub(r'\D', '', str(_w.get('phone', '')))[-10:]
+                        if _wphone:
+                            _wcounts[_wphone] = (_w.get('name', '?'), len(_w.get('tasks') or []))
+                    st.write(f"**Onfleet workers indexed by phone**: {len(_wcounts)}")
+
+                    # Inspect IC database
+                    _ic_df = st.session_state.get('ic_df', pd.DataFrame())
+                    st.write(f"**IC database row count**: {len(_ic_df)}")
+                    st.write(f"**IC columns (lowercased)**: {list(_ic_df.columns)}")
+
+                    # Try to find a phone-like column
+                    _phone_cols = [c for c in _ic_df.columns if 'phone' in c.lower() or 'cell' in c.lower() or 'mobile' in c.lower()]
+                    st.write(f"**Candidate phone columns**: {_phone_cols}")
+
+                    if 'phone' in _ic_df.columns:
+                        _used_col = 'phone'
+                    elif _phone_cols:
+                        _used_col = _phone_cols[0]
+                        st.warning(f"⚠️ No column named 'phone' — code is looking for 'phone' but your IC sheet has '{_used_col}'. THAT'S THE BUG.")
+                    else:
+                        _used_col = None
+                        st.error("❌ No phone-like column found in IC database. The 🔵 badge can't work without one.")
+
+                    if _used_col:
+                        # Sample raw + normalized phones from IC
+                        _samples = []
+                        _matched = 0
+                        _empty = 0
+                        for _, _row in _ic_df.head(50).iterrows():
+                            _raw = str(_row.get(_used_col, ''))
+                            _norm = re.sub(r'\D', '', _raw)[-10:]
+                            if not _norm:
+                                _empty += 1
+                            elif _norm in _wcounts:
+                                _matched += 1
+                            _samples.append((_row.get('name', '?'), _raw, _norm, _norm in _wcounts))
+                        st.write(f"**Sampled first 50 IC rows from column '{_used_col}'**:")
+                        st.write(f"  • Matched in Onfleet: **{_matched}/50**")
+                        st.write(f"  • Empty after normalize: **{_empty}/50**")
+                        st.write("**First 10 samples** (name | raw | normalized | matched?):")
+                        for _n, _r_, _nm, _m in _samples[:10]:
+                            _ico = "✅" if _m else "❌"
+                            st.text(f"  {_ico} {_n[:25]:25} | {_r_[:20]:20} | {_nm:12} | {_m}")
+
+                        # Show the full count of matches across the whole IC table
+                        _full_matched = 0
+                        for _, _row in _ic_df.iterrows():
+                            _norm = re.sub(r'\D', '', str(_row.get(_used_col, '')))[-10:]
+                            if _norm and _norm in _wcounts:
+                                _full_matched += 1
+                        st.write(f"**Total IC rows matching an Onfleet worker by phone**: **{_full_matched} / {len(_ic_df)}**")
+            except Exception as _e:
+                st.error(f"{type(_e).__name__}: {_e}")
+        st.caption("Click to compare IC database phones against Onfleet worker phones. Shows the bug: column name mismatch, format mismatch, or empty cells.")
+        if st.button("Probe /workers?analytics=true (raw)", key="_dbg_workers_probe"):
             try:
                 _r = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
                 st.write(f"**HTTP**: {_r.status_code}")
@@ -5615,7 +5679,7 @@ with tabs[6]:
                                 else: task_locs = raw_locs
                                 u_locs = list(dict.fromkeys(task_locs))
                                 _dgf_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
-                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dgf_venues}</div>""", unsafe_allow_html=True)
+                                st.markdown(f'''<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dgf_venues}</div>''', unsafe_allow_html=True)
                         with btn_col:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)

@@ -3217,6 +3217,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     "phone": str(ic.get('phone', '')),
                     "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
                     "taskIds": ",".join(task_ids),
+                    # Apr 27 2026 — list of task IDs that are digital, used by GAS
+                    # assignTasksToWorker to SKIP setting completeAfter for those tasks
+                    # (digital tasks should keep their original Onfleet start time;
+                    # only physical kiosk tasks get the today+2 @ 4pm bump).
+                    "digitalTaskIds": ",".join(str(t['id']).strip() for t in cluster['data'] if t.get('is_digital')),
                     "tCnt": len(task_ids),
                     "kCnt": cluster.get('inst_count', 0),
                     "rCnt": cluster.get('remov_count', 0),

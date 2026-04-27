@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from streamlit_folium import st_folium
 import folium
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 
@@ -826,32 +827,78 @@ def background_fn_revoke(cluster_hash):
     except Exception as e:
         _log_err("background_fn_revoke", e)
 
-def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None):
-    """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background."""
+def _onfleet_get_state(tid, auth_header):
+    """GET an Onfleet task and return (tid, is_completed). Defaults to NOT completed
+    on any error so we err on the side of unassigning (safer for the dispatcher)."""
+    try:
+        r = requests.get(f"https://onfleet.com/api/v2/tasks/{tid}", headers=auth_header, timeout=4)
+        if r.status_code == 200:
+            t = r.json()
+            # Onfleet task state: 0=Unassigned, 1=Assigned, 2=Active, 3=Completed
+            is_done = (t.get('state') == 3) or bool((t.get('completionDetails') or {}).get('success'))
+            return (tid, is_done)
+    except Exception as e:
+        _log_err(f"_onfleet_get_state task={tid}", e)
+    return (tid, False)
 
-    # 1. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub both happen off the main thread
-    task_ids = None
+
+def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None, check_completed=False):
+    """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background.
+
+    Apr 27 2026 — completion-aware unassign (gated by check_completed=True):
+      Sent/Declined tasks are still in Onfleet state=0 (unassigned), so the old behavior
+      is correct for them — pass check_completed=False (default) and every task_id is
+      unassigned, with a simple toast.
+      Accepted/Finalized routes have tasks actively assigned to a contractor that may
+      be partially complete. Pass check_completed=True from those buttons; we then GET
+      each task in parallel and skip any with state=3 / completionDetails.success.
+      Completed work stays attributed to the contractor; only outstanding tasks are
+      returned to the pool. The toast reports the outstanding count + city/state."""
+
+    # 1. Parse all task IDs from cluster_data (str CSV or list of dicts).
+    all_task_ids = []
     if check_onfleet and cluster_data:
         try:
             raw = cluster_data.get('taskIds', '') or cluster_data.get('data', [])
             if isinstance(raw, str):
-                task_ids = [t.strip() for t in raw.split(',') if t.strip()]
+                all_task_ids = [t.strip() for t in raw.split(',') if t.strip()]
             elif isinstance(raw, list):
-                task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
+                all_task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
         except Exception as e:
             _log_err("move_to_dispatch/task_ids-parse", e)
-            task_ids = None
+            all_task_ids = []
 
+    # 2. Pick which task_ids actually get unassigned.
+    #    - check_completed=False → unassign all (Sent/Declined behavior, unchanged).
+    #    - check_completed=True  → parallel GET, skip any task already completed.
+    outstanding_ids = list(all_task_ids)
+    completed_count = 0
+    if check_completed and all_task_ids:
+        try:
+            auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+            with ThreadPoolExecutor(max_workers=min(10, len(all_task_ids))) as ex:
+                results = list(ex.map(lambda tid: _onfleet_get_state(tid, auth), all_task_ids))
+            outstanding_ids = []
+            for tid, is_done in results:
+                if is_done:
+                    completed_count += 1
+                else:
+                    outstanding_ids.append(tid)
+        except Exception as e:
+            _log_err("move_to_dispatch/state-check", e)
+            outstanding_ids = list(all_task_ids)  # fallback: unassign everything
+
+    # 3. 🚀 FIRE AND FORGET: Sheet update + Onfleet scrub.
     threading.Thread(
         target=background_sheet_move,
-        args=(cluster_hash, cluster_data, task_ids),
+        args=(cluster_hash, cluster_data, outstanding_ids if outstanding_ids else None),
         daemon=True
     ).start()
 
-    # 2. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
+    # 4. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
     st.session_state[f"reverted_{cluster_hash}"] = True
 
-    # 3. 🧠 INSTANT RESET: Clear all state for this route
+    # 5. 🧠 INSTANT RESET: Clear all state for this route
     st.session_state.pop(f"route_state_{cluster_hash}", None)
     st.session_state.pop(f"sent_ts_{cluster_hash}", None)
     st.session_state.pop(f"contractor_{cluster_hash}", None)
@@ -873,7 +920,22 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     except Exception as _e:
         _log_err('move_to_dispatch/action-record', _e)
 
-    st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+    # 6. Toast — completion-aware variant only when check_completed=True.
+    if check_completed:
+        _city = (cluster_data.get('city') if cluster_data else '') or ''
+        _state = (cluster_data.get('state') if cluster_data else '') or ''
+        _header = (f"{_city} {_state}").strip() or "Dispatch"
+        n_out = len(outstanding_ids)
+        if n_out > 0:
+            _plural = 's' if n_out != 1 else ''
+            _kept = f" ({completed_count} completed kept)" if completed_count else ""
+            st.toast(f"✅ {n_out} Task{_plural} Unassigned from \"{ic_name}\": {_header}{_kept}")
+        elif completed_count > 0:
+            st.toast(f"✅ Route removed from \"{ic_name}\" — all {completed_count} tasks already completed.")
+        else:
+            st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
+    else:
+        st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     # No st.rerun() — callback handles the rerender
 
 @st.fragment(run_every=15)
@@ -4149,7 +4211,7 @@ def run_pod_tab(pod_name):
                     with btn_col:
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                            st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4174,7 +4236,7 @@ def run_pod_tab(pod_name):
                     with btn_col:
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                            st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                     
         with t_dec:
             unified_dec = unify_and_sort_by_date(declined, [], live_hashes)
@@ -4251,7 +4313,7 @@ def run_pod_tab(pod_name):
                     with btn_col:
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                            st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4275,7 +4337,7 @@ def run_pod_tab(pod_name):
                     with btn_col:
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                            st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                 
 # --- START ---
 if "ic_df" not in st.session_state:
@@ -4897,7 +4959,7 @@ with tabs[6]:
                         with btn_col:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c, "check_completed": True})
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -4920,7 +4982,7 @@ with tabs[6]:
                         with btn_col:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                                st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                         
 # --- FINAL FOOTER (End of File) ---
 st.markdown("---")

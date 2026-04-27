@@ -2213,8 +2213,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             _log_err(f"process_pod/{pod_name}", f"skipped {_skipped_assigned} already-assigned tasks (state=0 leak)")
 
         # 📊 Save attrition funnel to session state for the supercard expander.
+        # NOTE: raw_fetched == after_dedup now because the shared cached helper
+        # (_fetch_onfleet_open_tasks_cached) dedupes internally before returning.
+        # The pre-dedup count is no longer accessible here.
         st.session_state[f'_attrition_{pod_name}'] = {
-            'raw_fetched': len(all_tasks_raw),
+            'raw_fetched': len(all_tasks),
             'after_dedup': len(all_tasks),
             'skipped_no_state_cf': _skipped_no_state_cf,
             'skipped_assigned_worker': _skipped_assigned,
@@ -4875,6 +4878,14 @@ if "ic_df" not in st.session_state:
         df.columns = [str(c).strip().lower() for c in df.columns]
         st.session_state.ic_df = df
     except: st.error("Database connection failed.")
+
+# 🔵 PAGE-LOAD LAZY-INIT for worker task counts. Populates st.session_state['_worker_counts']
+# on the very first render of every fresh page load, BEFORE any tab/cluster renders. The
+# previous in-render_dispatch placement only fired when a pod tab was active with at least
+# one cluster — so dispatchers landing on the Global tab never saw real counts. The cached
+# fetch (@st.cache_data ttl=120) means this is one shared API call per worker session.
+if '_worker_counts' not in st.session_state:
+    st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
 # --- HEADER ROW ---
 st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)

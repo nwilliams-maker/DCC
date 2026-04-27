@@ -4940,7 +4940,7 @@ with tabs[0]:
             if is_loading:
                 card_content = f"<p class='loading-pulse' style='color:{colors['border']}; margin-top:25px;'>📡 SYNCING...</p>"
             elif has_data:
-                pod_cls = st.session_state[f"clusters_{pod}"]
+                pod_cls = [c for c in st.session_state[f"clusters_{pod}"] if not c.get('is_digital')]
                 total_routes = len(pod_cls)
                 total_tasks = sum(len(c['data']) for c in pod_cls)
                 total_stops = sum(c['stops'] for c in pod_cls)

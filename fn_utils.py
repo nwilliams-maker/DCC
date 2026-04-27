@@ -64,28 +64,30 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mass upload file generator
+# FN CSV — internal row builder shared by single + combined generators
 # ---------------------------------------------------------------------------
-def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float, cluster_hash: str):
-    """
-    Generates a Field Nation mass upload CSV file.
+def _fmt_fn_date(d):
+    """Format date as M/D/YYYY without leading zeros, cross-platform.
+    Was previously using %-m/%-d which is Linux-only and raises ValueError on Windows."""
+    return f"{d.month}/{d.day}/{d.year}"
 
-    Structure:
-      - One row per stop address
-      - One numbered slot (1–5) per unique locationinVenue at that stop
-      - $20 fixed per stop (PAY_PER_STOP)
-      - Work Order Manager resolved by state via FN_STATE_MANAGER
 
-    Custom field mapping per slot:
-      N. Customer Name   → clientCompany
-      1. Venue ID        → venueId  (slot 1 only)
-      N. Location in Venue → taskType + " — " + locationinVenue
+def _fn_window():
+    """Field Nation requires Start Date != End Date.
+    Per dispatcher policy: Start = today + 2 days, End = today + 14 days."""
+    try:
+        _now = datetime.now()
+        start_dt = _now + timedelta(days=2)
+        end_dt   = _now + timedelta(days=14)
+        return _fmt_fn_date(start_dt), _fmt_fn_date(end_dt)
+    except Exception as e:
+        print(f"[fn_utils._fn_window] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return "", ""
 
-    Returns:
-      (BytesIO buffer, int stop_count)  or  (None, 0) if no kiosk stops found.
-    """
 
-    # Build address → [tasks] grouped by unique locationinVenue — all stops
+def _fn_stop_rows(cluster: dict, start_date: str, end_date: str):
+    """Yield one CSV row per unique stop address in this cluster. Used by both
+    generate_fn_upload (single cluster) and generate_combined_fn_upload (many)."""
     stop_task_map: dict = {}
     for t in cluster.get('data', []):
         addr = t.get('full', '')
@@ -98,52 +100,9 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
         if loc not in existing:
             stop_task_map[addr].append(t)
 
-    kiosk_stops = [(addr, tasks) for addr, tasks in stop_task_map.items() if tasks]
-    if not kiosk_stops:
-        return None, 0
-
-    # Format date as M/D/YYYY without leading zeros, cross-platform.
-    # Was previously using %-m/%-d which is Linux-only and raises ValueError on Windows.
-    def _fmt_date(d):
-        return f"{d.month}/{d.day}/{d.year}"
-    # Field Nation requires Start Date != End Date.
-    # Per dispatcher policy: Start = today + 2 days, End = today + 14 days (2 weeks).
-    # Both anchored on today's date — the route's due date is no longer used to set
-    # the FN window, since FN uploads need a fixed 2-week scheduling window regardless
-    # of the contractor-facing due date.
-    try:
-        _now    = datetime.now()
-        start_dt = _now + timedelta(days=2)
-        end_dt   = _now + timedelta(days=14)
-        start_date = _fmt_date(start_dt)
-        end_date   = _fmt_date(end_dt)
-    except Exception as e:
-        print(f"[fn_utils.generate_fn_upload date format] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        # Fall back to a safe 2-week window from now if anything goes wrong.
-        start_date = str(due)
-        end_date   = str(due)
-
-    # Headers: base columns + 5 numbered custom field sets
-    base_headers = [
-        "Location Name", "Address #1", "City", "State", "Postal Code", "Country",
-        "Schedule Type", "Scheduled Start Date", "Scheduled Start Time",
-        "Scheduled End Date", "Scheduled End Time", "Pay Type", "Pay Rate",
-        "Approximate Hours to Complete", "Est. WO-Value", "Work Order Manager", "",
-    ]
-    custom_headers = []
-    for n in range(1, 6):
-        custom_headers.append(f"{n}. Customer Name")
-        if n == 1:
-            custom_headers.append("1. Venue ID")
-        custom_headers.append(f"{n}. Location in Venue")
-
-    all_headers = base_headers + custom_headers
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(all_headers)
-
-    for addr, tasks in kiosk_stops:
+    for addr, tasks in stop_task_map.items():
+        if not tasks:
+            continue
         parts    = [p.strip() for p in addr.split(",")]
         street   = parts[0] if len(parts) > 0 else addr
         city     = parts[1] if len(parts) > 1 else cluster.get('city', '')
@@ -194,9 +153,100 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
                 custom_cols.append("")
             custom_cols.append("")
 
-        writer.writerow(base_row + custom_cols)
+        yield base_row + custom_cols
 
-    # Return as bytes for st.download_button
+
+def _fn_csv_headers():
+    base_headers = [
+        "Location Name", "Address #1", "City", "State", "Postal Code", "Country",
+        "Schedule Type", "Scheduled Start Date", "Scheduled Start Time",
+        "Scheduled End Date", "Scheduled End Time", "Pay Type", "Pay Rate",
+        "Approximate Hours to Complete", "Est. WO-Value", "Work Order Manager", "",
+    ]
+    custom_headers = []
+    for n in range(1, 6):
+        custom_headers.append(f"{n}. Customer Name")
+        if n == 1:
+            custom_headers.append("1. Venue ID")
+        custom_headers.append(f"{n}. Location in Venue")
+    return base_headers + custom_headers
+
+
+# ---------------------------------------------------------------------------
+# Mass upload file generator — single cluster (backward-compatible)
+# ---------------------------------------------------------------------------
+def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float, cluster_hash: str):
+    """
+    Generates a Field Nation mass upload CSV file for a SINGLE cluster.
+
+    Returns:
+      (BytesIO buffer, int stop_count)  or  (None, 0) if no kiosk stops found.
+    """
+    start_date, end_date = _fn_window()
+    if not start_date:
+        # Fall back to the route's due date if window calc fails.
+        start_date = str(due)
+        end_date   = str(due)
+
+    rows = list(_fn_stop_rows(cluster, start_date, end_date))
+    if not rows:
+        return None, 0
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_fn_csv_headers())
+    writer.writerows(rows)
+
     bytes_buf = io.BytesIO(buf.getvalue().encode('utf-8'))
     bytes_buf.seek(0)
-    return bytes_buf, len(kiosk_stops)
+    return bytes_buf, len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Mass upload file generator — combined (many clusters in one CSV)
+# ---------------------------------------------------------------------------
+def generate_combined_fn_upload(clusters: list):
+    """
+    Generates ONE Field Nation mass upload CSV containing rows from every cluster
+    in `clusters`. Each cluster's stops contribute their own row(s); headers appear
+    once at the top.
+
+    Apr 27 2026 — added so the dispatcher can batch-export multiple FN routes into
+    a single upload instead of downloading and stitching together N separate CSVs.
+
+    Args:
+        clusters: list of cluster dicts (same shape as generate_fn_upload\'s `cluster`).
+
+    Returns:
+        (BytesIO buffer, int total_stop_count, list[str] cluster_hashes_included).
+        cluster_hashes_included only contains the hashes of clusters that actually
+        contributed rows — clusters with no kiosk-eligible stops are silently skipped
+        but their hashes still appear so the caller can mark them as exported.
+    """
+    start_date, end_date = _fn_window()
+    if not start_date:
+        # No good window — pick today / today+14 anyway as a safety fallback.
+        _t = datetime.now()
+        start_date = _fmt_fn_date(_t + timedelta(days=2))
+        end_date   = _fmt_fn_date(_t + timedelta(days=14))
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_fn_csv_headers())
+
+    total_stops = 0
+    included_hashes = []
+    for cluster in clusters or []:
+        rows = list(_fn_stop_rows(cluster, start_date, end_date))
+        ch = cluster.get('_cluster_hash') or cluster.get('cluster_hash') or ''
+        included_hashes.append(ch)
+        if rows:
+            writer.writerows(rows)
+            total_stops += len(rows)
+
+    if total_stops == 0:
+        return None, 0, included_hashes
+
+    bytes_buf = io.BytesIO(buf.getvalue().encode('utf-8'))
+    bytes_buf.seek(0)
+    return bytes_buf, total_stops, included_hashes

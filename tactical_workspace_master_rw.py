@@ -858,12 +858,12 @@ div.mini-btn button {{
    =========================================
    Streamlit's multiselect popup keeps showing the empty dropdown panel with
    "No results" centered text after every option has been selected. Hide it:
-   target popovers/listboxes that contain ZERO real role="option" children. */
+   target listboxes that contain ZERO real role="option" children. Scoped to
+   ul[role=listbox] only — was previously also targeting div[data-baseweb=popover]
+   which also matches st.popover containers (revoke confirmation prompts), so
+   the latter selector was breaking every popover in the app. */
 ul[role="listbox"]:not(:has(li[role="option"])),
 ul[role="listbox"]:not(:has([role="option"])) {{
-    display: none !important;
-}}
-div[data-baseweb="popover"]:not(:has([role="option"])) {{
     display: none !important;
 }}
 
@@ -5926,6 +5926,8 @@ with tabs[6]:
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+
+# --- FOOTER ---
 
 # --- FOOTER ---
 st.markdown("---")

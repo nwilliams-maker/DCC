@@ -107,6 +107,77 @@ STATE_MAP = {
 
 headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🌍 SHARED ONFLEET PULL — process-scoped cache (60s TTL)
+# ─────────────────────────────────────────────────────────────────────────────
+# With 5 Dispatchers + 1+ Associates on the same Railway instance, every pod
+# Initialize / Sync click was independently paginating tasks/all?state=0 — so
+# 5-7 identical pulls would burn through the Onfleet rate budget and trigger
+# "Bandwidth quota exceeded" errors. This shared cache means only the first
+# caller within a 60-second window pays the network cost; everyone else gets
+# the in-memory result instantly.
+#
+# st.cache_data is process-scoped (not session-scoped) so it's shared across
+# all dispatchers on the same Railway worker. Concurrent calls block on the
+# first call's result — no thundering-herd to Onfleet.
+#
+# Failures (non-200, non-429) raise so they don't poison the cache. The 60s
+# TTL is the staleness ceiling — if a Dispatcher's view is more than a minute
+# old they can hit Sync Routes; if it's less, the cached result is fresh
+# enough for dispatching decisions.
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_onfleet_open_tasks_cached():
+    """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
+    'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
+    Raises on hard error so the failure isn't cached."""
+    APPROVED_TEAMS = [
+        "a - escalation", "b - boosted campaigns", "b - local campaigns",
+        "c - priority nationals", "cvs kiosk removal", "digital routes",
+        "n - national campaigns",
+    ]
+    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
+    target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
+    esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
+    cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
+
+    all_tasks_raw = []
+    time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
+    url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
+
+    _MAX_PAGES = 200
+    _page = 0
+    _seen_last_ids = set()
+    while url and _page < _MAX_PAGES:
+        _page += 1
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 429:
+            time.sleep(2)
+            continue
+        if response.status_code != 200:
+            # Raise so st.cache_data discards this attempt — the next caller
+            # will retry instead of inheriting a half-populated list.
+            raise RuntimeError(f"Onfleet API error {response.status_code}: {response.text[:200]}")
+        res_json = response.json()
+        all_tasks_raw.extend(res_json.get('tasks', []))
+        _next_id = res_json.get('lastId')
+        if _next_id and _next_id in _seen_last_ids:
+            break
+        if _next_id:
+            _seen_last_ids.add(_next_id)
+        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
+
+    unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
+    return {
+        'tasks': unique_tasks,
+        'target_team_ids': target_team_ids,
+        'esc_team_ids': esc_team_ids,
+        'cvs_remov_team_ids': cvs_remov_team_ids,
+        '_page_count': _page,
+        '_hit_cap': _page >= _MAX_PAGES,
+    }
+
+
 st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
 
 # --- PINNED TOP-LEFT LOGO ---
@@ -1481,54 +1552,22 @@ def process_digital_pool(master_bar=None):
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
 <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
     
-    # 1. Fetch Onfleet (ONCE)
-    APPROVED_TEAMS = ["a - escalation", "b - boosted campaigns", "b - local campaigns", "c - priority nationals", "cvs kiosk removal", "cvs kiosk removals", "d - digital routes", "n - national campaigns"]
-    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
-    target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
-    esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
-
-    all_tasks_raw = []
-    time_window = int(time.time()*1000) - (45*24*3600*1000)
-    url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-
-    _MAX_PAGES = 200  # was 50; same loop-guard pattern as process_pod
-    _page = 0
-    _seen_last_ids = set()
-    while url and _page < _MAX_PAGES:
-        _page += 1
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 429:
-            time.sleep(2); continue
-        if response.status_code != 200: break
-        res_json = response.json()
-        all_tasks_raw.extend(res_json.get('tasks', []))
-        _next_id = res_json.get('lastId')
-        if _next_id and _next_id in _seen_last_ids:
-            _log_err("process_digital_pool", f"lastId loop detected at {_next_id} (page {_page})")
-            break
-        if _next_id:
-            _seen_last_ids.add(_next_id)
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
-        # Tick timer on every page fetch (was previously nested under the cap-hit branch
-        # below, so it never updated during normal pagination — overlay sat frozen).
-        _ov2 = st.session_state.get('_loading_overlay')
-        _st2 = st.session_state.get('_loading_start')
-        if _ov2 and _st2:
-            import time as _t3
-            _el2 = int(_t3.time() - _st2); _m2 = _el2 // 60; _s2 = _el2 % 60
-            _pct = min(0.1 + 0.3 * (len(all_tasks_raw) / max(500, len(all_tasks_raw))), 0.39)
-            prog_bar.progress(_pct, text=f"📡 Fetching tasks... {len(all_tasks_raw)} found")
-            _ov2.markdown(f"""<style>@keyframes spin{{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
-.dcc-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:36px 32px;text-align:center;margin:20px 0;}}
-.dcc-spin{{width:44px;height:44px;border:4px solid #e2e8f0;border-top:4px solid #0f766e;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px auto;}}
-.dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
-<div class='dcc-card'><div class='dcc-spin'></div>
-<p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching tasks... {len(all_tasks_raw)} found</p>
-<div class='dcc-pill'>⏱ {_m2}:{_s2:02d}</div></div>""", unsafe_allow_html=True)
-    if _page >= _MAX_PAGES:
-        _log_err("process_digital_pool", f"hit pagination cap ({_MAX_PAGES} pages)")
-        st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages while fetching Onfleet tasks. Some tasks may be missing.")
+    # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
+    # top of this file. If a Dispatcher already pulled within the last 60s, this
+    # returns instantly. Digital tab + every pod tab now share one pull.
+    try:
+        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+    except Exception as _e:
+        st.error(f"Onfleet API Error: {_e}")
+        _log_err("process_digital_pool", f"shared pull failed: {type(_e).__name__}: {_e}")
+        return
+    target_team_ids = _onfleet_data['target_team_ids']
+    esc_team_ids    = _onfleet_data['esc_team_ids']
+    all_tasks_raw   = _onfleet_data['tasks']
+    if _onfleet_data.get('_hit_cap'):
+        _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
+        st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks. Some tasks may be missing.")
+    prog_bar.progress(0.39, text=f"📡 Got {len(all_tasks_raw)} tasks from Onfleet...")
         
     prog_bar.progress(0.4, text="🔍 Isolating Digital Service Calls...")
     # Tick digital overlay timer
@@ -1818,60 +1857,27 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
 
     try:
         update_prog(0.0, "📥 Extracting tasks...")
-        APPROVED_TEAMS = [
-            "a - escalation", "b - boosted campaigns", "b - local campaigns", 
-            "c - priority nationals", "cvs kiosk removal", "digital routes", "n - national campaigns"
-        ]
 
-        teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
-        target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
-        esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
-        cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
-
-        all_tasks_raw = []
-        time_window = int(time.time()*1000) - (45*24*3600*1000)
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-
-        # Cap pagination so a misbehaving lastId can't infinite-loop. 200 pages × 64
-        # tasks/page = 12,800 tasks of headroom — well above any real pod workload.
-        # The loop also breaks early if lastId stops advancing (true infinite-loop guard).
-        _MAX_PAGES = 200
-        _page = 0
-        _seen_last_ids = set()
-        while url and _page < _MAX_PAGES:
-            _page += 1
-            response = requests.get(url, headers=headers, timeout=15)
-
-            # Handle Rate Limiting (Error 429) dynamically
-            if response.status_code == 429:
-                st.toast("⚠️ Onfleet Throttling... waiting 2 seconds.")
-                time.sleep(2)
-                continue
-
-            if response.status_code != 200:
-                st.error(f"Onfleet API Error: {response.json()}")
-                break
-
-            res_json = response.json()
-            tasks_page = res_json.get('tasks', [])
-            all_tasks_raw.extend(tasks_page)
-
-            _next_id = res_json.get('lastId')
-            if _next_id and _next_id in _seen_last_ids:
-                # lastId not advancing — Onfleet returned a duplicate cursor. Bail out
-                # so we don't waste pages refetching the same data.
-                _log_err("process_pod", f"lastId loop detected at {_next_id} (page {_page})")
-                break
-            if _next_id:
-                _seen_last_ids.add(_next_id)
-            url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
-            update_prog(min(len(all_tasks_raw)/500 * 0.4, 0.4), "📡 Fetching tasks...")
-        if _page >= _MAX_PAGES:
-            _log_err("process_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
-            st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
-
-        unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
-        all_tasks = list(unique_tasks_dict.values())
+        # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
+        # top of this file. First caller within the 60s TTL window pays the network
+        # cost; every subsequent caller (including the other 4 pods in the same
+        # Initialize-All-Pods loop) gets the cached result for free. This is the
+        # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
+        # are using the app concurrently.
+        try:
+            _onfleet_data = _fetch_onfleet_open_tasks_cached()
+        except Exception as _e:
+            st.error(f"Onfleet API Error: {_e}")
+            _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
+            return
+        target_team_ids    = _onfleet_data['target_team_ids']
+        esc_team_ids       = _onfleet_data['esc_team_ids']
+        cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
+        all_tasks          = _onfleet_data['tasks']
+        if _onfleet_data.get('_hit_cap'):
+            _log_err("process_pod", f"hit pagination cap (200 pages)")
+            st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
+        update_prog(0.4, f"📡 Got {len(all_tasks)} tasks — routing...")
 
         # PERFORMANCE FIX: Fetch Google Sheets data once before the loop
         fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
@@ -3442,46 +3448,23 @@ def smart_sync_pod(pod_name):
 
     _tick(0, "🔍 Checking Onfleet for new tasks...")
 
-    # Fetch teams
-    APPROVED_TEAMS = [
-        "a - escalation", "b - boosted campaigns", "b - local campaigns",
-        "c - priority nationals", "cvs kiosk removal", "digital routes", "n - national campaigns"
-    ]
-    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
-    target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
-    esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
-    # Match the same membership logic as process_pod so CVS Kiosk Removal tasks pulled
-    # in via Smart Sync still get the is_removal flag (and the correct 10-stop limit).
-    cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
-
-    # Fetch all current unassigned tasks
-    time_window = int(time.time()*1000) - (45*24*3600*1000)
-    url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-    all_tasks_raw = []
-    _MAX_PAGES = 200  # was 50; same loop-guard pattern as process_pod
-    _page = 0
-    _seen_last_ids = set()
-    while url and _page < _MAX_PAGES:
-        _page += 1
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 429:
-            time.sleep(2); continue
-        if response.status_code != 200: break
-        res_json = response.json()
-        all_tasks_raw.extend(res_json.get('tasks', []))
-        _next_id = res_json.get('lastId')
-        if _next_id and _next_id in _seen_last_ids:
-            _log_err("smart_sync_pod", f"lastId loop detected at {_next_id} (page {_page})")
-            break
-        if _next_id:
-            _seen_last_ids.add(_next_id)
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
-        # Tick on every page so the timer animates during pagination.
-        _pct_p = min(0.05 + 0.30 * (len(all_tasks_raw) / max(500, len(all_tasks_raw))), 0.39)
-        _tick(_pct_p, f"📡 Fetching tasks... {len(all_tasks_raw)} found")
-    if _page >= _MAX_PAGES:
-        _log_err("smart_sync_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
-        st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages during Smart Sync. Some new tasks may be missing.")
+    # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the top
+    # of this file. Smart Sync runs frequently (every "Check New Tasks" click), so
+    # routing it through the shared cache eliminates the worst rate-budget burner
+    # in the app.
+    try:
+        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+    except Exception as _e:
+        st.error(f"Onfleet API Error: {_e}")
+        _log_err("smart_sync_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
+        return
+    target_team_ids    = _onfleet_data['target_team_ids']
+    esc_team_ids       = _onfleet_data['esc_team_ids']
+    cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
+    all_tasks_raw      = _onfleet_data['tasks']
+    if _onfleet_data.get('_hit_cap'):
+        _log_err("smart_sync_pod", f"hit pagination cap (200 pages)")
+        st.warning(f"⚠️ Hit pagination cap of 200 pages during Smart Sync. Some new tasks may be missing.")
 
     _tick(0.4, "🔎 Identifying new tasks...")
 
@@ -4940,6 +4923,11 @@ with tabs[0]:
             if is_loading:
                 card_content = f"<p class='loading-pulse' style='color:{colors['border']}; margin-top:25px;'>📡 SYNCING...</p>"
             elif has_data:
+                # 🌟 GLOBAL TAB = STATIC ONLY: Digital clusters are tracked in the
+                # dedicated Digital tab (Tab 6) and have their own ghost/sent/accepted
+                # counters there. Filtering them out here keeps the supercard math
+                # (Routes Sent / Accepted / Declined / Tasks / Stops) and the master
+                # map markers focused on static-route operations only.
                 pod_cls = [c for c in st.session_state[f"clusters_{pod}"] if not c.get('is_digital')]
                 total_routes = len(pod_cls)
                 total_tasks = sum(len(c['data']) for c in pod_cls)

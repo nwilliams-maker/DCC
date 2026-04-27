@@ -843,7 +843,10 @@ def auto_sync_checker(pod_name):
                 rec = db.get(tid)
                 if not rec:
                     continue
-                parts.append(f"{tid}|{rec.get('status','')}|{rec.get('wo','')}|{rec.get('comp','')}|{rec.get('due','')}|{rec.get('time','')}")
+                # 📌 Removed `time` from fingerprint: it ticks on every sheet write
+                # (even no-op edits), causing spurious reruns. Status/WO/comp/due are the
+                # only fields the cards display, so changes outside those don't matter.
+                parts.append(f"{tid}|{rec.get('status','')}|{rec.get('wo','')}|{rec.get('comp','')}|{rec.get('due','')}")
             return hashlib.md5("\n".join(parts).encode()).hexdigest()
 
         new_fp = _fp(fresh_sent_db)
@@ -3590,7 +3593,10 @@ def run_pod_tab(pod_name):
     for c in digital_ready: folium.CircleMarker(c['center'], radius=8, color="#0f766e", fill=True, opacity=0.8).add_to(m)
     for c in sent: folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
     for c in review: folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
-    st_folium(m, height=400, use_container_width=True, key=f"map_{pod_name}")
+    # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
+    # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
+    # Streamlit script, causing the "page keeps refreshing" experience.
+    st_folium(m, height=400, use_container_width=True, key=f"map_{pod_name}", returned_objects=[])
     
     st.markdown("""
 <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:14px 20px; margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,0.04);">
@@ -4218,7 +4224,7 @@ with tabs[0]:
 
 
     st.markdown("<br> 🗺️ Master Route Map", unsafe_allow_html=True)
-    st_folium(global_map, height=500, use_container_width=True, key="global_master_map")
+    st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
 # --- INDIVIDUAL POD TABS ---
 # 🌟 FIX: Using 2 instead of 1 to account for the new Digital Pool tab!
@@ -4388,7 +4394,7 @@ with tabs[6]:
         map_center_digi = global_digital[0]['center'] if global_digital else [39.8283, -98.5795]
         m_digi = folium.Map(location=map_center_digi, zoom_start=4, tiles="cartodbpositron")
         for c in global_digital: folium.CircleMarker(c['center'], radius=8, color="#0f766e", fill=True, opacity=0.8).add_to(m_digi)
-        st_folium(m_digi, height=400, use_container_width=True, key="digital_pool_map")
+        st_folium(m_digi, height=400, use_container_width=True, key="digital_pool_map", returned_objects=[])
         
         # 5. 🚀 TWO-COLUMN DISPATCH (Parity with Pods)
         st.markdown("""

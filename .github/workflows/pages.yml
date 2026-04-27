@@ -1,0 +1,43 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# These three are what the auto-generated workflow was missing.
+# Without `pages: write` + `id-token: write`, actions/deploy-pages@v5 returns 401.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time — prevents queued runs from racing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Whole repo root — your portal-dcc-rw.html lives there. Pages will serve it
+          # at https://<user>.github.io/<repo>/portal-dcc-rw.html exactly like before.
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

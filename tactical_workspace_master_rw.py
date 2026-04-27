@@ -804,6 +804,21 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     st.session_state.pop(f"sync_{cluster_hash}", None)
     st.session_state.pop(f"scrub_timer_{cluster_hash}", None)
 
+    # 📜 Record this action so the dispatch card can show "Revoked / Re-Routed"
+    # context the next time this same route surfaces in the Ready pool.
+    try:
+        from datetime import datetime as _dt
+        _now_str = _dt.now().strftime('%m/%d %I:%M %p')
+        _key = f'_actions_{cluster_hash}'
+        st.session_state.setdefault(_key, []).append({
+            'action': action_label,
+            'ic': ic_name,
+            'time': _now_str,
+            'ts': _dt.now(),
+        })
+    except Exception as _e:
+        _log_err('move_to_dispatch/action-record', _e)
+
     st.toast(f"✅ {action_label}! Route moved back to Dispatch.")
     # No st.rerun() — callback handles the rerender
 
@@ -831,7 +846,8 @@ def auto_sync_checker(pod_name):
         # only re-runs when something actively calls it — and nothing else does between
         # user interactions. By clearing here we guarantee the next call is fresh.
         fetch_sent_records_from_sheet.clear()
-        fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
+        fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+        st.session_state['_history_db'] = _history_db
 
         # Build a fingerprint of the fields the cards actually display, restricted to
         # tasks in THIS pod. If the fingerprint differs from last poll, rerun the page.
@@ -977,6 +993,11 @@ def fetch_sent_records_from_sheet():
         sent_dict = {}
         # 🌟 THE FIX: Add Global_Digital to the dictionary!
         ghost_routes = {"Blue": [], "Green": [], "Orange": [], "Purple": [], "Red": [], "Global_Digital": [], "UNKNOWN": []}
+        # 📜 HISTORY DB: per-task event list, in chronological order across every
+        # sheet tab a task ever appeared in. Used by render_dispatch to show "declined by X",
+        # "removed from Field Nation on Y", etc. on Ready cards so dispatchers see the
+        # route's prior journey instead of a blank slate.
+        history_db = {}  # tid -> list of {status, name, time, wo, raw_ts}
         
         for gid, status_label in sheets_to_fetch:
             try:
@@ -1020,6 +1041,15 @@ def fetch_sent_records_from_sheet():
                                         "comp": p.get('comp', 0),     
                                         "due": p.get('due', 'N/A')    
                                     }
+                                    # 📜 Record this row as a history event for the task.
+                                    # `dt_obj` (computed above) is the raw pandas Timestamp we can sort on later.
+                                    history_db.setdefault(tid, []).append({
+                                        "status": status_label,
+                                        "name": display_name,
+                                        "time": ts_display,
+                                        "wo": p.get('wo', display_name),
+                                        "raw_ts": dt_obj if 'dt_obj' in dir() and dt_obj is not None else None,
+                                    })
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
                             if status_label in ['accepted', 'finalized', 'sent']:
@@ -1114,10 +1144,13 @@ def fetch_sent_records_from_sheet():
         except Exception as _ae:
             _log_err("fetch_sent_records_from_sheet/archive_harvest", _ae)
 
-        return sent_dict, ghost_routes, _archived_wos
+        # Sort each task's events chronologically (oldest first).
+        for _tid, _evts in history_db.items():
+            _evts.sort(key=lambda e: (e.get('raw_ts') or pd.Timestamp.min))
+        return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
-        return {}, {}, set()
+        return {}, {}, set(), {}
 
 # 🌟 ADDED ttl=3600 so the cache clears every hour to grab fresh traffic data
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1261,7 +1294,8 @@ def process_digital_pool(master_bar=None):
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
     DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
-    fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
+    fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+    st.session_state['_history_db'] = _history_db
     st.session_state.sent_db = fresh_sent_db
     st.session_state['archived_wos'] = _archived_wos
 
@@ -1460,9 +1494,14 @@ def process_digital_pool(master_bar=None):
                 if d_rate > 50.0:
                     status = "Flagged"
 
-        _d_boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in group if x.get('boosted_standard')]
-        _d_important_tags = ['local plus', 'boosted']
-        _d_boosted_tag = next((b for b in _d_important_tags if any(b in v for v in _d_boosted_vals)), '')
+        # Anchor-based boosted-tier (see process_pod for rationale).
+        _d_anc_bs = str(anc.get('boosted_standard', '')).lower()
+        if 'local plus' in _d_anc_bs:
+            _d_boosted_tag = 'local plus'
+        elif 'boosted' in _d_anc_bs:
+            _d_boosted_tag = 'boosted'
+        else:
+            _d_boosted_tag = ''
         clusters.append({
             "data": group, "center": [anc['lat'], anc['lon']], "stops": len(unique_stops), 
             "city": anc['city'], "state": anc['state'], "status": status, "has_ic": has_ic,
@@ -1579,7 +1618,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         all_tasks = list(unique_tasks_dict.values())
 
         # PERFORMANCE FIX: Fetch Google Sheets data once before the loop
-        fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
+        fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+        st.session_state['_history_db'] = _history_db
         st.session_state.sent_db = fresh_sent_db
         st.session_state['archived_wos'] = _archived_wos
 
@@ -1873,10 +1913,19 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             # 🌟 CLEANUP: No need to loop again; the anchor already knows!
             route_is_digital = anc_is_digital
             
-            # Determine dominant boosted_standard for this cluster
-            _boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in g_data if x.get('boosted_standard')]
-            _important_tags = ['local plus', 'boosted']
-            _boosted_tag = next((b for b in _important_tags if any(b in v for v in _boosted_vals)), '')
+            # Cluster's boosted tier comes from the ANCHOR task (the task that defined
+            # this route). Previously this was an any-match across every task in the
+            # cluster, which falsely tagged routes as boosted whenever a single boosted
+            # task happened to fall within the cluster radius — even when the route was
+            # really a pulldown/default route. Anchor-based attribution keeps boosted
+            # routes boosted and pulldown routes pulldown.
+            _anc_bs = str(anc.get('boosted_standard', '')).lower()
+            if 'local plus' in _anc_bs:
+                _boosted_tag = 'local plus'
+            elif 'boosted' in _anc_bs:
+                _boosted_tag = 'boosted'
+            else:
+                _boosted_tag = ''
 
             clusters.append({
                 "data": g_data, 
@@ -2010,6 +2059,70 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # Capture current state identifiers
     task_ids = [str(t['id']).strip() for t in cluster['data']]
     cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+
+    # 📜 Route history banner — documents the 3 events that matter when a route
+    # comes back to Ready: Declined (from the contractor portal, sourced from the sheet),
+    # Revoked (dispatcher pulled it back), Re-Routed (dispatcher moved it to a new IC).
+    if not is_sent and not is_declined:
+        _events = []
+
+        # 1. Declined events from the sheet history (one per sheet row).
+        _hist_db = st.session_state.get('_history_db', {})
+        _seen_dec = set()
+        for _tid in task_ids:
+            for _h in _hist_db.get(_tid, []):
+                if _h.get('status') != 'declined':
+                    continue
+                _key = (_h.get('name',''), _h.get('time',''), _h.get('wo',''))
+                if _key in _seen_dec:
+                    continue
+                _seen_dec.add(_key)
+                _events.append({
+                    'kind': 'Declined',
+                    'ic':   _h.get('name',''),
+                    'wo':   _h.get('wo',''),
+                    'time': _h.get('time',''),
+                    'ts':   _h.get('raw_ts'),
+                })
+
+        # 2. Revoked / Re-Routed actions from session state (set by move_to_dispatch).
+        for _a in st.session_state.get(f'_actions_{cluster_hash}', []):
+            _act = _a.get('action','')
+            if _act in ('Revoked', 'Re-Routed'):
+                _events.append({
+                    'kind': _act,
+                    'ic':   _a.get('ic',''),
+                    'wo':   '',
+                    'time': _a.get('time',''),
+                    'ts':   _a.get('ts'),
+                })
+
+        if _events:
+            _STYLE = {
+                'Declined':  ('❌', '#dc2626', 'Declined by'),
+                'Revoked':   ('↩️', '#ca8a04', 'Revoked from'),
+                'Re-Routed': ('🔄', '#7e22ce', 'Re-routed from'),
+            }
+            _events.sort(key=lambda e: (e.get('ts') or pd.Timestamp.min), reverse=True)
+            _rows_html = []
+            for _e in _events[:6]:  # cap to most-recent 6 to keep banner compact
+                _icon, _color, _verb = _STYLE[_e['kind']]
+                _line = f"<span style='color:{_color};font-weight:700;'>{_icon} {_verb} {_e['ic']}</span>"
+                if _e.get('wo'):
+                    _line += f" <span style='color:#94a3b8;'>· {_e['wo']}</span>"
+                if _e.get('time'):
+                    _line += f" <span style='color:#94a3b8;'>· {_e['time']}</span>"
+                _rows_html.append(f"<div style='font-size:11px;padding:2px 0;'>{_line}</div>")
+            st.markdown(
+                "<div style='background:#fef3c7;border-left:3px solid #f59e0b;border-radius:6px;"
+                "padding:8px 12px;margin:8px 0 12px 0;'>"
+                "<div style='font-size:9px;font-weight:900;color:#92400e;text-transform:uppercase;"
+                "letter-spacing:0.08em;margin-bottom:4px;'>📜 Route History</div>"
+                + "".join(_rows_html)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
     sync_key = f"sync_{cluster_hash}"
     real_id = st.session_state.get(sync_key)
     link_id = real_id if real_id else "LINK_PENDING"
@@ -2776,7 +2889,8 @@ def smart_sync_pod(pod_name):
     _bar.progress(0.4, text="🔎 Identifying new tasks...")
 
     # Filter to only NEW tasks for this pod
-    fresh_sent_db, _, _archived_wos = fetch_sent_records_from_sheet()
+    fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+    st.session_state['_history_db'] = _history_db
     st.session_state['archived_wos'] = _archived_wos
     new_pool = []
     unique_tasks = {t['id']: t for t in all_tasks_raw}
@@ -2932,9 +3046,14 @@ def smart_sync_pod(pod_name):
                 remaining.append(t)
         unmatched = remaining
 
-        _ss_boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in group if x.get('boosted_standard')]
-        _ss_important_tags = ['local plus', 'boosted']
-        _ss_boosted_tag = next((b for b in _ss_important_tags if any(b in v for v in _ss_boosted_vals)), '')
+        # Anchor-based boosted-tier (see process_pod for rationale).
+        _ss_anc_bs = str(anc.get('boosted_standard', '')).lower()
+        if 'local plus' in _ss_anc_bs:
+            _ss_boosted_tag = 'local plus'
+        elif 'boosted' in _ss_anc_bs:
+            _ss_boosted_tag = 'boosted'
+        else:
+            _ss_boosted_tag = ''
         existing_clusters.append({
             "data": group,
             "center": [anc['lat'], anc['lon']],
@@ -3297,7 +3416,8 @@ def run_pod_tab(pod_name):
     cls = st.session_state.get(f"clusters_{pod_name}", [])
 
     # --- KEEPING THE CLEAN AUTO-SYNC LOGIC ---
-    sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    sent_db, ghost_db, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+    st.session_state['_history_db'] = _history_db
     st.session_state['archived_wos'] = _archived_wos
     # Merge real-time status updates from auto_sync_checker (overrides stale cache)
     _ss_db = st.session_state.get('sent_db', {})
@@ -4089,7 +4209,7 @@ with tabs[0]:
         st.markdown("<div class='tab-action-btn'>", unsafe_allow_html=True)
         btn_label = "🚀 Sync Routes" if has_global_data else "🚀 Initialize All Pods"
         if st.button(btn_label, key="global_init_btn", use_container_width=True):
-            st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'] = fetch_sent_records_from_sheet()
+            st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
             st.session_state.trigger_pull = True
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -4106,7 +4226,8 @@ with tabs[0]:
     cols = st.columns(len(POD_CONFIGS))
     pod_keys = list(POD_CONFIGS.keys())
     global_map = folium.Map(location=[39.8283, -98.5795], zoom_start=4, tiles="cartodbpositron")
-    current_sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    current_sent_db, ghost_db, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+    st.session_state['_history_db'] = _history_db
     st.session_state['archived_wos'] = _archived_wos
 
     for i, pod in enumerate(pod_keys):
@@ -4233,7 +4354,7 @@ with tabs[0]:
         _render_global_card(_g_overlay, "Loading route database...", _g_start)
         _time.sleep(0.05)
         p_bar = bar_placeholder.progress(0, text="📋 Loading route database from Google Sheets...")
-        st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'] = fetch_sent_records_from_sheet()
+        st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
         _render_global_card(_g_overlay, f"Fetching tasks across {len(pod_keys)} pods...", _g_start)
         p_bar.progress(0.03, text=f"⏳ Fetching tasks across {len(pod_keys)} pods...")
         for idx, p in enumerate(pod_keys):
@@ -4265,7 +4386,8 @@ with tabs[6]:
     global_digital = st.session_state.get('global_digital_clusters', [])
     
     # 🌟 THE FIX: Omni-Ghost Sorter for Digital
-    sent_db, ghost_db, _archived_wos = fetch_sent_records_from_sheet()
+    sent_db, ghost_db, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+    st.session_state['_history_db'] = _history_db
     st.session_state['archived_wos'] = _archived_wos
     digital_ghosts_list = ghost_db.get("Global_Digital", [])
     

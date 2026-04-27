@@ -757,6 +757,19 @@ div[data-testid="stExpander"] div[data-testid="stVerticalBlock"] > div[data-test
 
 div[data-testid="stExpander"] {{ margin-top: 0px !important; margin-bottom: 2px !important; }}
 
+/* Compact button inside revoke/re-route popover content (Apr 27 2026).
+   The popover panel itself is portaled to a BaseWeb layer outside the card DOM, so we
+   target body-level [data-baseweb="popover"] descendants. Keeps button full-width to
+   match the prompt text but trims vertical padding so it doesn't tower over the copy. */
+[data-baseweb="popover"] button[kind="primary"] {{
+    height: 34px !important;
+    min-height: 34px !important;
+    padding: 4px 12px !important;
+    font-size: 13px !important;
+    line-height: 1 !important;
+    border-radius: 8px !important;
+}}
+
 /* MINI REVOKE BUTTON (Single Line, Right Aligned) */
 div.mini-btn button {{
     height: 30px !important;
@@ -3063,6 +3076,42 @@ def smart_sync_pod(pod_name):
 
     _bar = st.progress(0, text="🔍 Checking Onfleet for new tasks...")
 
+    def _tick(pct, msg):
+        """Update the progress bar AND re-render the spin-card overlay so the timer
+        actually counts up. Called at every step of smart_sync_pod (was previously
+        bare `_bar.progress(...)` calls — the overlay timer froze at 0:00)."""
+        try:
+            _bar.progress(pct, text=msg)
+        except Exception:
+            pass
+        _ov = st.session_state.get('_loading_overlay')
+        _st = st.session_state.get('_loading_start')
+        _pn = st.session_state.get('_loading_pod') or pod_name
+        if _ov and _st:
+            import time as _t
+            _el = int(_t.time() - _st); _m = _el // 60; _s = _el % 60
+            _ov.markdown(f"""
+                <style>
+                    @keyframes spin {{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
+                    .dcc-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;
+                        padding:36px 32px;text-align:center;margin:20px 0;}}
+                    .dcc-spin{{width:44px;height:44px;border:4px solid #e2e8f0;
+                        border-top:4px solid #633094;border-radius:50%;
+                        animation:spin 0.8s linear infinite;margin:0 auto 16px auto;}}
+                    .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;
+                        color:#633094;background:#f3e8ff;border-radius:20px;
+                        padding:4px 14px;margin-top:12px;}}
+                </style>
+                <div class='dcc-card'>
+                    <div class='dcc-spin'></div>
+                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {_pn} Pod</p>
+                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
+                    <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+    _tick(0, "🔍 Checking Onfleet for new tasks...")
+
     # Fetch teams
     APPROVED_TEAMS = [
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
@@ -3097,11 +3146,14 @@ def smart_sync_pod(pod_name):
         if _next_id:
             _seen_last_ids.add(_next_id)
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
+        # Tick on every page so the timer animates while paginating Onfleet.
+        _pct_p = min(0.05 + 0.30 * (len(all_tasks_raw) / max(500, len(all_tasks_raw))), 0.39)
+        _tick(_pct_p, f"📡 Fetching tasks... {len(all_tasks_raw)} found")
     if _page >= _MAX_PAGES:
         _log_err("smart_sync_pod", f"hit pagination cap ({_MAX_PAGES} pages)")
         st.warning(f"⚠️ Hit pagination cap of {_MAX_PAGES} pages during Smart Sync. Some new tasks may be missing.")
 
-    _bar.progress(0.4, text="🔎 Identifying new tasks...")
+    _tick(0.4, "🔎 Identifying new tasks...")
 
     # Filter to only NEW tasks for this pod
     fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
@@ -3228,7 +3280,7 @@ def smart_sync_pod(pod_name):
         st.toast("✅ No new tasks found.")
         return
 
-    _bar.progress(0.7, text=f"📦 Merging {len(new_pool)} new tasks...")
+    _tick(0.7, f"📦 Merging {len(new_pool)} new tasks...")
 
     CLUSTER_RADIUS = 25  # miles
 
@@ -4335,7 +4387,7 @@ def run_pod_tab(pod_name):
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
                 with btn_col:
                     with st.popover("↩️"):
-                        st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                        st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                         st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
                     
         with t_fin:
@@ -4382,7 +4434,7 @@ def run_pod_tab(pod_name):
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_fin_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
                         with st.popover("↩️"):
-                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                            st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                 else:
                     g = item
@@ -4406,7 +4458,7 @@ def run_pod_tab(pod_name):
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
                         with st.popover("↩️"):
-                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                            st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                 
 # --- START ---
@@ -4991,7 +5043,7 @@ with tabs[6]:
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_ddec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_ddec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_ddec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_ddec}</div></div></div>{_ddec_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
                         with st.popover("↩️"):
-                            st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
                     
             with t_fin:
@@ -5028,7 +5080,7 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dfl_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
                             with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c, "check_completed": True})
                     else:
                         g = item
@@ -5051,7 +5103,7 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dgf_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
                             with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                         
 # --- FINAL FOOTER (End of File) ---

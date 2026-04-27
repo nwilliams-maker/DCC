@@ -1378,9 +1378,21 @@ def fetch_sent_records_from_sheet():
         st.error(f"Failed to fetch portal records: {e}")
         return {}, {}, set(), {}
 
-# 🌟 ADDED ttl=3600 so the cache clears every hour to grab fresh traffic data
-@st.cache_data(ttl=3600, show_spinner=False)
+# Manual session-state cache (replaces @st.cache_data) so we can cache ONLY successes.
+# Previously @st.cache_data(ttl=3600) was caching the (0, 0, "0h 0m", []) failure tuple
+# for an hour after any transient API hiccup — Drive Time / Round Trip would lock to
+# "—" until the TTL expired. The Bundle Routes preview made this very visible because
+# every preview produces a fresh cache key (different waypoint set) → fresh API call →
+# any one bad call locks that bundle preview into dashes.
 def get_gmaps(home, waypoints):
+    _wp_tuple = tuple(waypoints) if waypoints else ()
+    _cache_key = (home, _wp_tuple)
+    _cache = st.session_state.setdefault('_gmaps_cache', {})
+    _now = time.time()
+    _entry = _cache.get(_cache_key)
+    if _entry is not None and (_now - _entry[1] < 3600):
+        return _entry[0]
+
     # Encode each waypoint so addresses containing '&', '=', '|' or other reserved
     # characters don't corrupt the query string. Google's directions API accepts
     # 'optimize:true|<wp1>|<wp2>...' as the value of the waypoints param — we URL-encode
@@ -1396,13 +1408,17 @@ def get_gmaps(home, waypoints):
     )
     try:
         res = requests.get(url, timeout=15).json()
-        if res['status'] == 'OK':
+        if res.get('status') == 'OK':
             mi = sum(l['distance']['value'] for l in res['routes'][0]['legs']) * 0.000621371
             drive_hrs = sum(l['duration']['value'] for l in res['routes'][0]['legs']) / 3600
             service_hrs = len(waypoints) * (10/60)
             total_hrs = drive_hrs + service_hrs
             waypoint_order = res['routes'][0].get('waypoint_order', list(range(len(waypoints))))
-            return round(mi, 1), total_hrs, f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m", waypoint_order
+            _result = (round(mi, 1), total_hrs, f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m", waypoint_order)
+            _cache[_cache_key] = (_result, _now)  # only cache successes
+            return _result
+        else:
+            _log_err("get_gmaps", f"API status: {res.get('status')} / msg: {res.get('error_message','')[:200]}")
     except Exception as e:
         _log_err("get_gmaps", e)
     return 0, 0, "0h 0m", []

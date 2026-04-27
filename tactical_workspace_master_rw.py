@@ -414,34 +414,54 @@ div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div[data-te
 /* =========================================
    2. REVOKE / RE-ROUTE BUTTON — small pill
    ========================================= */
-/* 📌 Revoke/re-route popover — bare icon, no chrome. Just the ↩️ emoji as a
-   clickable. Dropdown caret hidden, but it still opens the popover on click. */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button {{
-    height: 24px !important;
-    min-height: 24px !important;
-    width: 24px !important;
-    min-width: 24px !important;
+/* 📌 Revoke/re-route popover — the ↩️ emoji IS the button. No box, no border, no
+   background, no padding. The clickable area is exactly the size of the glyph itself. */
+/* Strip the popover wrapper of any chrome/spacing */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] {{
     padding: 0 !important;
-    margin-top: 6px !important;
-    font-size: 16px !important;
-    line-height: 1 !important;
-    border: none !important;
+    margin: 0 !important;
+    width: auto !important;
     background: transparent !important;
-    box-shadow: none !important;
-    border-radius: 50% !important;
-    color: inherit !important;
-    display: flex !important;
+    border: none !important;
+}}
+/* The button itself: reset everything, then size to the emoji content. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button {{
+    all: unset !important;
+    cursor: pointer !important;
+    display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    cursor: pointer !important;
-    transition: background 0.15s ease, transform 0.15s ease !important;
+    width: auto !important;
+    height: auto !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 6px 0 0 0 !important;
+    font-size: 18px !important;
+    line-height: 1 !important;
+    transition: transform 0.15s ease !important;
 }}
-/* Hover: subtle grey circle so it reads as a button. */
+/* Strip margin/padding from the markdown <p> wrapper around the emoji. */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button p,
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button > div {{
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1 !important;
+    background: transparent !important;
+}}
+/* Hover: scale only, no background pill, no border, no shadow. */
 div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button:hover {{
-    background: rgba(99, 48, 148, 0.08) !important;
-    transform: scale(1.1) !important;
+    transform: scale(1.25) !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: inherit !important;
 }}
-/* Hide the popover's dropdown caret entirely — Nick wants just the ↩️ icon, no chrome. */
+/* Hide the popover's dropdown caret entirely — Nick wants just the ↩️ icon, no chrome.
+   Streamlit renders the caret as either an <svg>, a Material-Symbols <span>, or a generic
+   <i>/icon container depending on version, so we catch all variants. Applied globally so
+   every revoke/re-route popover is bare regardless of column structure — the click still
+   opens the popover, only the caret glyph is gone. */
 div[data-testid="stPopover"] > button svg,
 div[data-testid="stPopover"] > button [class*="material-symbols"],
 div[data-testid="stPopover"] > button [class*="MaterialIcon"],
@@ -450,12 +470,6 @@ div[data-testid="stPopover"] > button > i,
 div[data-testid="stPopover"] > button [aria-label*="caret" i],
 div[data-testid="stPopover"] > button [aria-label*="dropdown" i] {{
     display: none !important;
-}}
-
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button:hover {{
-    background-color: #f3e8ff !important;
-    border-color: #633094 !important;
-    color: #633094 !important;
 }}
 
 /* Main Expander Container */

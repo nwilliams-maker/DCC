@@ -155,11 +155,6 @@ st.components.v1.html("""
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-/* 🔍 Default page zoom: 90% — dispatchers see more content per screen without
-   needing Ctrl+- after every refresh. Chrome/Edge/Safari honor the non-standard
-   `zoom` property; Firefox ignores it and shows 100%. Manual browser zoom still
-   stacks on top of this (e.g. Ctrl+- once more reaches ~80%). */
-html {{ zoom: 0.9; }}
 .stApp {{ background-color: {TB_APP_BG} !important; color: #000000 !important; font-family: 'Inter', sans-serif !important; }}
 /* Streamlit injects a fixed-position header bar by default with a dark/black background.
    Recolor it to match the page so the logo doesn't sit on a black strip. Header still

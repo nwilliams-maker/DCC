@@ -2291,6 +2291,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # those clusters were merged. Deselecting reverts the card. The actual merge into
     # session_state only happens when the dispatcher clicks "Confirm Bundle".
     _bundle_select_key = f"bundle_select_{pod_name}_{cluster_hash}"
+    # Deferred-clear consumer: Streamlit forbids writing to a widget\'s session-state
+    # key AFTER the widget is instantiated, so the Confirm/Clear button handlers below
+    # set this intent flag and rerun. Here, BEFORE the multiselect renders, we honor
+    # the flag by popping the multiselect\'s saved state (which IS allowed pre-render).
+    _bundle_clear_intent_key = f"_bundle_clear_intent_{pod_name}_{cluster_hash}"
+    if st.session_state.pop(_bundle_clear_intent_key, False):
+        st.session_state.pop(_bundle_select_key, None)
     _preview_hashes = st.session_state.get(_bundle_select_key) or []
     _in_preview = False
     _preview_added_count = 0  # tasks added by preview (for display in Confirm button)
@@ -2869,19 +2876,20 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                                 for _si in sorted(_src_indices, reverse=True):
                                     _live_clusters.pop(_si)
                                 st.session_state[f"clusters_{pod_name}"] = _live_clusters
-                                # Reset financial-input state so the (now larger) target
-                                # recalculates comp/rate from the new stop count.
-                                st.session_state.pop(pay_key, None)
-                                st.session_state.pop(rate_key, None)
-                                st.session_state.pop(sel_key, None)
-                                st.session_state.pop(last_sel_key, None)
-                                # Clear the preview selection.
-                                st.session_state[_bundle_select_key] = []
+                                # No need to manually clear pay_key/rate_key/sel_key/
+                                # last_sel_key/_bundle_select_key here: cluster_hash will
+                                # change on the next render (because cluster.data changed),
+                                # so each of those keys becomes a NEW key with no saved
+                                # state — Streamlit re-initializes the widgets fresh.
+                                # Writing to widget keys post-render is also blocked, so
+                                # this avoids "session_state cannot be modified" errors.
                                 st.toast(f"🔗 Bundled {len(_src_indices)} route(s) — {_preview_added_count} tasks added")
                                 st.rerun()
                     with _bcol_clear:
                         if st.button("↻ Clear", key=f"bundle_clear_{cluster_hash}", use_container_width=True):
-                            st.session_state[_bundle_select_key] = []
+                            # Set intent — top-of-fragment consumer pops the multiselect
+                            # key on next render BEFORE the widget is rendered.
+                            st.session_state[_bundle_clear_intent_key] = True
                             st.rerun()
 
         if not is_sent and not is_declined and len(stop_metrics) > 1:

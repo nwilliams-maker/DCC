@@ -4878,7 +4878,7 @@ st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Cent
 # patched and this block can stay dormant (or be removed) — it's behind a query
 # param so end-users never see it.
 if st.query_params.get("debug") == "1":
-    with st.sidebar.expander("🔍 Worker API Debug", expanded=False):
+    with st.expander("🔍 Worker API Debug", expanded=True):
         if st.button("Probe /workers?analytics=true", key="_dbg_workers_probe"):
             try:
                 _r = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)

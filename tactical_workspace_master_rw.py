@@ -2281,9 +2281,46 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
 # --- DISPATCH RENDERING ---
 @st.fragment
 def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
-    # Capture current state identifiers
+    # Capture current state identifiers (cluster_hash is computed from the ORIGINAL data
+    # and stays constant through preview — keeps session-state continuity intact).
     task_ids = [str(t['id']).strip() for t in cluster['data']]
     cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+
+    # 🔗 BUNDLE PREVIEW — multiselect at the bottom of this fragment can flag nearby
+    # clusters for preview. While in preview, this render shows the route card AS IF
+    # those clusters were merged. Deselecting reverts the card. The actual merge into
+    # session_state only happens when the dispatcher clicks "Confirm Bundle".
+    _bundle_select_key = f"bundle_select_{pod_name}_{cluster_hash}"
+    _preview_hashes = st.session_state.get(_bundle_select_key) or []
+    _in_preview = False
+    _preview_added_count = 0  # tasks added by preview (for display in Confirm button)
+    if _preview_hashes:
+        _pv_pool = st.session_state.get(f"clusters_{pod_name}", [])
+        _pv_data = list(cluster['data'])
+        _pv_seen = {str(_t['id']).strip() for _t in _pv_data}
+        _matched_any = False
+        for _ph in _preview_hashes:
+            for _other in _pv_pool:
+                _o_tids_pv = sorted([str(_t['id']).strip() for _t in _other.get('data', [])])
+                _o_h_pv = hashlib.md5("".join(_o_tids_pv).encode()).hexdigest()
+                if _o_h_pv == _ph:
+                    _matched_any = True
+                    for _t in _other.get('data', []):
+                        _tid = str(_t['id']).strip()
+                        if _tid not in _pv_seen:
+                            _pv_data.append(_t)
+                            _pv_seen.add(_tid)
+                            _preview_added_count += 1
+                    break
+        if _matched_any and _preview_added_count > 0:
+            cluster = dict(cluster)
+            cluster['data'] = _pv_data
+            cluster['stops'] = len(set(_t['full'] for _t in _pv_data))
+            cluster['inst_count'] = sum(1 for _t in _pv_data if 'install' in str(_t.get('task_type','')).lower())
+            cluster['remov_count'] = sum(1 for _t in _pv_data if str(_t.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
+            cluster['esc_count'] = sum(1 for _t in _pv_data if _t.get('escalated'))
+            task_ids = [str(_t['id']).strip() for _t in _pv_data]
+            _in_preview = True
 
     # 📜 Route history banner — documents the 3 events that matter when a route
     # comes back to Ready: Declined (from the contractor portal, sourced from the sheet),
@@ -2710,6 +2747,143 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
         st.markdown(f"{VENUE_SECTION_CSS}<div style='background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:8px;'><div style='background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:6px 12px;'><span style='font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;'>Route Stops</span></div><div style='padding:2px 8px 4px 8px;'>{''.join(_dispatch_rows)}</div></div>", unsafe_allow_html=True)
 
+        # 🔗 BUNDLE ROUTES — Apr 27 2026 (preview-driven).
+        # Find OTHER unsent clusters in this pod within 50mi and offer them as a
+        # multiselect. Selecting a route triggers a preview at the top of this fragment
+        # which re-renders the entire card AS IF those routes were merged. The merge is
+        # only committed to session_state when the dispatcher clicks "Confirm Bundle".
+        # Deselecting any candidate reverts the card to its original state. Generate Link
+        # is disabled while in preview so dispatch stays consistent with what was committed.
+        _bundle_blocked_states = ('email_sent', 'field_nation', 'finalized')
+        _current_route_state = st.session_state.get(f"route_state_{cluster_hash}")
+        if (not is_sent and not is_declined
+                and _current_route_state not in _bundle_blocked_states):
+            BUNDLE_RADIUS_MI = 50
+            _pod_clusters_for_bundle = st.session_state.get(f"clusters_{pod_name}", [])
+            _nearby_bundles = []
+            for _other in _pod_clusters_for_bundle:
+                _o_tids = sorted([str(_t['id']).strip() for _t in _other.get('data', [])])
+                if not _o_tids:
+                    continue
+                _o_hash = hashlib.md5("".join(_o_tids).encode()).hexdigest()
+                if _o_hash == cluster_hash:
+                    continue  # skip self
+                # Don\'t suggest a cluster that\'s already been "absorbed" by the preview,
+                # since the preview application above re-uses the same source-cluster IDs.
+                _o_state = st.session_state.get(f"route_state_{_o_hash}")
+                if _o_state in _bundle_blocked_states:
+                    continue
+                _o_sheet = st.session_state.get('sent_db', {}).get(
+                    next((_tid for _tid in _o_tids if _tid in st.session_state.get('sent_db', {})), None)
+                )
+                if _o_sheet and not st.session_state.get(f"reverted_{_o_hash}", False):
+                    _o_status = str(_o_sheet.get('status', '')).lower()
+                    if _o_status in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
+                        continue
+                if bool(_other.get('is_digital', False)) != bool(cluster.get('is_digital', False)):
+                    continue
+                if bool(_other.get('is_removal', False)) != bool(cluster.get('is_removal', False)):
+                    continue
+                _o_dist = haversine(cluster['center'][0], cluster['center'][1],
+                                     _other['center'][0], _other['center'][1])
+                if _o_dist > BUNDLE_RADIUS_MI:
+                    continue
+                _nearby_bundles.append((_o_dist, _o_hash, _other))
+            _nearby_bundles.sort(key=lambda x: x[0])
+
+            # If the preview has any selections that no longer appear as candidates
+            # (e.g., the source cluster was just sent in another tab), prune them so
+            # they don\'t silently linger in the multiselect\'s saved state.
+            if _preview_hashes:
+                _valid_now = {h for _, h, _ in _nearby_bundles}
+                _stale = [h for h in _preview_hashes if h not in _valid_now]
+                if _stale:
+                    st.session_state[_bundle_select_key] = [h for h in _preview_hashes if h not in _stale]
+
+            if _nearby_bundles or _in_preview:
+                _opt_hashes = [h for _, h, _ in _nearby_bundles]
+                _opt_label = {}
+                for _d, _h, _o in _nearby_bundles:
+                    _o_loc = f"{_o.get('city','')}, {_o.get('state','')}"
+                    _o_stops = _o.get('stops', 0)
+                    _o_tasks = len(_o.get('data', []))
+                    _o_inst = _o.get('inst_count', 0)
+                    _o_inst_pill = f" · 🛠️ {_o_inst}" if _o_inst > 0 else ""
+                    _opt_label[_h] = f"{_o_loc} — {round(_d, 1)}mi · {_o_stops} stops · {_o_tasks} tasks{_o_inst_pill}"
+
+                _banner_color = "#1e40af" if not _in_preview else "#b45309"
+                _banner_bg    = "#eff6ff" if not _in_preview else "#fffbeb"
+                _banner_border= "#3b82f6" if not _in_preview else "#f59e0b"
+                _banner_text  = (f"🔗 Bundle Routes ({len(_nearby_bundles)} nearby) — select to preview"
+                                 if not _in_preview else
+                                 f"🔍 PREVIEW — {len(_preview_hashes)} route(s) merged · {_preview_added_count} tasks added · click Confirm to commit, deselect to revert")
+                st.markdown(
+                    f"<div style='background:{_banner_bg};border-left:3px solid {_banner_border};border-radius:6px;"
+                    f"padding:8px 12px;margin:8px 0 4px 0;'>"
+                    f"<div style='font-size:9px;font-weight:900;color:{_banner_color};text-transform:uppercase;"
+                    f"letter-spacing:0.08em;'>{_banner_text}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                # Multiselect — its saved value IS the preview state.
+                st.multiselect(
+                    "Bundle nearby routes",
+                    options=_opt_hashes,
+                    format_func=lambda h: _opt_label.get(h, h),
+                    key=_bundle_select_key,
+                    label_visibility="collapsed",
+                    placeholder="Select nearby routes to preview a merged version...",
+                )
+
+                # Confirm / Clear controls only show while preview is active.
+                if _in_preview:
+                    _bcol_confirm, _bcol_clear = st.columns([3, 1])
+                    with _bcol_confirm:
+                        if st.button(f"✅ Confirm Bundle ({len(_preview_hashes)} route{'s' if len(_preview_hashes)!=1 else ''}, +{_preview_added_count} tasks)",
+                                     key=f"bundle_confirm_{cluster_hash}", use_container_width=True):
+                            _live_clusters = st.session_state.get(f"clusters_{pod_name}", [])
+                            _t_idx = None
+                            _src_indices = []
+                            for _ci, _cc in enumerate(_live_clusters):
+                                _cc_tids = sorted([str(_t['id']).strip() for _t in _cc.get('data', [])])
+                                _cc_hash = hashlib.md5("".join(_cc_tids).encode()).hexdigest()
+                                if _cc_hash == cluster_hash:
+                                    _t_idx = _ci
+                                if _cc_hash in _preview_hashes:
+                                    _src_indices.append(_ci)
+                            if _t_idx is not None and _src_indices:
+                                _tgt = _live_clusters[_t_idx]
+                                _existing_ids_c = {str(_t['id']).strip() for _t in _tgt['data']}
+                                for _si in _src_indices:
+                                    for _t in _live_clusters[_si].get('data', []):
+                                        if str(_t['id']).strip() not in _existing_ids_c:
+                                            _tgt['data'].append(_t)
+                                            _existing_ids_c.add(str(_t['id']).strip())
+                                _tgt['stops'] = len(set(_x['full'] for _x in _tgt['data']))
+                                _tgt['inst_count'] = sum(1 for _x in _tgt['data'] if 'install' in str(_x.get('task_type','')).lower())
+                                _tgt['remov_count'] = sum(1 for _x in _tgt['data'] if str(_x.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
+                                _tgt['esc_count'] = sum(1 for _x in _tgt['data'] if _x.get('escalated'))
+                                # Drop the merged source clusters (highest indices first
+                                # so we don\'t shift the lower ones we still need to delete).
+                                for _si in sorted(_src_indices, reverse=True):
+                                    _live_clusters.pop(_si)
+                                st.session_state[f"clusters_{pod_name}"] = _live_clusters
+                                # Reset financial-input state so the (now larger) target
+                                # recalculates comp/rate from the new stop count.
+                                st.session_state.pop(pay_key, None)
+                                st.session_state.pop(rate_key, None)
+                                st.session_state.pop(sel_key, None)
+                                st.session_state.pop(last_sel_key, None)
+                                # Clear the preview selection.
+                                st.session_state[_bundle_select_key] = []
+                                st.toast(f"🔗 Bundled {len(_src_indices)} route(s) — {_preview_added_count} tasks added")
+                                st.rerun()
+                    with _bcol_clear:
+                        if st.button("↻ Clear", key=f"bundle_clear_{cluster_hash}", use_container_width=True):
+                            st.session_state[_bundle_select_key] = []
+                            st.rerun()
+
         if not is_sent and not is_declined and len(stop_metrics) > 1:
             _all_addrs = list(stop_metrics.keys())
             _ms_key = f"multi_split_{pod_name}_{cluster_hash}_{i}_{hashlib.md5(str(list(stop_metrics.keys())).encode()).hexdigest()[:4]}"
@@ -2896,7 +3070,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         if is_fn:
             st.caption("📋 Email dispatch disabled — route is assigned to Field Nation.")
 
-        if st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn, use_container_width=True):
+        if st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None)):
             # 🛡️ STEP 1: FAST COLLISION CHECK — only block active sent routes (not revoked/declined)
             local_sent_db = st.session_state.get('sent_db', {})
             _active_statuses = ('sent',)

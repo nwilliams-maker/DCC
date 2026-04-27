@@ -1742,6 +1742,8 @@ def process_digital_pool(master_bar=None):
 
     # Save to dedicated Global Digital State
     st.session_state['global_digital_clusters'] = clusters
+    # Re-apply Global_Digital bundles after the rebuild.
+    _replay_bundles("Global_Digital")
     prog_bar.empty()
 
 # --- CORE LOGIC ---
@@ -2170,6 +2172,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             pool = rem
 
         st.session_state[f"clusters_{pod_name}"] = clusters
+        # Re-apply any bundles the dispatcher previously confirmed for this pod, so a
+        # full re-init via Initialize Data doesn\'t silently undo them.
+        _replay_bundles(pod_name)
         if _skipped_assigned > 0:
             _log_err(f"process_pod/{pod_name}", f"skipped {_skipped_assigned} already-assigned tasks (state=0 leak)")
 
@@ -2200,6 +2205,86 @@ def get_digi_badges(cluster_data):
             elif 'ins/re' in tt: icons.add('🔧') # 🌟 Standard Wrench
             else: icons.add('⚙️')
     return "".join(sorted(list(icons)))
+
+
+# 🔗 Bundled tag for route-card expander headers. Dim non-bold gray, far-right of the
+# label, only shown when the cluster has absorbed other routes via the Bundle Routes
+# preview-and-confirm flow. cluster.bundle_count is set by _replay_bundles() below.
+def _bundle_pill(cluster):
+    _n = cluster.get('bundle_count', 0) if isinstance(cluster, dict) else 0
+    return "  ·  :gray[🔗 Bundled]" if _n and _n > 0 else ""
+
+
+# 🔗 BUNDLE PERSISTENCE — survives process_pod / smart_sync_pod / process_digital_pool
+# rebuilds. Each entry is a SET of Onfleet task IDs that the dispatcher decided should
+# end up in the same cluster. After any cluster rebuild we call _replay_bundles() and
+# it re-merges the relevant clusters. Keyed by pod_name (or "Global_Digital").
+def _bundle_clusters_store(pod_name):
+    """Return (read_key, write_key) for the cluster store this pod uses. Global_Digital
+    has its own bucket; everything else uses clusters_{pod_name}."""
+    if pod_name == "Global_Digital":
+        return "global_digital_clusters"
+    return f"clusters_{pod_name}"
+
+def _commit_bundle(pod_name, target_task_ids, source_task_ids):
+    """Record that target_task_ids and source_task_ids should be in the same cluster.
+    Idempotent — overlapping entries get merged into one set so a route bundled three
+    times shows up as a single entry, not three."""
+    combined = set(target_task_ids) | set(source_task_ids)
+    bm = st.session_state.setdefault('_bundle_map', {})
+    pm = bm.setdefault(pod_name, [])
+    keep = []
+    for entry in pm:
+        if entry & combined:
+            combined |= entry
+        else:
+            keep.append(entry)
+    keep.append(combined)
+    bm[pod_name] = keep
+
+def _replay_bundles(pod_name):
+    """Re-merge any clusters that the dispatcher previously bundled. Safe to call after
+    every cluster rebuild — if the bundle has already been applied (single cluster
+    contains all the listed task IDs) this is a no-op for that entry."""
+    bm = st.session_state.get('_bundle_map', {})
+    entries = bm.get(pod_name, []) or []
+    if not entries:
+        return
+    _key = _bundle_clusters_store(pod_name)
+    cls = st.session_state.get(_key, [])
+    if not cls:
+        return
+    _changed = False
+    for entry in entries:
+        # Find every cluster index whose data overlaps with this bundle\'s task-ID set.
+        members = []
+        for ci, c in enumerate(cls):
+            tids = {str(t['id']).strip() for t in c.get('data', [])}
+            if tids & entry:
+                members.append(ci)
+        if len(members) < 2:
+            continue  # already merged, or members no longer present
+        target_idx = members[0]
+        source_indices = members[1:]
+        target = cls[target_idx]
+        existing_ids = {str(t['id']).strip() for t in target.get('data', [])}
+        for si in source_indices:
+            for t in cls[si].get('data', []):
+                tid = str(t['id']).strip()
+                if tid not in existing_ids:
+                    target['data'].append(t)
+                    existing_ids.add(tid)
+        target['stops'] = len(set(x['full'] for x in target['data']))
+        target['inst_count'] = sum(1 for x in target['data'] if 'install' in str(x.get('task_type','')).lower())
+        target['remov_count'] = sum(1 for x in target['data'] if str(x.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
+        target['esc_count'] = sum(1 for x in target['data'] if x.get('escalated'))
+        target['bundle_count'] = target.get('bundle_count', 0) + len(source_indices)
+        # Drop merged sources (highest indices first to preserve earlier ones).
+        for si in sorted(source_indices, reverse=True):
+            cls.pop(si)
+        _changed = True
+    if _changed:
+        st.session_state[_key] = cls
 
 
 # 🌟 Reusable pill helper for route card titles (Sent/Accepted/Declined/Finalized expanders
@@ -2843,53 +2928,38 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     placeholder="Select nearby routes to preview a merged version...",
                 )
 
-                # Confirm / Clear controls only show while preview is active.
+                # Confirm button only shows while preview is active. No "Clear" button —
+                # the multiselect chips have built-in × icons that achieve the same thing.
                 if _in_preview:
-                    _bcol_confirm, _bcol_clear = st.columns([3, 1])
-                    with _bcol_confirm:
-                        if st.button(f"✅ Confirm Bundle ({len(_preview_hashes)} route{'s' if len(_preview_hashes)!=1 else ''}, +{_preview_added_count} tasks)",
-                                     key=f"bundle_confirm_{cluster_hash}", use_container_width=True):
-                            _live_clusters = st.session_state.get(f"clusters_{pod_name}", [])
-                            _t_idx = None
-                            _src_indices = []
-                            for _ci, _cc in enumerate(_live_clusters):
-                                _cc_tids = sorted([str(_t['id']).strip() for _t in _cc.get('data', [])])
-                                _cc_hash = hashlib.md5("".join(_cc_tids).encode()).hexdigest()
-                                if _cc_hash == cluster_hash:
-                                    _t_idx = _ci
-                                if _cc_hash in _preview_hashes:
-                                    _src_indices.append(_ci)
-                            if _t_idx is not None and _src_indices:
-                                _tgt = _live_clusters[_t_idx]
-                                _existing_ids_c = {str(_t['id']).strip() for _t in _tgt['data']}
-                                for _si in _src_indices:
-                                    for _t in _live_clusters[_si].get('data', []):
-                                        if str(_t['id']).strip() not in _existing_ids_c:
-                                            _tgt['data'].append(_t)
-                                            _existing_ids_c.add(str(_t['id']).strip())
-                                _tgt['stops'] = len(set(_x['full'] for _x in _tgt['data']))
-                                _tgt['inst_count'] = sum(1 for _x in _tgt['data'] if 'install' in str(_x.get('task_type','')).lower())
-                                _tgt['remov_count'] = sum(1 for _x in _tgt['data'] if str(_x.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
-                                _tgt['esc_count'] = sum(1 for _x in _tgt['data'] if _x.get('escalated'))
-                                # Drop the merged source clusters (highest indices first
-                                # so we don\'t shift the lower ones we still need to delete).
-                                for _si in sorted(_src_indices, reverse=True):
-                                    _live_clusters.pop(_si)
-                                st.session_state[f"clusters_{pod_name}"] = _live_clusters
-                                # No need to manually clear pay_key/rate_key/sel_key/
-                                # last_sel_key/_bundle_select_key here: cluster_hash will
-                                # change on the next render (because cluster.data changed),
-                                # so each of those keys becomes a NEW key with no saved
-                                # state — Streamlit re-initializes the widgets fresh.
-                                # Writing to widget keys post-render is also blocked, so
-                                # this avoids "session_state cannot be modified" errors.
-                                st.toast(f"🔗 Bundled {len(_src_indices)} route(s) — {_preview_added_count} tasks added")
-                                st.rerun()
-                    with _bcol_clear:
-                        if st.button("↻ Clear", key=f"bundle_clear_{cluster_hash}", use_container_width=True):
-                            # Set intent — top-of-fragment consumer pops the multiselect
-                            # key on next render BEFORE the widget is rendered.
-                            st.session_state[_bundle_clear_intent_key] = True
+                    if st.button(f"✅ Confirm Bundle ({len(_preview_hashes)} route{'s' if len(_preview_hashes)!=1 else ''}, +{_preview_added_count} tasks)",
+                                 key=f"bundle_confirm_{cluster_hash}", use_container_width=True):
+                        # Pull target + source task IDs from the live cluster store, commit
+                        # the bundle to session_state[\'_bundle_map\'] (so it survives any
+                        # future cluster rebuild — process_pod / smart_sync_pod / WS reset
+                        # → re-init), then call _replay_bundles which does the actual merge.
+                        # All merge logic lives in _replay_bundles — Confirm just records intent.
+                        _store_key = _bundle_clusters_store(pod_name)
+                        _live_clusters = st.session_state.get(_store_key, [])
+                        _target_tids = set()
+                        _source_tids = set()
+                        _src_count = 0
+                        for _cc in _live_clusters:
+                            _cc_tids = sorted([str(_t['id']).strip() for _t in _cc.get('data', [])])
+                            _cc_hash = hashlib.md5("".join(_cc_tids).encode()).hexdigest()
+                            if _cc_hash == cluster_hash:
+                                _target_tids = set(_cc_tids)
+                            if _cc_hash in _preview_hashes:
+                                _source_tids |= set(_cc_tids)
+                                _src_count += 1
+                        if _target_tids and _source_tids:
+                            _commit_bundle(pod_name, _target_tids, _source_tids)
+                            _replay_bundles(pod_name)
+                            # cluster_hash changes on the next render (cluster.data changed),
+                            # so pay_key/rate_key/sel_key/_bundle_select_key all become NEW
+                            # keys with no saved state — Streamlit re-initializes the widgets
+                            # fresh. No manual pop needed (post-render widget writes would
+                            # crash anyway).
+                            st.toast(f"🔗 Bundled {_src_count} route(s) — {_preview_added_count} tasks added")
                             st.rerun()
 
         if not is_sent and not is_declined and len(stop_metrics) > 1:
@@ -3557,6 +3627,9 @@ def smart_sync_pod(pod_name):
         })
 
     st.session_state[f"clusters_{pod_name}"] = existing_clusters
+    # Re-apply bundles in case Smart Sync introduced a new cluster that should have
+    # been absorbed into an existing bundled route (or rebuilt sources of past bundles).
+    _replay_bundles(pod_name)
     st.session_state['_worker_counts'] = fetch_worker_task_counts()
     _bar.empty()
     st.toast(f"✅ {len(new_pool)} new task(s) merged into {pod_name} routes.")
@@ -4334,7 +4407,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
+                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i, c, pod_name)
                     
         with t_flagged:
@@ -4353,7 +4426,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
+                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
@@ -4373,7 +4446,7 @@ def run_pod_tab(pod_name):
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     
-                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
+                    with st.expander(f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -4411,7 +4484,7 @@ def run_pod_tab(pod_name):
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]"):
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
@@ -4441,7 +4514,7 @@ def run_pod_tab(pod_name):
                     
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             _venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
@@ -4533,7 +4606,7 @@ def run_pod_tab(pod_name):
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -4600,7 +4673,7 @@ def run_pod_tab(pod_name):
                     due_dec = c.get('due', 'N/A')
                     stops_dec, tasks_dec = c['stops'], len(c['data'])
                     _pill_dec = get_task_pill(c.get('data', []))
-                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]"):
+                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
                         _dec_venues = venue_section(make_venue_details(c['data']))
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
@@ -4638,7 +4711,7 @@ def run_pod_tab(pod_name):
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -5083,7 +5156,7 @@ with tabs[6]:
                         _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
                         _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             render_dispatch(i+8000, c, "Global_Digital")
                             
             with t_flagged:
@@ -5098,7 +5171,7 @@ with tabs[6]:
                         _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
                         _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
             with t_fn:
@@ -5113,7 +5186,7 @@ with tabs[6]:
                         _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
                         _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]"):
+                        with st.expander(f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:
@@ -5142,7 +5215,7 @@ with tabs[6]:
                         
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]{_bundle_pill(c)}"):
                                 u_locs, _dslv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -5200,7 +5273,7 @@ with tabs[6]:
                         _dins_pill = f" | 🔧 {_dins_cnt} Ins/Rem" if _dins_cnt > 0 else ""
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "")):
+                            with st.expander(f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
                                 u_locs, _dalv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -5257,7 +5330,7 @@ with tabs[6]:
                     with exp_col:
                         comp_ddec = c.get('comp', 0); due_ddec = c.get('due', 'N/A')
                         stops_ddec, tasks_ddec = c['stops'], len(c['data'])
-                        with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_ddec} | Due: {due_ddec}"):
+                        with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_ddec} | Due: {due_ddec}{_bundle_pill(c)}"):
                             _ddec_venues = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_ddec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_ddec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_ddec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_ddec}</div></div></div>{_ddec_venues}</div>""", unsafe_allow_html=True)
                     with btn_col:
@@ -5288,7 +5361,7 @@ with tabs[6]:
                         _dfins_pill = f" | 🔧 {_dfins_cnt} Ins/Rem" if _dfins_cnt > 0 else ""
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "")):
+                            with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
                                 u_locs, _dflv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:

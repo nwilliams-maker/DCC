@@ -441,8 +441,14 @@ div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child
     background: rgba(99, 48, 148, 0.08) !important;
     transform: scale(1.1) !important;
 }}
-/* Hide the popover's dropdown caret SVG entirely — Nick wants just the icon. */
-div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"]:nth-child(1) div[data-testid="stExpander"]) > div[data-testid="stColumn"]:nth-child(2) div[data-testid="stPopover"] > button svg {{
+/* Hide the popover's dropdown caret entirely — Nick wants just the ↩️ icon, no chrome. */
+div[data-testid="stPopover"] > button svg,
+div[data-testid="stPopover"] > button [class*="material-symbols"],
+div[data-testid="stPopover"] > button [class*="MaterialIcon"],
+div[data-testid="stPopover"] > button [data-testid*="Icon"],
+div[data-testid="stPopover"] > button > i,
+div[data-testid="stPopover"] > button [aria-label*="caret" i],
+div[data-testid="stPopover"] > button [aria-label*="dropdown" i] {{
     display: none !important;
 }}
 

@@ -805,6 +805,7 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
 
     # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
     # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
+    auth = None
     if task_ids:
         try:
             auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
@@ -821,6 +822,30 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
                     _log_err(f"background_sheet_move/scrub task={tid}", e)
         except Exception as e:
             _log_err("background_sheet_move/scrub-outer", e)
+
+    # Apr 27 2026 — also DELETE the Onfleet route plan that GAS createOnfleetRoute
+    # generated on accept, so the route shell disappears from the worker\'s app.
+    # Unassigning tasks alone left a stale empty route plan visible to the contractor.
+    # Only fires when payload_json carries `onfleet_route_id` (set by GAS processDecision
+    # after a successful createOnfleetRoute). No-op for routes that were revoked from
+    # Sent/Declined (those never had a route plan created).
+    try:
+        onfleet_route_id = None
+        if isinstance(payload_json, dict):
+            onfleet_route_id = payload_json.get('onfleet_route_id') or None
+        if onfleet_route_id:
+            if auth is None:
+                auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+            try:
+                requests.delete(
+                    f"https://onfleet.com/api/v2/routePlans/{onfleet_route_id}",
+                    headers={**auth, "Content-Type": "application/json"},
+                    timeout=10,
+                )
+            except Exception as e:
+                _log_err(f"background_sheet_move/delete-routePlan id={onfleet_route_id}", e)
+    except Exception as e:
+        _log_err("background_sheet_move/delete-routePlan-outer", e)
         
 # --- 2. INSTANT REVOKE LOGIC ---
 def background_fn_revoke(cluster_hash):

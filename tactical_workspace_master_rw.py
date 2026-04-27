@@ -3426,7 +3426,7 @@ text-decoration:none;">📨 Default Mail</a>
                 )
         with link_col:
             st.link_button(
-                "🌐 Open Field Nation",
+                "🌐 Post to Field Nation",
                 url="https://app.fieldnation.com/projects",
                 use_container_width=True
             )
@@ -4596,43 +4596,51 @@ def run_pod_tab(pod_name):
                 # ownership model 1 Associate owns the FN tab and there's no
                 # cross-contamination with other surfaces.
                 _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
-                if _fn_selected:
-                    _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
-                    if st.button(
-                        f"📤 Posted to Field Nation ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
-                        key=f"fn_post_btn_{pod_name}",
+                _fn_post_left, _fn_post_right = st.columns(2)
+                with _fn_post_left:
+                    st.link_button(
+                        "🌐 Post to Field Nation",
+                        url="https://app.fieldnation.com/projects",
                         use_container_width=True,
-                        type="secondary",
-                        disabled=(len(_newly_posting) == 0),
-                    ):
-                        _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                        for _h in _fn_selected:
-                            _fn_posted_dict[_h] = _ts
-                        st.session_state['_fn_posted'] = _fn_posted_dict
-                        # 📤 Fire-and-forget GAS write so the Sent group survives
-                        # reloads and is shared across Associate sessions. Background
-                        # thread — UI doesn't wait. Single POST batches all hashes.
-                        try:
-                            _hashes_csv = ",".join(_fn_selected)
-                            threading.Thread(
-                                target=lambda: requests.post(
-                                    GAS_WEB_APP_URL,
-                                    json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
-                                    timeout=15,
-                                ),
-                                daemon=True,
-                            ).start()
-                        except Exception as _fpe:
-                            _log_err("markFNPosted/pod", _fpe)
-                        st.toast(f"📤 Marked {len(_newly_posting)} route(s) as Posted to Field Nation.")
-                        st.rerun()
-                else:
-                    st.button(
-                        "📤 Posted to Field Nation (none selected)",
-                        key=f"fn_post_btn_empty_{pod_name}",
-                        use_container_width=True,
-                        disabled=True,
                     )
+                with _fn_post_right:
+                    if _fn_selected:
+                        _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+                        if st.button(
+                            f"📤 Posted! ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                            key=f"fn_post_btn_{pod_name}",
+                            use_container_width=True,
+                            type="secondary",
+                            disabled=(len(_newly_posting) == 0),
+                        ):
+                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                            for _h in _fn_selected:
+                                _fn_posted_dict[_h] = _ts
+                            st.session_state['_fn_posted'] = _fn_posted_dict
+                            # 📤 Fire-and-forget GAS write so the Sent group survives
+                            # reloads and is shared across Associate sessions. Background
+                            # thread — UI doesn't wait. Single POST batches all hashes.
+                            try:
+                                _hashes_csv = ",".join(_fn_selected)
+                                threading.Thread(
+                                    target=lambda: requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                        timeout=15,
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            except Exception as _fpe:
+                                _log_err("markFNPosted/pod", _fpe)
+                            st.toast(f"📤 Marked {len(_newly_posting)} route(s) as Posted to Field Nation.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "📤 Posted! (none selected)",
+                            key=f"fn_post_btn_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
+                        )
                 st.divider()
 
                 # Partition the FN routes into Pending (not yet posted) and Sent (posted).
@@ -4662,7 +4670,7 @@ def run_pod_tab(pod_name):
                             "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
                             "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
                             f"<span style='font-size:11px; font-weight:900; color:#065f46; "
-                            "text-transform:uppercase; letter-spacing:0.08em;'>📤 Sent — Posted to Field Nation · "
+                            "text-transform:uppercase; letter-spacing:0.08em;'>📤 Posted! · "
                             f"{len(_fn_sent_list)} route(s)</span></div>",
                             unsafe_allow_html=True,
                         )
@@ -5621,41 +5629,49 @@ with tabs[6]:
                     # per-pod FN tab so the Sent set is shared across pods (one Associate
                     # owns the whole FN view).
                     _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
-                    if _fn_selected:
-                        _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
-                        if st.button(
-                            f"📤 Posted to Field Nation ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
-                            key="fn_post_btn_digital",
+                    _fn_post_left_d, _fn_post_right_d = st.columns(2)
+                    with _fn_post_left_d:
+                        st.link_button(
+                            "🌐 Post to Field Nation",
+                            url="https://app.fieldnation.com/projects",
                             use_container_width=True,
-                            type="secondary",
-                            disabled=(len(_newly_posting) == 0),
-                        ):
-                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                            for _h in _fn_selected:
-                                _fn_posted_dict[_h] = _ts
-                            st.session_state['_fn_posted'] = _fn_posted_dict
-                            # 📤 Persist via GAS so Sent group survives reload (see pod FN handler).
-                            try:
-                                _hashes_csv = ",".join(_fn_selected)
-                                threading.Thread(
-                                    target=lambda: requests.post(
-                                        GAS_WEB_APP_URL,
-                                        json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
-                                        timeout=15,
-                                    ),
-                                    daemon=True,
-                                ).start()
-                            except Exception as _fpe:
-                                _log_err("markFNPosted/digital", _fpe)
-                            st.toast(f"📤 Marked {len(_newly_posting)} digital route(s) as Posted to Field Nation.")
-                            st.rerun()
-                    else:
-                        st.button(
-                            "📤 Posted to Field Nation (none selected)",
-                            key="fn_post_btn_empty_digital",
-                            use_container_width=True,
-                            disabled=True,
                         )
+                    with _fn_post_right_d:
+                        if _fn_selected:
+                            _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+                            if st.button(
+                                f"📤 Posted! ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                                key="fn_post_btn_digital",
+                                use_container_width=True,
+                                type="secondary",
+                                disabled=(len(_newly_posting) == 0),
+                            ):
+                                _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                                for _h in _fn_selected:
+                                    _fn_posted_dict[_h] = _ts
+                                st.session_state['_fn_posted'] = _fn_posted_dict
+                                # 📤 Persist via GAS so Sent group survives reload (see pod FN handler).
+                                try:
+                                    _hashes_csv = ",".join(_fn_selected)
+                                    threading.Thread(
+                                        target=lambda: requests.post(
+                                            GAS_WEB_APP_URL,
+                                            json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                            timeout=15,
+                                        ),
+                                        daemon=True,
+                                    ).start()
+                                except Exception as _fpe:
+                                    _log_err("markFNPosted/digital", _fpe)
+                                st.toast(f"📤 Marked {len(_newly_posting)} digital route(s) as Posted to Field Nation.")
+                                st.rerun()
+                        else:
+                            st.button(
+                                "📤 Posted! (none selected)",
+                                key="fn_post_btn_empty_digital",
+                                use_container_width=True,
+                                disabled=True,
+                            )
                     st.divider()
 
                     # Partition into Pending Post + Sent (Posted to Field Nation).
@@ -5683,7 +5699,7 @@ with tabs[6]:
                                 "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
                                 "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
                                 f"<span style='font-size:11px; font-weight:900; color:#065f46; "
-                                "text-transform:uppercase; letter-spacing:0.08em;'>📤 Sent — Posted to Field Nation · "
+                                "text-transform:uppercase; letter-spacing:0.08em;'>📤 Posted! · "
                                 f"{len(_fn_sent_list)} route(s)</span></div>",
                                 unsafe_allow_html=True,
                             )
@@ -5900,7 +5916,6 @@ with tabs[6]:
                             _gdfins_cnt = g.get('digi_ins', 0) or 0
                         _gdfins_pill = f" | 🔧 {_gdfins_cnt} Ins/Rem" if _gdfins_cnt > 0 else ""
                         with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}"):
-                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs

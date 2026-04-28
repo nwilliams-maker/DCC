@@ -137,18 +137,18 @@ class _NoOpProgress:
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
 @st.cache_data(ttl=60, show_spinner=False)
-def _fetch_onfleet_open_tasks_cached(_progress_cb=None):
+def _fetch_onfleet_open_tasks_cached():
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
     Raises on hard error so the failure isn't cached.
 
-    The optional `_progress_cb(pct, msg)` callback is invoked once per Onfleet
-    page so the caller can advance its progress bar and tick the overlay timer
-    in real time (fixes the "frozen bar" UI during cache misses). The leading
-    underscore tells st.cache_data to skip this arg in the cache-key — passing
-    a different callback per call doesn't bust the cache. On cache HIT the
-    function returns instantly and the callback is never invoked, which is the
-    correct behavior (nothing to show progress for)."""
+    NOTE: cannot accept a progress callback. @st.cache_data wraps the function
+    body and replays element calls — touching a Streamlit widget/placeholder
+    created OUTSIDE the function (which any progress callback would do) raises
+    CacheReplayClosureError and aborts the entire pull. The overlay timer in
+    the calling functions (process_pod / process_digital_pool / smart_sync_pod)
+    is what ticks during the wait; per-page granularity inside the pull is not
+    available and shouldn't be added back via this path."""
     APPROVED_TEAMS = [
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
         "c - priority nationals", "cvs kiosk removal", "digital routes",
@@ -184,14 +184,6 @@ def _fetch_onfleet_open_tasks_cached(_progress_cb=None):
         if _next_id:
             _seen_last_ids.add(_next_id)
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
-        # Per-page progress tick. Wrapped in try/except so a misbehaving callback
-        # can't break the pull (worst case: bar stays frozen, data still arrives).
-        if _progress_cb is not None:
-            try:
-                _pct = min(0.05 + 0.30 * (len(all_tasks_raw) / max(500, len(all_tasks_raw))), 0.39)
-                _progress_cb(_pct, f"📡 Fetching tasks... {len(all_tasks_raw)} found")
-            except Exception:
-                pass
 
     unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
     return {
@@ -1648,7 +1640,7 @@ def process_digital_pool(master_bar=None):
 <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
 <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=_digital_progress)
+        _onfleet_data = _fetch_onfleet_open_tasks_cached()
     except Exception as _e:
         st.error(f"Onfleet API Error: {_e}")
         _log_err("process_digital_pool", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -1927,6 +1919,14 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             import time as _t
             elapsed = int(_t.time() - _st)
             m = elapsed // 60; s = elapsed % 60
+            # When _loading_pod is "Global" we're inside the Initialize-All-Pods
+            # loop; show "Initializing All Pods" as the title and prefix the
+            # message with the current pod name (e.g. "Blue: 🗺️ Routing 249
+            # remaining tasks..."). Single-pod init paths set _loading_pod to
+            # the actual pod and don't need the prefix.
+            _is_global = (_pn == 'Global')
+            _title = 'All Pods' if _is_global else f'{_pn} Pod'
+            _msg_disp = f"{pod_name}: {msg}" if _is_global else msg
             _ov.markdown(f"""
                 <style>
                     @keyframes spin {{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
@@ -1941,8 +1941,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 </style>
                 <div class='dcc-card'>
                     <div class='dcc-spin'></div>
-                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_pn} Pod</p>
-                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
+                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_title}</p>
+                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{_msg_disp}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
                 </div>
             """, unsafe_allow_html=True)
@@ -1957,7 +1957,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
         # are using the app concurrently.
         try:
-            _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=update_prog)
+            _onfleet_data = _fetch_onfleet_open_tasks_cached()
         except Exception as _e:
             st.error(f"Onfleet API Error: {_e}")
             _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -3574,7 +3574,7 @@ def smart_sync_pod(pod_name):
     # routing it through the shared cache eliminates the worst rate-budget burner
     # in the app.
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=_tick)
+        _onfleet_data = _fetch_onfleet_open_tasks_cached()
     except Exception as _e:
         st.error(f"Onfleet API Error: {_e}")
         _log_err("smart_sync_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -6018,4 +6018,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-

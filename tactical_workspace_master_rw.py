@@ -180,6 +180,88 @@ def _fetch_onfleet_open_tasks_cached():
 
 st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
 
+# ============================================================================
+# 🔐 LOGIN — per-user authentication
+# ============================================================================
+# Each entry below is a user account.
+#   - username (the dict key, lowercase) is what they type to sign in
+#   - password_hash is SHA-256 of their password (NEVER store the plain password)
+#   - pod controls which tabs they can see:
+#       'ADMIN'                                -> Global + every pod + Digital (full access)
+#       'MANAGER'                              -> Global + every pod + Digital (full access, alias of ADMIN)
+#       'Blue'/'Green'/'Orange'/'Purple'/'Red' -> ONLY that single pod tab. No Global, no Digital, no other pods.
+#   Global and Digital are gated to ADMIN/MANAGER ONLY by policy. Pod dispatchers
+#   land directly on their pod tab and can't see overview / digital views.
+#
+# To add a new user (you, Nick, edit this in github.dev):
+#   1. Generate a SHA-256 hash of the password. From any terminal or replit:
+#        python3 -c "import hashlib; print(hashlib.sha256('THEIR_PASSWORD'.encode()).hexdigest())"
+#   2. Paste a new entry below following the same shape.
+#   3. Commit + push -> Railway redeploys -> they can sign in.
+USERS = {
+    # Default admin — username: 'nick', password: 'terraboost-admin-2026'
+    # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
+    "nick": {
+        "name": "Nick Williams",
+        "password_hash": "60186d64801df51f53c5a347e286310b1b998ebcaaa70218d875145778d1e483",
+        "pod": "ADMIN",
+    },
+    # Examples — uncomment + customize, then commit:
+    # "sarah":  {"name": "Sarah Smith",  "password_hash": "<sha256>", "pod": "Blue"},
+    # "maria":  {"name": "Maria Lopez",  "password_hash": "<sha256>", "pod": "Green"},
+    # "javier": {"name": "Javier Reyes", "password_hash": "<sha256>", "pod": "Orange"},
+    # "kelly":  {"name": "Kelly Chen",   "password_hash": "<sha256>", "pod": "Purple"},
+    # "aaron":  {"name": "Aaron Patel",  "password_hash": "<sha256>", "pod": "Red"},
+    # "manager": {"name": "Pod Manager", "password_hash": "<sha256>", "pod": "MANAGER"},
+}
+
+import hashlib as _login_hashlib
+def _check_password(username: str, password: str):
+    """Returns the user record dict on match, else None."""
+    rec = USERS.get(str(username or "").lower().strip())
+    if not rec:
+        return None
+    if _login_hashlib.sha256(str(password or "").encode("utf-8")).hexdigest() == rec.get("password_hash"):
+        return rec
+    return None
+
+def _can_access_tab(tab_pod: str) -> bool:
+    """tab_pod ∈ {'Global','Blue','Green','Orange','Purple','Red','Digital'}.
+    ADMIN/MANAGER see every tab. Pod dispatchers (Blue/Green/...) see ONLY their
+    pod tab — Global and Digital are gated off limits to them by policy."""
+    user = st.session_state.get('_auth_user')
+    if not user:
+        return False
+    user_pod = str(user.get('pod', '')).upper()
+    # ADMIN and MANAGER both get full access. ALL is kept as a legacy alias.
+    if user_pod in ('ADMIN', 'MANAGER', 'ALL'):
+        return True
+    # Pod dispatchers: only their own pod tab. Global/Digital are restricted.
+    return tab_pod not in ('Global', 'Digital') and str(user.get('pod', '')) == tab_pod
+
+def _render_login_form():
+    """Renders the login form and stops the script if not authenticated."""
+    st.markdown(
+        "<div style='text-align:center; padding-top:60px;'>"
+        "<h1 style='color:#633094; margin-bottom:6px; font-weight:800;'>Terraboost Media</h1>"
+        "<p style='color:#64748b; margin-bottom:32px; font-size:14px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700;'>Dispatch Command Center · Sign in</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _spacer_l, col, _spacer_r = st.columns([1, 2, 1])
+    with col:
+        with st.form("_login_form", clear_on_submit=False):
+            _username = st.text_input("Username", key="_login_user_input", autocomplete="username")
+            _password = st.text_input("Password", type="password", key="_login_pw_input", autocomplete="current-password")
+            _submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
+            if _submitted:
+                _rec = _check_password(_username, _password)
+                if _rec:
+                    st.session_state['_auth_user'] = {**_rec, 'username': str(_username).lower().strip()}
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+
 # --- PINNED TOP-LEFT LOGO ---
 # Function to convert the local image into web-safe code
 def get_base64_image(image_path):
@@ -5011,6 +5093,14 @@ def run_pod_tab(pod_name):
                             st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                 
+# --- LOGIN GATE ---
+# Block all downstream rendering until the user signs in. Once authenticated,
+# their record sits in st.session_state['_auth_user'] for the lifetime of the
+# session (until they log out or close the tab).
+if '_auth_user' not in st.session_state:
+    _render_login_form()
+    st.stop()
+
 # --- START ---
 if "ic_df" not in st.session_state:
     try:
@@ -5030,7 +5120,21 @@ if '_worker_counts' not in st.session_state:
     st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
 # --- HEADER ROW ---
-st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
+_h_l, _h_r = st.columns([8, 2])
+with _h_l:
+    st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
+with _h_r:
+    _u = st.session_state.get('_auth_user', {})
+    st.markdown(
+        f"<div style='text-align:right; padding-top:18px;'>"
+        f"<div style='font-size:12px; color:#64748b; font-weight:700;'>Signed in as</div>"
+        f"<div style='font-size:14px; color:#0f172a; font-weight:800;'>{_u.get('name','?')} · {_u.get('pod','?')}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("Sign out", key="_auth_logout_btn", use_container_width=True):
+        st.session_state.pop('_auth_user', None)
+        st.rerun()
 
 # 🔍 DEBUG: Worker task-count diagnostics — only renders when ?debug=1 is in the URL.
 # Shows the raw Onfleet /workers?analytics=true response shape so we can see why
@@ -5155,6 +5259,9 @@ if st.query_params.get("debug") == "1":
 tabs = st.tabs(["Global", "Blue Pod", "Green Pod", "Orange Pod", "Purple Pod", "Red Pod", "Digital"])
 # --- TAB 0: GLOBAL CONTROL ---
 with tabs[0]:
+    if not _can_access_tab('Global'):
+        st.info(f"🔒 Global Overview is restricted to Admin and Manager roles. Your assigned pod is **{st.session_state.get('_auth_user', {}).get('pod', '?')}** — head to your pod tab to dispatch.")
+        st.stop()
     # Check if ANY pod is loaded to toggle button state
     has_global_data = any(f"clusters_{p}" in st.session_state for p in POD_CONFIGS.keys())
     
@@ -5339,11 +5446,20 @@ with tabs[0]:
 
 # --- INDIVIDUAL POD TABS ---
 # 🌟 FIX: Using 2 instead of 1 to account for the new Digital Pool tab!
+# Each tab body is gated by _can_access_tab — pod-locked users see a friendly
+# "no access" message instead of the dispatch UI for pods they don't own.
 for i, pod in enumerate(["Blue", "Green", "Orange", "Purple", "Red"], 1):
-    with tabs[i]: run_pod_tab(pod)
+    with tabs[i]:
+        if _can_access_tab(pod):
+            run_pod_tab(pod)
+        else:
+            st.info(f"🔒 You don't have access to the {pod} Pod. Your assigned pod is **{st.session_state.get('_auth_user', {}).get('pod', '?')}**.")
 
 # --- TAB 6: DIGITAL POOL ---
 with tabs[6]:
+    if not _can_access_tab('Digital'):
+        st.info(f"🔒 The Digital tab is restricted to Admin and Manager roles. Your assigned pod is **{st.session_state.get('_auth_user', {}).get('pod', '?')}**.")
+        st.stop()
     # 1. 📊 GRAB DATA & INITIALIZE
     global_digital = st.session_state.get('global_digital_clusters', [])
     

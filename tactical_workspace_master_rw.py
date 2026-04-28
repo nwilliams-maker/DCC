@@ -108,6 +108,16 @@ STATE_MAP = {
 headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
 
 
+# 🌟 Loading-bar replacement: a silent shim with the same `.progress(val, text=...)`
+# / `.empty()` surface as st.progress(). Drop-in replacement so we can remove the
+# visible Streamlit progress bar without touching every update_prog/_tick callsite.
+# The dispatcher's overlay card (timer + status message) is the only loading UI now —
+# the bar was redundant and frozen-looking on cache hits, so it's gone.
+class _NoOpProgress:
+    def progress(self, *a, **kw): return self
+    def empty(self, *a, **kw): return self
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 🌍 SHARED ONFLEET PULL — process-scoped cache (60s TTL)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,10 +137,18 @@ headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
 @st.cache_data(ttl=60, show_spinner=False)
-def _fetch_onfleet_open_tasks_cached():
+def _fetch_onfleet_open_tasks_cached(_progress_cb=None):
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
-    Raises on hard error so the failure isn't cached."""
+    Raises on hard error so the failure isn't cached.
+
+    The optional `_progress_cb(pct, msg)` callback is invoked once per Onfleet
+    page so the caller can advance its progress bar and tick the overlay timer
+    in real time (fixes the "frozen bar" UI during cache misses). The leading
+    underscore tells st.cache_data to skip this arg in the cache-key — passing
+    a different callback per call doesn't bust the cache. On cache HIT the
+    function returns instantly and the callback is never invoked, which is the
+    correct behavior (nothing to show progress for)."""
     APPROVED_TEAMS = [
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
         "c - priority nationals", "cvs kiosk removal", "digital routes",
@@ -166,6 +184,14 @@ def _fetch_onfleet_open_tasks_cached():
         if _next_id:
             _seen_last_ids.add(_next_id)
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
+        # Per-page progress tick. Wrapped in try/except so a misbehaving callback
+        # can't break the pull (worst case: bar stays frozen, data still arrives).
+        if _progress_cb is not None:
+            try:
+                _pct = min(0.05 + 0.30 * (len(all_tasks_raw) / max(500, len(all_tasks_raw))), 0.39)
+                _progress_cb(_pct, f"📡 Fetching tasks... {len(all_tasks_raw)} found")
+            except Exception:
+                pass
 
     unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
     return {
@@ -1587,7 +1613,7 @@ def load_ic_database(sheet_url):
         return None
 
 def process_digital_pool(master_bar=None):
-    prog_bar = master_bar if master_bar else st.progress(0)
+    prog_bar = master_bar if master_bar else _NoOpProgress()
     prog_bar.progress(0.1, text="📥 Fetching National Tasks from Onfleet...")
     # Tick digital overlay timer
     _ov = st.session_state.get('_loading_overlay')
@@ -1606,8 +1632,23 @@ def process_digital_pool(master_bar=None):
     # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
     # top of this file. If a Dispatcher already pulled within the last 60s, this
     # returns instantly. Digital tab + every pod tab now share one pull.
+    def _digital_progress(pct, msg):
+        prog_bar.progress(pct, text=msg)
+        _ov_t = st.session_state.get('_loading_overlay')
+        _st_t = st.session_state.get('_loading_start')
+        if _ov_t and _st_t:
+            import time as _tt
+            _e = int(_tt.time() - _st_t); _m = _e // 60; _s = _e % 60
+            _ov_t.markdown(f"""<style>@keyframes spin{{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
+.dcc-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:36px 32px;text-align:center;margin:20px 0;}}
+.dcc-spin{{width:44px;height:44px;border:4px solid #e2e8f0;border-top:4px solid #0f766e;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px auto;}}
+.dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
+<div class='dcc-card'><div class='dcc-spin'></div>
+<p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
+<p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+        _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=_digital_progress)
     except Exception as _e:
         st.error(f"Onfleet API Error: {_e}")
         _log_err("process_digital_pool", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -1873,7 +1914,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
     start_pct = pod_idx * pod_weight
     
     # Use the master bar if provided, otherwise create a local one
-    prog_bar = master_bar if master_bar else st.progress(0)
+    prog_bar = master_bar if master_bar else _NoOpProgress()
     
     def update_prog(rel_val, msg):
         global_val = min(start_pct + (rel_val * pod_weight), 0.99)
@@ -1916,7 +1957,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
         # are using the app concurrently.
         try:
-            _onfleet_data = _fetch_onfleet_open_tasks_cached()
+            _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=update_prog)
         except Exception as _e:
             st.error(f"Onfleet API Error: {_e}")
             _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -3482,7 +3523,7 @@ def smart_sync_pod(pod_name):
         for t in c.get('data', []):
             known_ids.add(str(t['id']).strip())
 
-    _bar = st.progress(0, text="🔍 Checking Onfleet for new tasks...")
+    _bar = _NoOpProgress()
 
     def _tick(pct, msg):
         """Update progress bar AND re-render the spin-card overlay so the timer
@@ -3522,7 +3563,7 @@ def smart_sync_pod(pod_name):
     # routing it through the shared cache eliminates the worst rate-budget burner
     # in the app.
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+        _onfleet_data = _fetch_onfleet_open_tasks_cached(_progress_cb=_tick)
     except Exception as _e:
         st.error(f"Onfleet API Error: {_e}")
         _log_err("smart_sync_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -4051,7 +4092,7 @@ def run_pod_tab(pod_name):
         st.session_state['_loading_start'] = _start
         st.session_state['_loading_pod'] = pod_name
 
-        _bar = st.progress(0, text=f"🔌 Connecting to Onfleet...")
+        _bar = _NoOpProgress()
         _time.sleep(0.05)
         _bar.progress(0.03, text=f"⏳ Fetching {pod_name} tasks from Onfleet...")
         process_pod(pod_name, master_bar=_bar)
@@ -5315,7 +5356,7 @@ with tabs[0]:
 
         _render_global_card(_g_overlay, "Loading route database...", _g_start)
         _time.sleep(0.05)
-        p_bar = bar_placeholder.progress(0, text="📋 Loading route database from Google Sheets...")
+        p_bar = _NoOpProgress()
         st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
         _render_global_card(_g_overlay, f"Fetching tasks across {len(pod_keys)} pods...", _g_start)
         p_bar.progress(0.03, text=f"⏳ Fetching tasks across {len(pod_keys)} pods...")
@@ -5446,7 +5487,7 @@ with tabs[6]:
         import time as _time
         _d_start = _time.time()
         _d_overlay = st.empty()
-        _d_bar = st.progress(0, text="🔌 Connecting to Onfleet...")
+        _d_bar = _NoOpProgress()
 
         def _render_digital_card(overlay, start):
             elapsed = int(_time.time() - start)

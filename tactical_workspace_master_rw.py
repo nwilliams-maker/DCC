@@ -1215,70 +1215,6 @@ def _onfleet_get_state(tid, auth_header):
     return (tid, False)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_fn_team_id():
-    """Returns OnFleet team ID for the Field Nation team. Cached 1hr."""
-    try:
-        teams = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=10).json()
-        for t in teams:
-            if 'field nation' in str(t.get('name', '')).lower():
-                return t['id']
-    except Exception as e:
-        _log_err("_fetch_fn_team_id", e)
-    return None
-
-
-def assign_route_to_fn_team(task_ids, wo_name, due_date):
-    """Moves task_ids into Onfleet's Field Nation team and stamps WO_NAME / DUE_DATE
-    metadata. Fire-and-forget — UI doesn't wait."""
-    if not task_ids:
-        return
-
-    def _worker():
-        try:
-            fn_team_id = _fetch_fn_team_id()
-            if not fn_team_id:
-                _log_err("assign_route_to_fn_team", "FN team not found in Onfleet")
-                return
-            auth = {
-                "Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
-                "Content-Type": "application/json",
-            }
-            try:
-                container_body = json.dumps({"tasks": list(task_ids), "type": 1})
-                r = requests.put(
-                    f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
-                    headers=auth, data=container_body, timeout=15,
-                )
-                if r.status_code != 200:
-                    _log_err("assign_route_to_fn_team/container",
-                             f"HTTP {r.status_code}: {r.text[:200]}")
-            except Exception as e:
-                _log_err("assign_route_to_fn_team/container", e)
-                return
-            meta_payload = json.dumps({
-                "metadata": [
-                    {"name": "WO_NAME",  "value": wo_name or "",        "type": "string", "visibility": ["api"]},
-                    {"name": "DUE_DATE", "value": str(due_date) if due_date else "", "type": "string", "visibility": ["api"]},
-                ]
-            })
-            def _put_meta(tid):
-                try:
-                    r = requests.put(f"https://onfleet.com/api/v2/tasks/{tid}",
-                                     headers=auth, data=meta_payload, timeout=8)
-                    if r.status_code != 200:
-                        _log_err(f"assign_route_to_fn_team/meta task={tid}",
-                                 f"HTTP {r.status_code}: {r.text[:200]}")
-                except Exception as e:
-                    _log_err(f"assign_route_to_fn_team/meta task={tid}", e)
-            with ThreadPoolExecutor(max_workers=min(10, len(task_ids))) as ex:
-                list(ex.map(_put_meta, task_ids))
-        except Exception as e:
-            _log_err("assign_route_to_fn_team/outer", e)
-
-    threading.Thread(target=_worker, daemon=True).start()
-
-
 def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None, check_completed=False):
     """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background.
 
@@ -1346,45 +1282,6 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
                 _put_results = list(_ex.map(_do_put, outstanding_ids))
         except Exception as e:
             _log_err("move_to_dispatch/unassign-outer", e)
-
-    # 3b. Restore tasks to their original Onfleet team if this route was previously
-    # FN-marked (assign_route_to_fn_team moved them into the FN team container).
-    # Without this, a revoked FN route would stay stranded in the FN team and never
-    # reappear in the pod's dispatch view. Stash is keyed by cluster_hash and was
-    # populated either at FN-mark time or by fetch_sent_records_from_sheet hydration.
-    _pre_fn_map = st.session_state.pop(f"_pre_fn_teams_{cluster_hash}", None)
-    if _pre_fn_map and outstanding_ids:
-        # Only restore tasks we just unassigned (outstanding); leave completed work alone.
-        _outstanding_set = set(outstanding_ids)
-        _by_team = {}
-        for _tid, _team_id in (_pre_fn_map or {}).items():
-            _tid_s = str(_tid).strip()
-            if _team_id and _tid_s in _outstanding_set:
-                _by_team.setdefault(_team_id, []).append(_tid_s)
-
-        if _by_team:
-            def _restore_worker(by_team_snapshot):
-                try:
-                    _r_auth = {
-                        "Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
-                        "Content-Type": "application/json",
-                    }
-                    for _team_id, _tids in by_team_snapshot.items():
-                        try:
-                            _r = requests.put(
-                                f"https://onfleet.com/api/v2/containers/teams/{_team_id}",
-                                headers=_r_auth,
-                                data=json.dumps({"tasks": _tids, "type": 1}),
-                                timeout=15,
-                            )
-                            if _r.status_code != 200:
-                                _log_err("move_to_dispatch/restore-team",
-                                         f"team={_team_id} HTTP {_r.status_code}: {_r.text[:200]}")
-                        except Exception as _re:
-                            _log_err(f"move_to_dispatch/restore-team team={_team_id}", _re)
-                except Exception as _re_outer:
-                    _log_err("move_to_dispatch/restore-outer", _re_outer)
-            threading.Thread(target=_restore_worker, args=(_by_team,), daemon=True).start()
 
     # 4. Fire-and-forget the SHEET archival to GAS in a background thread (no Onfleet
     # work — pass task_ids=None so background_sheet_move skips its own scrub block).
@@ -1519,7 +1416,7 @@ def auto_sync_checker(pod_name):
         _log_err("auto_sync_checker", e)
 
 @st.fragment
-def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False):
+def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False, has_kiosks=False):
     """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
 
     is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
@@ -1527,17 +1424,32 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
     optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
     if is_fn:
-        # FN routes don\'t go through OnFleet route planning — drop that step.
-        cc1, cc2 = st.columns(2)
-        chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-        chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
-        _all_checked = chk1 and chk2
+        # FN routes don't go through OnFleet route planning — drop that step.
+        if has_kiosks:
+            cc1, cc2, cc3 = st.columns(3)
+            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+            chk_k = cc3.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk_k
+        else:
+            cc1, cc2 = st.columns(2)
+            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2
     else:
-        cc1, cc2, cc3 = st.columns(3)
-        chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-        chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-        chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-        _all_checked = chk1 and chk2 and chk3
+        if has_kiosks:
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+            chk4 = cc4.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk3 and chk4
+        else:
+            cc1, cc2, cc3 = st.columns(3)
+            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk3
 
     if _all_checked:
         if st.button("🏁 Finalize Route", key=f"finbtn_{prefix}_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
@@ -1678,17 +1590,6 @@ def fetch_sent_records_from_sheet():
                                         fn_posted_dict[_fp_hash] = _fp_dt.strftime('%m/%d %I:%M %p')
                                     except Exception:
                                         fn_posted_dict[_fp_hash] = str(_fp_ts_raw)
-                                # 🔄 Hydrate srcTeams stash so move_to_dispatch can restore
-                                # tasks back to their original Onfleet team on revoke/remove
-                                # even after the user's session state was cleared (reload).
-                                _src_teams_raw = p.get('srcTeams')
-                                if _src_teams_raw and _fp_hash:
-                                    try:
-                                        _st_map = json.loads(_src_teams_raw) if isinstance(_src_teams_raw, str) else _src_teams_raw
-                                        if isinstance(_st_map, dict):
-                                            st.session_state[f"_pre_fn_teams_{_fp_hash}"] = _st_map
-                                    except Exception as _e_st:
-                                        _log_err(f"fetch_sent_records_from_sheet/srcTeams hash={_fp_hash}", _e_st)
 
                             # 1. Live Task Matching
                             for tid in tids:
@@ -2126,9 +2027,6 @@ def process_digital_pool(master_bar=None):
             "venue_id": venue_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
-            # Original Onfleet team ID — captured so revoke/remove can move tasks
-            # back to their source team if they're moved out (e.g., to FN team).
-            "src_team_id": container.get('team') if c_type == 'TEAM' else None,
         })
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
@@ -2449,9 +2347,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "venue_id": venue_id,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
-                    # Original Onfleet team ID — captured so revoke/remove can move tasks
-                    # back to their source team if they're moved out (e.g., to FN team).
-                    "src_team_id": container.get('team') if c_type == 'TEAM' else None,
                 })
                 
         clusters = []
@@ -3761,12 +3656,6 @@ text-decoration:none;">📨 Default Mail</a>
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
             home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
-            # Stash original Onfleet team mapping so revoke/remove can restore tasks
-            # back to their source pod team. Also baked into the FN sheet payload below
-            # (key: srcTeams) so it survives session-state reset on reload.
-            _src_team_map = {str(t['id']).strip(): t.get('src_team_id') for t in cluster['data']}
-            st.session_state[f"_pre_fn_teams_{cluster_hash}"] = _src_team_map
-
             fn_payload = {
                 "cluster_hash": cluster_hash,
                 "icn": "Field Nation",
@@ -3782,19 +3671,10 @@ text-decoration:none;">📨 Default Mail</a>
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),
                 "kCnt": cluster.get('inst_count', 0),
-                "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
-                # JSON-encoded {task_id: src_team_id} so move_to_dispatch can put tasks
-                # back into their original team on revoke/remove. Hydrated into session
-                # state by fetch_sent_records_from_sheet.
-                "srcTeams": json.dumps(_src_team_map),
+                "locs": " | ".join([home] + list(stop_metrics.keys()) + [home])
             }
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
-            assign_route_to_fn_team(
-                task_ids=task_ids,
-                wo_name=fn_payload['wo'],
-                due_date=fn_payload['due'],
-            )
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
@@ -5284,7 +5164,7 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"))
+                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -5311,7 +5191,7 @@ def run_pod_tab(pod_name):
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"))
+                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:

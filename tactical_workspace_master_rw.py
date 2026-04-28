@@ -1956,6 +1956,14 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         # Initialize-All-Pods loop) gets the cached result for free. This is the
         # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
         # are using the app concurrently.
+        #
+        # NOTE: per-pod single-init and Smart Sync run process_pod inline on the
+        # main thread, so the inline cached pull is fine here. The Global Init
+        # path (Initialize All Pods) wraps the WHOLE process_pod call in a
+        # background thread (see tab 0 init below) so the main thread can keep
+        # ticking the overlay timer every 0.5s. That outer threading covers
+        # both the cached pull and the routing loop, which is the only way to
+        # keep the timer ticking during cache-hit pods (Green/Orange/Purple/Red).
         try:
             _onfleet_data = _fetch_onfleet_open_tasks_cached()
         except Exception as _e:
@@ -5386,10 +5394,51 @@ with tabs[0]:
         st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
         _render_global_card(_g_overlay, f"Fetching tasks across {len(pod_keys)} pods...", _g_start)
         p_bar.progress(0.03, text=f"⏳ Fetching tasks across {len(pod_keys)} pods...")
+        # ⏱ Background-thread wrapper around process_pod so the main thread can
+        # consistently tick the overlay timer every 0.5s for EVERY pod. Suppresses
+        # process_pod's inner overlay writes by removing _loading_overlay from
+        # session_state during the threaded run — main thread is the SOLE writer
+        # to _g_overlay, so there's no race between the two threads on the same
+        # placeholder. Restored after the loop in case other code paths read it.
+        try:
+            from streamlit.runtime.scriptrunner import add_script_run_ctx as _add_ctx
+        except Exception:
+            _add_ctx = None
+        # Suppress update_prog's overlay writes during the threaded run.
+        st.session_state.pop('_loading_overlay', None)
         for idx, p in enumerate(pod_keys):
             st.session_state.current_loading_pod = p
-            process_pod(p, master_bar=p_bar, pod_idx=idx, total_pods=len(pod_keys))
+            _pp_done = threading.Event()
+            _pp_err_holder = {}
+            def _bg_pp(_pod=p, _idx=idx):
+                try:
+                    process_pod(_pod, master_bar=p_bar, pod_idx=_idx, total_pods=len(pod_keys))
+                except Exception as _bge:
+                    _pp_err_holder['err'] = _bge
+                finally:
+                    _pp_done.set()
+            _t_pp = threading.Thread(target=_bg_pp, daemon=True)
+            if _add_ctx is not None:
+                try: _add_ctx(_t_pp)
+                except Exception: pass
+            _t_pp.start()
+            # Tick the overlay every 1s with the current pod name + timer. Main
+            # thread is the only one writing to _g_overlay during this loop, so
+            # the browser sees a clean 1 Hz render cadence — one visible
+            # increment of the timer pill per tick.
+            while not _pp_done.is_set():
+                _render_global_card(_g_overlay, f"{p}: 🗺️ Routing tasks...", _g_start)
+                _time.sleep(1.0)
+            _t_pp.join()
+            if 'err' in _pp_err_holder:
+                _err = _pp_err_holder['err']
+                _log_err(f"process_pod/{p}", f"thread crash: {type(_err).__name__}: {_err}")
+                _errs = st.session_state.setdefault('_init_errors', {})
+                _errs[p] = f"{type(_err).__name__}: {_err}"
+                st.session_state['_init_errors'] = _errs
         st.session_state.current_loading_pod = None
+        # Restore overlay reference for any post-loop code that might check it.
+        st.session_state['_loading_overlay'] = _g_overlay
         _g_overlay.empty()
         bar_placeholder.empty()
         st.session_state.pop('_loading_overlay', None)
@@ -6007,6 +6056,9 @@ with tabs[6]:
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
 
+
+# --- FOOTER ---
+
 # --- FOOTER ---
 st.markdown("---")
 st.markdown(
@@ -6018,3 +6070,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+

@@ -108,16 +108,6 @@ STATE_MAP = {
 headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
 
 
-# 🌟 Loading-bar replacement: a silent shim with the same `.progress(val, text=...)`
-# / `.empty()` surface as st.progress(). Drop-in replacement so we can remove the
-# visible Streamlit progress bar without touching every update_prog/_tick callsite.
-# The dispatcher's overlay card (timer + status message) is the only loading UI now —
-# the bar was redundant and frozen-looking on cache hits, so it's gone.
-class _NoOpProgress:
-    def progress(self, *a, **kw): return self
-    def empty(self, *a, **kw): return self
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 🌍 SHARED ONFLEET PULL — process-scoped cache (60s TTL)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,15 +130,7 @@ class _NoOpProgress:
 def _fetch_onfleet_open_tasks_cached():
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
-    Raises on hard error so the failure isn't cached.
-
-    NOTE: cannot accept a progress callback. @st.cache_data wraps the function
-    body and replays element calls — touching a Streamlit widget/placeholder
-    created OUTSIDE the function (which any progress callback would do) raises
-    CacheReplayClosureError and aborts the entire pull. The overlay timer in
-    the calling functions (process_pod / process_digital_pool / smart_sync_pod)
-    is what ticks during the wait; per-page granularity inside the pull is not
-    available and shouldn't be added back via this path."""
+    Raises on hard error so the failure isn't cached."""
     APPROVED_TEAMS = [
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
         "c - priority nationals", "cvs kiosk removal", "digital routes",
@@ -1605,7 +1587,7 @@ def load_ic_database(sheet_url):
         return None
 
 def process_digital_pool(master_bar=None):
-    prog_bar = master_bar if master_bar else _NoOpProgress()
+    prog_bar = master_bar if master_bar else st.progress(0)
     prog_bar.progress(0.1, text="📥 Fetching National Tasks from Onfleet...")
     # Tick digital overlay timer
     _ov = st.session_state.get('_loading_overlay')
@@ -1624,21 +1606,6 @@ def process_digital_pool(master_bar=None):
     # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
     # top of this file. If a Dispatcher already pulled within the last 60s, this
     # returns instantly. Digital tab + every pod tab now share one pull.
-    def _digital_progress(pct, msg):
-        prog_bar.progress(pct, text=msg)
-        _ov_t = st.session_state.get('_loading_overlay')
-        _st_t = st.session_state.get('_loading_start')
-        if _ov_t and _st_t:
-            import time as _tt
-            _e = int(_tt.time() - _st_t); _m = _e // 60; _s = _e % 60
-            _ov_t.markdown(f"""<style>@keyframes spin{{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
-.dcc-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:36px 32px;text-align:center;margin:20px 0;}}
-.dcc-spin{{width:44px;height:44px;border:4px solid #e2e8f0;border-top:4px solid #0f766e;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px auto;}}
-.dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
-<div class='dcc-card'><div class='dcc-spin'></div>
-<p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
     try:
         _onfleet_data = _fetch_onfleet_open_tasks_cached()
     except Exception as _e:
@@ -1906,7 +1873,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
     start_pct = pod_idx * pod_weight
     
     # Use the master bar if provided, otherwise create a local one
-    prog_bar = master_bar if master_bar else _NoOpProgress()
+    prog_bar = master_bar if master_bar else st.progress(0)
     
     def update_prog(rel_val, msg):
         global_val = min(start_pct + (rel_val * pod_weight), 0.99)
@@ -1919,14 +1886,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             import time as _t
             elapsed = int(_t.time() - _st)
             m = elapsed // 60; s = elapsed % 60
-            # When _loading_pod is "Global" we're inside the Initialize-All-Pods
-            # loop; show "Initializing All Pods" as the title and prefix the
-            # message with the current pod name (e.g. "Blue: 🗺️ Routing 249
-            # remaining tasks..."). Single-pod init paths set _loading_pod to
-            # the actual pod and don't need the prefix.
-            _is_global = (_pn == 'Global')
-            _title = 'All Pods' if _is_global else f'{_pn} Pod'
-            _msg_disp = f"{pod_name}: {msg}" if _is_global else msg
             _ov.markdown(f"""
                 <style>
                     @keyframes spin {{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
@@ -1941,8 +1900,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 </style>
                 <div class='dcc-card'>
                     <div class='dcc-spin'></div>
-                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_title}</p>
-                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{_msg_disp}</p>
+                    <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_pn} Pod</p>
+                    <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
                 </div>
             """, unsafe_allow_html=True)
@@ -1956,14 +1915,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         # Initialize-All-Pods loop) gets the cached result for free. This is the
         # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
         # are using the app concurrently.
-        #
-        # NOTE: per-pod single-init and Smart Sync run process_pod inline on the
-        # main thread, so the inline cached pull is fine here. The Global Init
-        # path (Initialize All Pods) wraps the WHOLE process_pod call in a
-        # background thread (see tab 0 init below) so the main thread can keep
-        # ticking the overlay timer every 0.5s. That outer threading covers
-        # both the cached pull and the routing loop, which is the only way to
-        # keep the timer ticking during cache-hit pods (Green/Orange/Purple/Red).
         try:
             _onfleet_data = _fetch_onfleet_open_tasks_cached()
         except Exception as _e:
@@ -2331,18 +2282,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
     except Exception as e:
-        # 🛡️ Persist the error to session state so the Global tab can surface
-        # which pod(s) failed AFTER the loop completes. The transient st.error
-        # toast disappears on the next rerun, leaving dispatchers confused
-        # about why pods show OFFLINE. _init_errors is a dict pod_name -> str.
-        import traceback as _tb
-        _err_msg = f"{type(e).__name__}: {e}"
-        _err_full = _tb.format_exc()
-        _log_err(f"process_pod/{pod_name}", f"{_err_msg}\n{_err_full}")
-        _errs = st.session_state.setdefault('_init_errors', {})
-        _errs[pod_name] = _err_msg
-        st.session_state['_init_errors'] = _errs
-        st.error(f"Error initializing {pod_name}: {_err_msg}")
+        st.error(f"Error initializing {pod_name}: {str(e)}")
 # 🌟 NEW HELPER: Standardized Digital Badges
 def get_digi_badges(cluster_data):
     icons = set()
@@ -3542,7 +3482,7 @@ def smart_sync_pod(pod_name):
         for t in c.get('data', []):
             known_ids.add(str(t['id']).strip())
 
-    _bar = _NoOpProgress()
+    _bar = st.progress(0, text="🔍 Checking Onfleet for new tasks...")
 
     def _tick(pct, msg):
         """Update progress bar AND re-render the spin-card overlay so the timer
@@ -4111,7 +4051,7 @@ def run_pod_tab(pod_name):
         st.session_state['_loading_start'] = _start
         st.session_state['_loading_pod'] = pod_name
 
-        _bar = _NoOpProgress()
+        _bar = st.progress(0, text=f"🔌 Connecting to Onfleet...")
         _time.sleep(0.05)
         _bar.progress(0.03, text=f"⏳ Fetching {pod_name} tasks from Onfleet...")
         process_pod(pod_name, master_bar=_bar)
@@ -5227,8 +5167,6 @@ with tabs[0]:
         btn_label = "🚀 Sync Routes" if has_global_data else "🚀 Initialize All Pods"
         if st.button(btn_label, key="global_init_btn", use_container_width=True):
             st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
-            # Reset init-error tracking so a fresh attempt has a clean slate.
-            st.session_state.pop('_init_errors', None)
             st.session_state.trigger_pull = True
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -5236,19 +5174,6 @@ with tabs[0]:
     st.markdown("---")
     loading_placeholder = st.empty()
     bar_placeholder = st.empty()
-
-    # 🛡️ Surface persistent init errors so dispatchers see WHY a pod is OFFLINE
-    # after Initialize All Pods. The transient st.error toast inside process_pod
-    # disappears on rerun; this banner stays until the user clicks "Clear errors".
-    _init_errs = st.session_state.get('_init_errors', {})
-    if _init_errs:
-        with st.expander(f"⚠️ {len(_init_errs)} pod(s) failed to initialize — click to inspect", expanded=True):
-            for _ep, _em in _init_errs.items():
-                st.error(f"**{_ep}**: {_em}")
-            if st.button("Clear errors", key="_clear_init_errors"):
-                st.session_state.pop('_init_errors', None)
-                st.rerun()
-
     if not has_global_data:
         st.info("No operational data initialized. Click '🚀 Initialize All Pods' at the top right to fetch tasks across all pods.")
 
@@ -5390,55 +5315,14 @@ with tabs[0]:
 
         _render_global_card(_g_overlay, "Loading route database...", _g_start)
         _time.sleep(0.05)
-        p_bar = _NoOpProgress()
+        p_bar = bar_placeholder.progress(0, text="📋 Loading route database from Google Sheets...")
         st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
         _render_global_card(_g_overlay, f"Fetching tasks across {len(pod_keys)} pods...", _g_start)
         p_bar.progress(0.03, text=f"⏳ Fetching tasks across {len(pod_keys)} pods...")
-        # ⏱ Background-thread wrapper around process_pod so the main thread can
-        # consistently tick the overlay timer every 0.5s for EVERY pod. Suppresses
-        # process_pod's inner overlay writes by removing _loading_overlay from
-        # session_state during the threaded run — main thread is the SOLE writer
-        # to _g_overlay, so there's no race between the two threads on the same
-        # placeholder. Restored after the loop in case other code paths read it.
-        try:
-            from streamlit.runtime.scriptrunner import add_script_run_ctx as _add_ctx
-        except Exception:
-            _add_ctx = None
-        # Suppress update_prog's overlay writes during the threaded run.
-        st.session_state.pop('_loading_overlay', None)
         for idx, p in enumerate(pod_keys):
             st.session_state.current_loading_pod = p
-            _pp_done = threading.Event()
-            _pp_err_holder = {}
-            def _bg_pp(_pod=p, _idx=idx):
-                try:
-                    process_pod(_pod, master_bar=p_bar, pod_idx=_idx, total_pods=len(pod_keys))
-                except Exception as _bge:
-                    _pp_err_holder['err'] = _bge
-                finally:
-                    _pp_done.set()
-            _t_pp = threading.Thread(target=_bg_pp, daemon=True)
-            if _add_ctx is not None:
-                try: _add_ctx(_t_pp)
-                except Exception: pass
-            _t_pp.start()
-            # Tick the overlay every 1s with the current pod name + timer. Main
-            # thread is the only one writing to _g_overlay during this loop, so
-            # the browser sees a clean 1 Hz render cadence — one visible
-            # increment of the timer pill per tick.
-            while not _pp_done.is_set():
-                _render_global_card(_g_overlay, f"{p}: 🗺️ Routing tasks...", _g_start)
-                _time.sleep(1.0)
-            _t_pp.join()
-            if 'err' in _pp_err_holder:
-                _err = _pp_err_holder['err']
-                _log_err(f"process_pod/{p}", f"thread crash: {type(_err).__name__}: {_err}")
-                _errs = st.session_state.setdefault('_init_errors', {})
-                _errs[p] = f"{type(_err).__name__}: {_err}"
-                st.session_state['_init_errors'] = _errs
+            process_pod(p, master_bar=p_bar, pod_idx=idx, total_pods=len(pod_keys))
         st.session_state.current_loading_pod = None
-        # Restore overlay reference for any post-loop code that might check it.
-        st.session_state['_loading_overlay'] = _g_overlay
         _g_overlay.empty()
         bar_placeholder.empty()
         st.session_state.pop('_loading_overlay', None)
@@ -5562,7 +5446,7 @@ with tabs[6]:
         import time as _time
         _d_start = _time.time()
         _d_overlay = st.empty()
-        _d_bar = _NoOpProgress()
+        _d_bar = st.progress(0, text="🔌 Connecting to Onfleet...")
 
         def _render_digital_card(overlay, start):
             elapsed = int(_time.time() - start)
@@ -6056,9 +5940,6 @@ with tabs[6]:
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
 
-
-# --- FOOTER ---
-
 # --- FOOTER ---
 st.markdown("---")
 st.markdown(
@@ -6070,4 +5951,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-

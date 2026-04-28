@@ -1808,7 +1808,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
     
     # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
     # top of this file. If a Dispatcher already pulled within the last 60s, this
@@ -1840,7 +1840,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
     
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
@@ -1981,7 +1981,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
     
     # 3. Route ONLY the Digital Tasks
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -2110,6 +2110,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_pn} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -3724,6 +3725,7 @@ def smart_sync_pod(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {_pn} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -4207,6 +4209,7 @@ def run_pod_tab(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {pod} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Scanning Onfleet for tasks not yet tracked...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -4252,6 +4255,7 @@ def run_pod_tab(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {pod} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching tasks from Onfleet and building routes...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5592,6 +5596,7 @@ with tabs[0]:
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing All Pods</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5764,6 +5769,7 @@ with tabs[6]:
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching Digital tasks from Onfleet...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
                 </div>
             """, unsafe_allow_html=True)
 

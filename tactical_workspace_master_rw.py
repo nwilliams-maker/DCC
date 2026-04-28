@@ -202,7 +202,7 @@ USERS = {
     # Default admin — username: 'admin', password: 'terraboost-admin-2026'
     # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
     "admin": {
-        "name": "Admin",
+        "name": "Nick Williams",
         "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
         "pod": "ADMIN",
         "tier": "admin",
@@ -296,7 +296,7 @@ USERS = {
 
     # ───── Manager (full read access, separate from Admin) ─────
     "manager": {
-        "name": "Pod Manager",
+        "name": "Matt Shanks",
         "password_hash": "2e064c30dfe840ff76432c401a0d0c19f0b30d823f60fd378353a6a63e431e75",
         "pod": "MANAGER",
         "role": "Manager",

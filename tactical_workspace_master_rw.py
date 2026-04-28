@@ -241,12 +241,40 @@ USERS = {
         "role": "Associate",
     },  # default password: red-associate-2026
 
-    # ───── Dispatcher slots (one per pod) — uncomment + customize as needed ─────
-    # "sarah":  {"name": "Sarah Smith",  "password_hash": "<sha256>", "pod": "Blue",   "role": "Dispatcher"},
-    # "maria":  {"name": "Maria Lopez",  "password_hash": "<sha256>", "pod": "Green",  "role": "Dispatcher"},
-    # "javier": {"name": "Javier Reyes", "password_hash": "<sha256>", "pod": "Orange", "role": "Dispatcher"},
-    # "kelly":  {"name": "Kelly Chen",   "password_hash": "<sha256>", "pod": "Purple", "role": "Dispatcher"},
-    # "aaron":  {"name": "Aaron Patel",  "password_hash": "<sha256>", "pod": "Red",    "role": "Dispatcher"},
+    # ───── Dispatchers (one per pod) ─────
+    # Pre-seeded with default passwords — change these before sharing the URL.
+    "blue_disp": {
+        "name": "Blue Dispatcher",
+        "password_hash": "7fcbab09966753ace9ce3e89c91307e7806814a68a609701dc12cb0320a403a7",
+        "pod": "Blue",
+        "role": "Dispatcher",
+    },  # default password: blue-dispatcher-2026
+    "green_disp": {
+        "name": "Green Dispatcher",
+        "password_hash": "825fb8ffc7784ac14ce867282291fa380ada3d1de806afbcf2da6df9fc85b70d",
+        "pod": "Green",
+        "role": "Dispatcher",
+    },  # default password: green-dispatcher-2026
+    "orange_disp": {
+        "name": "Orange Dispatcher",
+        "password_hash": "3f96698de9b0d76c1ccc10fb46e172db1ce0e05efe0d68a8fb95172538950ffc",
+        "pod": "Orange",
+        "role": "Dispatcher",
+    },  # default password: orange-dispatcher-2026
+    "purple_disp": {
+        "name": "Purple Dispatcher",
+        "password_hash": "07776f89d6ed181ff87fb54da5ce0a5ac642540b0697ed0edc6954cf2facd0da",
+        "pod": "Purple",
+        "role": "Dispatcher",
+    },  # default password: purple-dispatcher-2026
+    "red_disp": {
+        "name": "Red Dispatcher",
+        "password_hash": "35f0d90cc0b206b110401ab0eb8db8f5e304646debaa40ab0037da84c3a87978",
+        "pod": "Red",
+        "role": "Dispatcher",
+    },  # default password: red-dispatcher-2026
+
+    # ───── Manager slot — uncomment + customize as needed ─────
     # "manager": {"name": "Pod Manager", "password_hash": "<sha256>", "pod": "MANAGER", "role": "Manager"},
 }
 
@@ -259,6 +287,21 @@ def _check_password(username: str, password: str):
     if _login_hashlib.sha256(str(password or "").encode("utf-8")).hexdigest() == rec.get("password_hash"):
         return rec
     return None
+
+def _user_role() -> str:
+    """Return the current user's role string (e.g. 'Dispatcher', 'Associate', 'Manager') or '' if not logged in / no role set."""
+    return str(st.session_state.get('_auth_user', {}).get('role', '')).strip()
+
+
+def _is_dispatch_associate() -> bool:
+    """True if the signed-in user is a pod-locked Dispatch Associate (limited UI: FN-only sub-tab, no revoke buttons)."""
+    return _user_role().lower() == 'associate'
+
+
+def _user_pod_raw() -> str:
+    """Return the user's pod assignment string as-stored (e.g. 'Blue', 'ADMIN')."""
+    return str(st.session_state.get('_auth_user', {}).get('pod', '')).strip()
+
 
 def _can_access_tab(tab_pod: str) -> bool:
     """tab_pod ∈ {'Global','Blue','Green','Orange','Purple','Red','Digital'}.
@@ -277,9 +320,9 @@ def _can_access_tab(tab_pod: str) -> bool:
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
     st.markdown(
-        "<div style='text-align:center; padding-top:60px;'>"
-        "<h1 style='color:#633094; margin-bottom:6px; font-weight:800;'>Terraboost Media</h1>"
-        "<p style='color:#64748b; margin-bottom:32px; font-size:14px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700;'>Dispatch Command Center · Sign in</p>"
+        "<div style='text-align:center; padding-top:60px; width:100%;'>"
+        "<h1 style='color:#633094; margin: 0 auto 6px auto; font-weight:800; text-align:center;'>Terraboost Media</h1>"
+        "<p style='color:#64748b; margin:0 auto 32px auto; font-size:14px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700; text-align:center;'>Dispatch Command Center · Sign in</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -4586,7 +4629,9 @@ def run_pod_tab(pod_name):
         t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
 
         with t_ready:
-            if not ready: st.info("No tasks ready for dispatch.")
+            if _is_dispatch_associate():
+                st.info("🔒 Field Nation Associates have access to the Field Nation tab only.")
+            elif not ready: st.info("No tasks ready for dispatch.")
             else:
                 sorted_ready = group_and_sort_by_proximity(ready)
                 current_state = None
@@ -4621,7 +4666,9 @@ def run_pod_tab(pod_name):
                         render_dispatch(i, c, pod_name)
                     
         with t_flagged:
-            if not review: st.info("No flagged tasks requiring review.")
+            if _is_dispatch_associate():
+                st.info("🔒 Field Nation Associates have access to the Field Nation tab only.")
+            elif not review: st.info("No flagged tasks requiring review.")
             else:
                 sorted_review = group_and_sort_by_proximity(review)
                 current_state = None
@@ -4845,7 +4892,9 @@ def run_pod_tab(pod_name):
                         render_dispatch(i+5000, c, pod_name)
                     
         with t_digital:
-            if not digital_ready: st.info("No digital service tasks pending.")
+            if _is_dispatch_associate():
+                st.info("🔒 Field Nation Associates have access to the Field Nation tab only.")
+            elif not digital_ready: st.info("No digital service tasks pending.")
             else:
                 sorted_digi = group_and_sort_by_proximity(digital_ready)
                 current_state = None
@@ -4861,6 +4910,9 @@ def run_pod_tab(pod_name):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
+      if _is_dispatch_associate():
+        st.markdown("<div style='text-align:center; padding-top:60px; color:#94a3b8; font-size:13px;'>🔒 Awaiting-confirmation column is for Dispatchers only.</div>", unsafe_allow_html=True)
+      else:
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
         t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
         
@@ -5192,7 +5244,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 
 # 🔍 DEBUG: Worker task-count diagnostics — only renders when ?debug=1 is in the URL.
 # Shows the raw Onfleet /workers?analytics=true response shape so we can see why
@@ -5314,6 +5366,17 @@ if st.query_params.get("debug") == "1":
 
 
 # Updated Main Tabs
+# --- POD-LOCKED LANDING ---
+# Pod dispatchers + Associates only see their assigned pod tab. They land
+# directly on it (no Global gate to click past). Admin/Manager fall through to
+# the full 7-tab UI below.
+_locked_pod = _user_pod_raw()
+if _locked_pod.upper() not in ('ADMIN', 'MANAGER', 'ALL'):
+    _locked_tabs = st.tabs([f"{_locked_pod} Pod"])
+    with _locked_tabs[0]:
+        run_pod_tab(_locked_pod)
+    st.stop()
+
 tabs = st.tabs(["Global", "Blue Pod", "Green Pod", "Orange Pod", "Purple Pod", "Red Pod", "Digital"])
 # --- TAB 0: GLOBAL CONTROL ---
 with tabs[0]:

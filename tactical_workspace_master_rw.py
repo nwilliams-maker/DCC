@@ -2323,7 +2323,18 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
     except Exception as e:
-        st.error(f"Error initializing {pod_name}: {str(e)}")
+        # 🛡️ Persist the error to session state so the Global tab can surface
+        # which pod(s) failed AFTER the loop completes. The transient st.error
+        # toast disappears on the next rerun, leaving dispatchers confused
+        # about why pods show OFFLINE. _init_errors is a dict pod_name -> str.
+        import traceback as _tb
+        _err_msg = f"{type(e).__name__}: {e}"
+        _err_full = _tb.format_exc()
+        _log_err(f"process_pod/{pod_name}", f"{_err_msg}\n{_err_full}")
+        _errs = st.session_state.setdefault('_init_errors', {})
+        _errs[pod_name] = _err_msg
+        st.session_state['_init_errors'] = _errs
+        st.error(f"Error initializing {pod_name}: {_err_msg}")
 # 🌟 NEW HELPER: Standardized Digital Badges
 def get_digi_badges(cluster_data):
     icons = set()
@@ -5208,6 +5219,8 @@ with tabs[0]:
         btn_label = "🚀 Sync Routes" if has_global_data else "🚀 Initialize All Pods"
         if st.button(btn_label, key="global_init_btn", use_container_width=True):
             st.session_state.sent_db, st.session_state.ghost_db, st.session_state['archived_wos'], st.session_state['_history_db'] = fetch_sent_records_from_sheet()
+            # Reset init-error tracking so a fresh attempt has a clean slate.
+            st.session_state.pop('_init_errors', None)
             st.session_state.trigger_pull = True
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -5215,6 +5228,19 @@ with tabs[0]:
     st.markdown("---")
     loading_placeholder = st.empty()
     bar_placeholder = st.empty()
+
+    # 🛡️ Surface persistent init errors so dispatchers see WHY a pod is OFFLINE
+    # after Initialize All Pods. The transient st.error toast inside process_pod
+    # disappears on rerun; this banner stays until the user clicks "Clear errors".
+    _init_errs = st.session_state.get('_init_errors', {})
+    if _init_errs:
+        with st.expander(f"⚠️ {len(_init_errs)} pod(s) failed to initialize — click to inspect", expanded=True):
+            for _ep, _em in _init_errs.items():
+                st.error(f"**{_ep}**: {_em}")
+            if st.button("Clear errors", key="_clear_init_errors"):
+                st.session_state.pop('_init_errors', None)
+                st.rerun()
+
     if not has_global_data:
         st.info("No operational data initialized. Click '🚀 Initialize All Pods' at the top right to fetch tasks across all pods.")
 

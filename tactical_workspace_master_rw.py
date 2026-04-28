@@ -206,13 +206,48 @@ USERS = {
         "password_hash": "60186d64801df51f53c5a347e286310b1b998ebcaaa70218d875145778d1e483",
         "pod": "ADMIN",
     },
-    # Examples — uncomment + customize, then commit:
-    # "sarah":  {"name": "Sarah Smith",  "password_hash": "<sha256>", "pod": "Blue"},
-    # "maria":  {"name": "Maria Lopez",  "password_hash": "<sha256>", "pod": "Green"},
-    # "javier": {"name": "Javier Reyes", "password_hash": "<sha256>", "pod": "Orange"},
-    # "kelly":  {"name": "Kelly Chen",   "password_hash": "<sha256>", "pod": "Purple"},
-    # "aaron":  {"name": "Aaron Patel",  "password_hash": "<sha256>", "pod": "Red"},
-    # "manager": {"name": "Pod Manager", "password_hash": "<sha256>", "pod": "MANAGER"},
+
+    # ───── Dispatch Associates (one per pod) ─────
+    # Pre-seeded with default passwords — change these before sharing the URL.
+    # Each Associate gets pod-locked access to ONLY their pod's tab.
+    "blue_assoc": {
+        "name": "Blue Dispatch Associate",
+        "password_hash": "a39873d7a2cda95c35d4ccb7bcfa197b1950a3cc4dc8d906cd58942a72352dbb",
+        "pod": "Blue",
+        "role": "Associate",
+    },  # default password: blue-associate-2026
+    "green_assoc": {
+        "name": "Green Dispatch Associate",
+        "password_hash": "6348292e664c913bda626ab6d96d5f2c9937826866d2ec0851846cfccf738bc8",
+        "pod": "Green",
+        "role": "Associate",
+    },  # default password: green-associate-2026
+    "orange_assoc": {
+        "name": "Orange Dispatch Associate",
+        "password_hash": "9a3a4277968951629f469dcc60309796d201a4f1d2d941d099bb808cec05f340",
+        "pod": "Orange",
+        "role": "Associate",
+    },  # default password: orange-associate-2026
+    "purple_assoc": {
+        "name": "Purple Dispatch Associate",
+        "password_hash": "0c0a4f0d48401e75e6fa5e5a82b084042d72b93cbf1bc3dbc1eda214c05171d0",
+        "pod": "Purple",
+        "role": "Associate",
+    },  # default password: purple-associate-2026
+    "red_assoc": {
+        "name": "Red Dispatch Associate",
+        "password_hash": "f8b122f307387c312a2fd6f9a106adb1f2f1feb961250c50c3744c6671a85060",
+        "pod": "Red",
+        "role": "Associate",
+    },  # default password: red-associate-2026
+
+    # ───── Dispatcher slots (one per pod) — uncomment + customize as needed ─────
+    # "sarah":  {"name": "Sarah Smith",  "password_hash": "<sha256>", "pod": "Blue",   "role": "Dispatcher"},
+    # "maria":  {"name": "Maria Lopez",  "password_hash": "<sha256>", "pod": "Green",  "role": "Dispatcher"},
+    # "javier": {"name": "Javier Reyes", "password_hash": "<sha256>", "pod": "Orange", "role": "Dispatcher"},
+    # "kelly":  {"name": "Kelly Chen",   "password_hash": "<sha256>", "pod": "Purple", "role": "Dispatcher"},
+    # "aaron":  {"name": "Aaron Patel",  "password_hash": "<sha256>", "pod": "Red",    "role": "Dispatcher"},
+    # "manager": {"name": "Pod Manager", "password_hash": "<sha256>", "pod": "MANAGER", "role": "Manager"},
 }
 
 import hashlib as _login_hashlib
@@ -5138,12 +5173,17 @@ if '_worker_counts' not in st.session_state:
 # as the Terraboost logo top-left). Sign out is a styled <a> that hits
 # ?logout=1 → handled by the LOGOUT URL HANDLER block above.
 _u = st.session_state.get('_auth_user', {})
+# Role label: "Pod · Role" when a role is set (e.g. "Blue · Associate"),
+# otherwise just the pod (e.g. "ADMIN").
+_pod_label = _u.get('pod', '?')
+_role_label = _u.get('role')
+_signin_line = f"{_u.get('name','?')} · {_pod_label}" + (f" {_role_label}" if _role_label else "")
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
-        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_u.get('name','?')} · {_u.get('pod','?')}</div>
+        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
         <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
                 border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
                 font-size: 11px; font-weight: 700;">Sign out</a>

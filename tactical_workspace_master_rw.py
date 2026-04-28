@@ -205,6 +205,7 @@ USERS = {
         "name": "Nick Williams",
         "password_hash": "60186d64801df51f53c5a347e286310b1b998ebcaaa70218d875145778d1e483",
         "pod": "ADMIN",
+        "tier": "admin",
     },
 
     # ───── Dispatch Associates (one per pod) ─────
@@ -215,30 +216,35 @@ USERS = {
         "password_hash": "a39873d7a2cda95c35d4ccb7bcfa197b1950a3cc4dc8d906cd58942a72352dbb",
         "pod": "Blue",
         "role": "Associate",
+    "tier": "guest",
     },  # default password: blue-associate-2026
     "green_assoc": {
         "name": "Green Dispatch Associate",
         "password_hash": "6348292e664c913bda626ab6d96d5f2c9937826866d2ec0851846cfccf738bc8",
         "pod": "Green",
         "role": "Associate",
+    "tier": "guest",
     },  # default password: green-associate-2026
     "orange_assoc": {
         "name": "Orange Dispatch Associate",
         "password_hash": "9a3a4277968951629f469dcc60309796d201a4f1d2d941d099bb808cec05f340",
         "pod": "Orange",
         "role": "Associate",
+    "tier": "guest",
     },  # default password: orange-associate-2026
     "purple_assoc": {
         "name": "Purple Dispatch Associate",
         "password_hash": "0c0a4f0d48401e75e6fa5e5a82b084042d72b93cbf1bc3dbc1eda214c05171d0",
         "pod": "Purple",
         "role": "Associate",
+    "tier": "guest",
     },  # default password: purple-associate-2026
     "red_assoc": {
         "name": "Red Dispatch Associate",
         "password_hash": "f8b122f307387c312a2fd6f9a106adb1f2f1feb961250c50c3744c6671a85060",
         "pod": "Red",
         "role": "Associate",
+    "tier": "guest",
     },  # default password: red-associate-2026
 
     # ───── Dispatchers (one per pod) ─────
@@ -248,34 +254,45 @@ USERS = {
         "password_hash": "7fcbab09966753ace9ce3e89c91307e7806814a68a609701dc12cb0320a403a7",
         "pod": "Blue",
         "role": "Dispatcher",
+    "tier": "user",
     },  # default password: blue-dispatcher-2026
     "green_disp": {
         "name": "Green Dispatcher",
         "password_hash": "825fb8ffc7784ac14ce867282291fa380ada3d1de806afbcf2da6df9fc85b70d",
         "pod": "Green",
         "role": "Dispatcher",
+    "tier": "user",
     },  # default password: green-dispatcher-2026
     "orange_disp": {
         "name": "Orange Dispatcher",
         "password_hash": "3f96698de9b0d76c1ccc10fb46e172db1ce0e05efe0d68a8fb95172538950ffc",
         "pod": "Orange",
         "role": "Dispatcher",
+    "tier": "user",
     },  # default password: orange-dispatcher-2026
     "purple_disp": {
         "name": "Purple Dispatcher",
         "password_hash": "07776f89d6ed181ff87fb54da5ce0a5ac642540b0697ed0edc6954cf2facd0da",
         "pod": "Purple",
         "role": "Dispatcher",
+    "tier": "user",
     },  # default password: purple-dispatcher-2026
     "red_disp": {
         "name": "Red Dispatcher",
         "password_hash": "35f0d90cc0b206b110401ab0eb8db8f5e304646debaa40ab0037da84c3a87978",
         "pod": "Red",
         "role": "Dispatcher",
+    "tier": "user",
     },  # default password: red-dispatcher-2026
 
-    # ───── Manager slot — uncomment + customize as needed ─────
-    # "manager": {"name": "Pod Manager", "password_hash": "<sha256>", "pod": "MANAGER", "role": "Manager"},
+    # ───── Manager (full read access, separate from Admin) ─────
+    "manager": {
+        "name": "Pod Manager",
+        "password_hash": "f58da1b04132132d4de2a2c0f18dc571d2d327c35804d32e849f181080277fa9",
+        "pod": "MANAGER",
+        "role": "Manager",
+        "tier": "manager",
+    },  # default password: manager-2026
 }
 
 import hashlib as _login_hashlib
@@ -293,9 +310,39 @@ def _user_role() -> str:
     return str(st.session_state.get('_auth_user', {}).get('role', '')).strip()
 
 
+def _user_tier() -> str:
+    """Return the current user's tier — 'admin', 'manager', 'user', or 'guest'.
+    Canonical permission model:
+      admin   -> full access (Nick)
+      manager -> full access (separate login)
+      user    -> Dispatcher: pod-locked, sees full pod tab
+      guest   -> Dispatch Associate: pod-locked, FN sub-tab only, no revoke buttons
+    Falls back to inferring tier from pod/role for legacy records that don't
+    yet have an explicit `tier` field."""
+    user = st.session_state.get('_auth_user', {})
+    explicit = str(user.get('tier', '')).strip().lower()
+    if explicit:
+        return explicit
+    pod_u = str(user.get('pod', '')).strip().upper()
+    role_u = str(user.get('role', '')).strip().lower()
+    if pod_u in ('ADMIN', 'ALL'):
+        return 'admin'
+    if pod_u == 'MANAGER':
+        return 'manager'
+    if role_u == 'associate':
+        return 'guest'
+    return 'user'
+
+
 def _is_dispatch_associate() -> bool:
-    """True if the signed-in user is a pod-locked Dispatch Associate (limited UI: FN-only sub-tab, no revoke buttons)."""
-    return _user_role().lower() == 'associate'
+    """True if the signed-in user is a guest tier (Dispatch Associate). Limited UI:
+    FN-only sub-tab, no revoke buttons, can use Shopify."""
+    return _user_tier() == 'guest'
+
+
+def _is_admin_or_manager() -> bool:
+    """True for admin and manager tiers — full UI surface, see everything."""
+    return _user_tier() in ('admin', 'manager')
 
 
 def _user_pod_raw() -> str:
@@ -2434,7 +2481,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             'skipped_assigned_worker': _skipped_assigned,
             'skipped_wrong_team': _skipped_wrong_team,
             'skipped_out_of_pod_states': _skipped_out_of_pod_states,
-            'final_pool': len(pool),
+            # Use the pre-routing pool size, not the post-routing one. The
+            # `while pool:` loop consumes the list during cluster-building, so
+            # by the time we reach this save line, `len(pool)` is always 0 —
+            # which is what showed up as the buggy "Count: 0" on row 6 of the
+            # attrition table. total_pool was captured BEFORE routing began.
+            'final_pool': total_pool,
         }
         if not master_bar: 
             prog_bar.empty()
@@ -4462,8 +4514,11 @@ def run_pod_tab(pod_name):
         """, unsafe_allow_html=True)
 
     # --- 📊 TASK ATTRITION EXPANDER (collapsed by default) ---
+    # Only Admin / Manager see the attrition diagnostic. Dispatchers and
+    # Associates don't need the funnel breakdown — it's a debugging surface.
     _attr = st.session_state.get(f'_attrition_{pod_name}')
-    if _attr:
+    _attr_priv = _is_admin_or_manager()
+    if _attr and _attr_priv:
         with st.expander(f"📊 Task attrition — {pod_name} Pod", expanded=False):
             _raw = _attr.get('raw_fetched', 0)
             _ded = _attr.get('after_dedup', 0)
@@ -6187,6 +6242,7 @@ with tabs[6]:
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                     st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+
 
 # --- FOOTER ---
 st.markdown("---")

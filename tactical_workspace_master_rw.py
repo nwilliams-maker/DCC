@@ -5093,6 +5093,20 @@ def run_pod_tab(pod_name):
                             st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                             st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                 
+# --- LOGOUT URL HANDLER ---
+# The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
+# the logout control as pure HTML and pin it via fixed positioning, instead of
+# using an unstyleable st.button). Catch it here, before the login gate.
+try:
+    if st.query_params.get("logout") == "1":
+        st.session_state.pop('_auth_user', None)
+        # Clear the param so a refresh doesn't loop the logout.
+        try: del st.query_params["logout"]
+        except Exception: pass
+        st.rerun()
+except Exception:
+    pass
+
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
 # their record sits in st.session_state['_auth_user'] for the lifetime of the
@@ -5120,21 +5134,25 @@ if '_worker_counts' not in st.session_state:
     st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
 # --- HEADER ROW ---
-_h_l, _h_r = st.columns([8, 2])
-with _h_l:
-    st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
-with _h_r:
-    _u = st.session_state.get('_auth_user', {})
-    st.markdown(
-        f"<div style='text-align:right; padding-top:18px;'>"
-        f"<div style='font-size:12px; color:#64748b; font-weight:700;'>Signed in as</div>"
-        f"<div style='font-size:14px; color:#0f172a; font-weight:800;'>{_u.get('name','?')} · {_u.get('pod','?')}</div>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    if st.button("Sign out", key="_auth_logout_btn", use_container_width=True):
-        st.session_state.pop('_auth_user', None)
-        st.rerun()
+# Pin signed-in user info to the top-right corner (same fixed-position pattern
+# as the Terraboost logo top-left). Sign out is a styled <a> that hits
+# ?logout=1 → handled by the LOGOUT URL HANDLER block above.
+_u = st.session_state.get('_auth_user', {})
+st.markdown(
+    f"""
+    <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
+                font-family: 'Inter', sans-serif; line-height: 1.2;">
+        <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
+        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_u.get('name','?')} · {_u.get('pod','?')}</div>
+        <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
+                border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
+                font-size: 11px; font-weight: 700;">Sign out</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("<h1 style='color: #633094;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 
 # 🔍 DEBUG: Worker task-count diagnostics — only renders when ?debug=1 is in the URL.
 # Shows the raw Onfleet /workers?analytics=true response shape so we can see why

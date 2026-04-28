@@ -203,7 +203,7 @@ USERS = {
     # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
     "nick": {
         "name": "Nick Williams",
-        "password_hash": "60186d64801df51f53c5a347e286310b1b998ebcaaa70218d875145778d1e483",
+        "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
         "pod": "ADMIN",
         "tier": "admin",
     },
@@ -213,86 +213,95 @@ USERS = {
     # Each Associate gets pod-locked access to ONLY their pod's tab.
     "blue_assoc": {
         "name": "Blue Dispatch Associate",
-        "password_hash": "a39873d7a2cda95c35d4ccb7bcfa197b1950a3cc4dc8d906cd58942a72352dbb",
+        "password_hash": "e7ce65e1ff8c574cb353a8b5ed055a5e01fde717c685f06a538ef6bc57cead01",
         "pod": "Blue",
         "role": "Associate",
     "tier": "guest",
-    },  # default password: blue-associate-2026
+    },  # default password: blueassociate2026
     "green_assoc": {
         "name": "Green Dispatch Associate",
-        "password_hash": "6348292e664c913bda626ab6d96d5f2c9937826866d2ec0851846cfccf738bc8",
+        "password_hash": "e60d30662e47a2b8c9299c5b3f8fab86bb749a655919873cd6a726cf52578908",
         "pod": "Green",
         "role": "Associate",
     "tier": "guest",
-    },  # default password: green-associate-2026
+    },  # default password: greenassociate2026
     "orange_assoc": {
         "name": "Orange Dispatch Associate",
-        "password_hash": "9a3a4277968951629f469dcc60309796d201a4f1d2d941d099bb808cec05f340",
+        "password_hash": "b0bb99055d6e1a755bd8dbf310988fd6b167b9b2e0b918cd436c647dd92cb1b8",
         "pod": "Orange",
         "role": "Associate",
     "tier": "guest",
-    },  # default password: orange-associate-2026
+    },  # default password: orangeassociate2026
     "purple_assoc": {
         "name": "Purple Dispatch Associate",
-        "password_hash": "0c0a4f0d48401e75e6fa5e5a82b084042d72b93cbf1bc3dbc1eda214c05171d0",
+        "password_hash": "74cb0116691b1cc5ddb015f3ec88e9ac6ba363ae32e2d2ddded2e3f1644ca74e",
         "pod": "Purple",
         "role": "Associate",
     "tier": "guest",
-    },  # default password: purple-associate-2026
+    },  # default password: purpleassociate2026
     "red_assoc": {
         "name": "Red Dispatch Associate",
-        "password_hash": "f8b122f307387c312a2fd6f9a106adb1f2f1feb961250c50c3744c6671a85060",
+        "password_hash": "5fd1beafa3d940ce3aa002605966d1e34304019e98cacc32fea9a2eda74fc54f",
         "pod": "Red",
         "role": "Associate",
     "tier": "guest",
-    },  # default password: red-associate-2026
+    },  # default password: redassociate2026
 
     # ───── Dispatchers (one per pod) ─────
     # Pre-seeded with default passwords — change these before sharing the URL.
     "blue_disp": {
         "name": "Blue Dispatcher",
-        "password_hash": "7fcbab09966753ace9ce3e89c91307e7806814a68a609701dc12cb0320a403a7",
+        "password_hash": "299bb7f09cee5ecb05f7338674fc99d17340445fc64c25ed054a97a64ab3332d",
         "pod": "Blue",
         "role": "Dispatcher",
     "tier": "user",
-    },  # default password: blue-dispatcher-2026
+    },  # default password: bluedispatcher2026
     "green_disp": {
         "name": "Green Dispatcher",
-        "password_hash": "825fb8ffc7784ac14ce867282291fa380ada3d1de806afbcf2da6df9fc85b70d",
+        "password_hash": "45a194276bf8a6e2595e3d8cfab8365166ec8dea591643384befe53926bf4cc3",
         "pod": "Green",
         "role": "Dispatcher",
     "tier": "user",
-    },  # default password: green-dispatcher-2026
+    },  # default password: greendispatcher2026
     "orange_disp": {
         "name": "Orange Dispatcher",
-        "password_hash": "3f96698de9b0d76c1ccc10fb46e172db1ce0e05efe0d68a8fb95172538950ffc",
+        "password_hash": "768658cedfc1cb9d3001ec707d71b29ddb4d3ee1d670c1f6b8d3bda261efa0f1",
         "pod": "Orange",
         "role": "Dispatcher",
     "tier": "user",
-    },  # default password: orange-dispatcher-2026
+    },  # default password: orangedispatcher2026
     "purple_disp": {
         "name": "Purple Dispatcher",
-        "password_hash": "07776f89d6ed181ff87fb54da5ce0a5ac642540b0697ed0edc6954cf2facd0da",
+        "password_hash": "81f76219614717b157d2dc8f59e936f727214eda7893430ae875f7cec7128219",
         "pod": "Purple",
         "role": "Dispatcher",
     "tier": "user",
-    },  # default password: purple-dispatcher-2026
+    },  # default password: purpledispatcher2026
     "red_disp": {
         "name": "Red Dispatcher",
-        "password_hash": "35f0d90cc0b206b110401ab0eb8db8f5e304646debaa40ab0037da84c3a87978",
+        "password_hash": "1ed45d815f19ba3d691e4e41bb578d51d6f88aac66e5693573e7da05a19ed389",
         "pod": "Red",
         "role": "Dispatcher",
     "tier": "user",
-    },  # default password: red-dispatcher-2026
+    },  # default password: reddispatcher2026
+
+    # ───── Digital tab user (sees only the Digital pod tab) ─────
+    "digital_user": {
+        "name": "Digital User",
+        "password_hash": "fc72997426be122f0f40e2a4a058de8095f6d5feb5e4de9fa5d207b3f4b58171",
+        "pod": "Digital",
+        "role": "Dispatcher",
+        "tier": "user",
+    },  # default password: digitaluser2026
 
     # ───── Manager (full read access, separate from Admin) ─────
     "manager": {
         "name": "Pod Manager",
-        "password_hash": "f58da1b04132132d4de2a2c0f18dc571d2d327c35804d32e849f181080277fa9",
+        "password_hash": "2e064c30dfe840ff76432c401a0d0c19f0b30d823f60fd378353a6a63e431e75",
         "pod": "MANAGER",
         "role": "Manager",
         "tier": "manager",
-    },  # default password: manager-2026
+    },  # default password: manager2026
 }
 
 import hashlib as _login_hashlib
@@ -303,6 +312,39 @@ def _check_password(username: str, password: str):
         return None
     if _login_hashlib.sha256(str(password or "").encode("utf-8")).hexdigest() == rec.get("password_hash"):
         return rec
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🍪 STAY-SIGNED-IN — localStorage-backed persistence across browser sessions
+# ─────────────────────────────────────────────────────────────────────────────
+# How it works:
+#   1. User signs in. Right after, we ask "Stay signed in on this device?".
+#   2. If yes, we generate a deterministic token (SHA-256 of username + salt)
+#      and write it to the browser's localStorage via an injected JS snippet.
+#      We also append it to the URL as ?auth=TOKEN so the current tab stays
+#      signed in across hard refreshes.
+#   3. On every page load, a tiny JS snippet checks localStorage; if a token is
+#      there but not in the URL, it appends ?auth=TOKEN and reloads. The Python
+#      side then validates the token and auto-restores the auth user.
+#   4. Sign out clears both the URL param AND the localStorage entry.
+#
+# Security note: this is "remember me" for an internal tool, not a hardened
+# auth system. Anyone with physical access to the browser (or who copies the
+# URL while ?auth= is set) can sign in as that user. Acceptable trade-off for
+# a 12-user dispatch app behind a Railway URL the team only shares internally.
+# Rotate STAY_SALT to invalidate every persisted login at once.
+STAY_SALT = "dcc-stay-token-2026-v1"
+
+def _stay_token_for(username: str) -> str:
+    return _login_hashlib.sha256(f"{username}|{STAY_SALT}".encode("utf-8")).hexdigest()
+
+def _validate_stay_token(token: str):
+    """Returns (username, record) if token matches a known user, else None."""
+    if not token:
+        return None
+    for u, rec in USERS.items():
+        if _stay_token_for(u) == token:
+            return u, rec
     return None
 
 def _user_role() -> str:
@@ -361,8 +403,12 @@ def _can_access_tab(tab_pod: str) -> bool:
     # ADMIN and MANAGER both get full access. ALL is kept as a legacy alias.
     if user_pod in ('ADMIN', 'MANAGER', 'ALL'):
         return True
-    # Pod dispatchers: only their own pod tab. Global/Digital are restricted.
-    return tab_pod not in ('Global', 'Digital') and str(user.get('pod', '')) == tab_pod
+    # Global stays admin-only. Pod-locked users (incl. Digital) see only their
+    # assigned tab — Blue/Green/Orange/Purple/Red dispatchers see their pod;
+    # Digital users see the Digital tab.
+    if tab_pod == 'Global':
+        return False
+    return str(user.get('pod', '')) == tab_pod
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
@@ -5247,15 +5293,54 @@ def run_pod_tab(pod_name):
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of
 # using an unstyleable st.button). Catch it here, before the login gate.
+import streamlit.components.v1 as _components
 try:
     if st.query_params.get("logout") == "1":
         st.session_state.pop('_auth_user', None)
-        # Clear the param so a refresh doesn't loop the logout.
-        try: del st.query_params["logout"]
-        except Exception: pass
+        st.session_state.pop('_stay_prompt_dismissed', None)
+        # Wipe the persisted-login token from localStorage so the user doesn't
+        # auto-sign-in on next page load.
+        _components.html(
+            "<script>try{localStorage.removeItem('dcc_stay_auth');}catch(e){}</script>",
+            height=0,
+        )
+        for _k in ("logout", "auth"):
+            try: del st.query_params[_k]
+            except Exception: pass
         st.rerun()
 except Exception:
     pass
+
+# --- STAY-SIGNED-IN AUTO-RESTORE ---
+# 1. If localStorage has a token but URL doesn't, the JS snippet below redirects
+#    with ?auth=TOKEN appended.
+# 2. If the URL has ?auth=TOKEN, we validate it and auto-restore the auth user.
+if '_auth_user' not in st.session_state:
+    _auth_param = st.query_params.get("auth")
+    if _auth_param:
+        _match = _validate_stay_token(_auth_param)
+        if _match:
+            _u, _rec = _match
+            st.session_state['_auth_user'] = {**_rec, 'username': _u}
+            # Mark the popup as dismissed since this is a returning auto-login.
+            st.session_state['_stay_prompt_dismissed'] = True
+    else:
+        # No URL param — ask the browser if it has a saved token.
+        _components.html(
+            """
+            <script>
+                try {
+                    var t = localStorage.getItem('dcc_stay_auth');
+                    var here = window.parent.location;
+                    if (t && !new URLSearchParams(here.search).has('auth')) {
+                        var sep = here.search ? '&' : '?';
+                        here.replace(here.pathname + here.search + sep + 'auth=' + t + here.hash);
+                    }
+                } catch (e) {}
+            </script>
+            """,
+            height=0,
+        )
 
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
@@ -5264,6 +5349,33 @@ except Exception:
 if '_auth_user' not in st.session_state:
     _render_login_form()
     st.stop()
+
+# --- STAY-SIGNED-IN PROMPT ---
+# After a successful FRESH login (URL has no ?auth= and no prior dismissal),
+# show a modal asking if the user wants to stay signed in on this device.
+if not st.session_state.get('_stay_prompt_dismissed'):
+    @st.dialog("Stay signed in?")
+    def _stay_dialog():
+        st.write("Save your login on this device so you don't have to sign in again next time?")
+        st.caption("You can sign out any time using the Sign out button in the top right corner.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Yes, stay signed in", type="primary", use_container_width=True, key="_stay_yes"):
+                _u_now = st.session_state['_auth_user'].get('username', '')
+                _tok = _stay_token_for(_u_now)
+                # Persist to localStorage AND tag the current URL so reloads keep the session.
+                _components.html(
+                    f"<script>try{{localStorage.setItem('dcc_stay_auth','{_tok}');}}catch(e){{}}</script>",
+                    height=0,
+                )
+                st.query_params['auth'] = _tok
+                st.session_state['_stay_prompt_dismissed'] = True
+                st.rerun()
+        with c2:
+            if st.button("Not now", use_container_width=True, key="_stay_no"):
+                st.session_state['_stay_prompt_dismissed'] = True
+                st.rerun()
+    _stay_dialog()
 
 # --- START ---
 if "ic_df" not in st.session_state:
@@ -5430,11 +5542,13 @@ if st.query_params.get("debug") == "1":
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
-# Pod dispatchers + Associates only see their assigned pod tab. They land
-# directly on it (no Global gate to click past). Admin/Manager fall through to
-# the full 7-tab UI below.
+# Single-pod dispatchers + Associates (Blue/Green/Orange/Purple/Red) only see
+# their assigned pod tab — they land directly on it (no Global gate to click
+# past). Admin/Manager AND Digital users fall through to the 7-tab UI below;
+# the per-tab gate blocks every tab they can't access.
 _locked_pod = _user_pod_raw()
-if _locked_pod.upper() not in ('ADMIN', 'MANAGER', 'ALL'):
+if (_locked_pod.upper() not in ('ADMIN', 'MANAGER', 'ALL')
+        and _locked_pod != 'Digital'):
     _locked_tabs = st.tabs([f"{_locked_pod} Pod"])
     with _locked_tabs[0]:
         run_pod_tab(_locked_pod)
@@ -6222,33 +6336,8 @@ with tabs[6]:
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
-                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c, "check_completed": True})
-                    else:
-                        g = item
-                        g_ic_name = g.get('contractor_name', 'Unknown')
-                        ghost_hash = g.get('hash', f"ghost_fin_digi_{i}")
-                        wo_display = g.get('wo', g_ic_name)
-                        comp, due = g.get('pay', 0), g.get('due', 'N/A')
-                        stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
-                        
-                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                        with exp_col:
-                            _gdfins_cnt = g.get('digi_ins', 0) or 0
-                        _gdfins_pill = f" | 🔧 {_gdfins_cnt} Ins/Rem" if _gdfins_cnt > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}"):
-                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
-                                if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
-                                else: task_locs = raw_locs
-                                u_locs = list(dict.fromkeys(task_locs))
-                                _dgf_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
-                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dgf_venues}</div>""", unsafe_allow_html=True)
-                        with btn_col:
-                            if not _is_dispatch_associate():
-                                with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                     st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-
 
 # --- FOOTER ---
 st.markdown("---")

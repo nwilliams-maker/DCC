@@ -193,16 +193,16 @@ st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layou
 #   Global and Digital are gated to ADMIN/MANAGER ONLY by policy. Pod dispatchers
 #   land directly on their pod tab and can't see overview / digital views.
 #
-# To add a new user (you, Nick, edit this in github.dev):
+# To add a new user (you, admin, edit this in github.dev):
 #   1. Generate a SHA-256 hash of the password. From any terminal or replit:
 #        python3 -c "import hashlib; print(hashlib.sha256('THEIR_PASSWORD'.encode()).hexdigest())"
 #   2. Paste a new entry below following the same shape.
 #   3. Commit + push -> Railway redeploys -> they can sign in.
 USERS = {
-    # Default admin — username: 'nick', password: 'terraboost-admin-2026'
+    # Default admin — username: 'admin', password: 'terraboost-admin-2026'
     # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
-    "nick": {
-        "name": "Nick Williams",
+    "admin": {
+        "name": "Admin",
         "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
         "pod": "ADMIN",
         "tier": "admin",
@@ -355,7 +355,7 @@ def _user_role() -> str:
 def _user_tier() -> str:
     """Return the current user's tier — 'admin', 'manager', 'user', or 'guest'.
     Canonical permission model:
-      admin   -> full access (Nick)
+      admin   -> full access (admin)
       manager -> full access (separate login)
       user    -> Dispatcher: pod-locked, sees full pod tab
       guest   -> Dispatch Associate: pod-locked, FN sub-tab only, no revoke buttons

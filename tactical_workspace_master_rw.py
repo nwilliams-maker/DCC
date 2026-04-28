@@ -193,13 +193,13 @@ st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layou
 #   Global and Digital are gated to ADMIN/MANAGER ONLY by policy. Pod dispatchers
 #   land directly on their pod tab and can't see overview / digital views.
 #
-# To add a new user (you, admin, edit this in github.dev):
+# To add a new user (you, Nick, edit this in github.dev):
 #   1. Generate a SHA-256 hash of the password. From any terminal or replit:
 #        python3 -c "import hashlib; print(hashlib.sha256('THEIR_PASSWORD'.encode()).hexdigest())"
 #   2. Paste a new entry below following the same shape.
 #   3. Commit + push -> Railway redeploys -> they can sign in.
 USERS = {
-    # Default admin — username: 'admin', password: 'terraboost-admin-2026'
+    # Default admin — username: 'admin', password: 'terraboostadmin2026'
     # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
     "admin": {
         "name": "Nick Williams",
@@ -249,35 +249,35 @@ USERS = {
 
     # ───── Dispatchers (one per pod) ─────
     # Pre-seeded with default passwords — change these before sharing the URL.
-    "blue_disp": {
+    "bluedispatch1811": {
         "name": "Blue Dispatcher",
         "password_hash": "299bb7f09cee5ecb05f7338674fc99d17340445fc64c25ed054a97a64ab3332d",
         "pod": "Blue",
         "role": "Dispatcher",
     "tier": "user",
     },  # default password: bluedispatcher2026
-    "green_disp": {
+    "greendispatch1811": {
         "name": "Green Dispatcher",
         "password_hash": "45a194276bf8a6e2595e3d8cfab8365166ec8dea591643384befe53926bf4cc3",
         "pod": "Green",
         "role": "Dispatcher",
     "tier": "user",
     },  # default password: greendispatcher2026
-    "orange_disp": {
+    "orangedispatch1811": {
         "name": "Orange Dispatcher",
         "password_hash": "768658cedfc1cb9d3001ec707d71b29ddb4d3ee1d670c1f6b8d3bda261efa0f1",
         "pod": "Orange",
         "role": "Dispatcher",
     "tier": "user",
     },  # default password: orangedispatcher2026
-    "purple_disp": {
+    "purpledispatch1811": {
         "name": "Purple Dispatcher",
         "password_hash": "81f76219614717b157d2dc8f59e936f727214eda7893430ae875f7cec7128219",
         "pod": "Purple",
         "role": "Dispatcher",
     "tier": "user",
     },  # default password: purpledispatcher2026
-    "red_disp": {
+    "reddispatch1811": {
         "name": "Red Dispatcher",
         "password_hash": "1ed45d815f19ba3d691e4e41bb578d51d6f88aac66e5693573e7da05a19ed389",
         "pod": "Red",
@@ -296,7 +296,7 @@ USERS = {
 
     # ───── Manager (full read access, separate from Admin) ─────
     "manager": {
-        "name": "Matt Shanks",
+        "name": "Pod Manager",
         "password_hash": "2e064c30dfe840ff76432c401a0d0c19f0b30d823f60fd378353a6a63e431e75",
         "pod": "MANAGER",
         "role": "Manager",
@@ -355,7 +355,7 @@ def _user_role() -> str:
 def _user_tier() -> str:
     """Return the current user's tier — 'admin', 'manager', 'user', or 'guest'.
     Canonical permission model:
-      admin   -> full access (admin)
+      admin   -> full access (Nick)
       manager -> full access (separate login)
       user    -> Dispatcher: pod-locked, sees full pod tab
       guest   -> Dispatch Associate: pod-locked, FN sub-tab only, no revoke buttons

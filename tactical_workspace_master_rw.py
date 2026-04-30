@@ -1,6 +1,3 @@
-import streamlit as st
-import requests
-import base64
 import math
 import pandas as pd
 import time
@@ -1460,32 +1457,26 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
     items — \"Dispatched in Route Planning\" and \"Packing list created\". The OnFleet
     optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
+    # Stack checkboxes vertically — Streamlit 1.39 enforces 1-level column
+    # nesting; the checklist already lives inside Awaiting > expander, so
+    # st.columns() here would exceed the limit and raise StreamlitAPIException.
     if is_fn:
-        # FN routes don't go through OnFleet route planning — drop that step.
+        # FN routes skip the OnFleet route planning step.
+        chk1 = st.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+        chk2 = st.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
         if has_kiosks:
-            cc1, cc2, cc3 = st.columns(3)
-            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
-            chk_k = cc3.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
+            chk_k = st.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2 and chk_k
         else:
-            cc1, cc2 = st.columns(2)
-            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2
     else:
+        chk1 = st.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+        chk2 = st.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+        chk3 = st.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
         if has_kiosks:
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-            chk4 = cc4.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
+            chk4 = st.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2 and chk3 and chk4
         else:
-            cc1, cc2, cc3 = st.columns(3)
-            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2 and chk3
 
     if _all_checked:

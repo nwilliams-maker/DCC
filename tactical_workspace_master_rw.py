@@ -140,6 +140,7 @@ def _fetch_onfleet_open_tasks_cached():
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
+    fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
 
     all_tasks_raw = []
     time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
@@ -173,6 +174,7 @@ def _fetch_onfleet_open_tasks_cached():
         'target_team_ids': target_team_ids,
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
+        'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
     }
@@ -1416,25 +1418,35 @@ def auto_sync_checker(pod_name):
         _log_err("auto_sync_checker", e)
 
 @st.fragment
-def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False):
-    """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
-
-    is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
-    items — \"Dispatched in Route Planning\" and \"Packing list created\". The OnFleet
-    optimization step doesn\'t apply because Field Nation handles their own routing."""
+def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False, has_kiosks=False):
+    """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
     if is_fn:
-        # FN routes don\'t go through OnFleet route planning — drop that step.
-        cc1, cc2 = st.columns(2)
-        chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-        chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
-        _all_checked = chk1 and chk2
+        if has_kiosks:
+            cc1, cc2, cc3 = st.columns(3)
+            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+            chk_k = cc3.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk_k
+        else:
+            cc1, cc2 = st.columns(2)
+            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2
     else:
-        cc1, cc2, cc3 = st.columns(3)
-        chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-        chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-        chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-        _all_checked = chk1 and chk2 and chk3
+        if has_kiosks:
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+            chk4 = cc4.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk3 and chk4
+        else:
+            cc1, cc2, cc3 = st.columns(3)
+            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+            _all_checked = chk1 and chk2 and chk3
 
     if _all_checked:
         if st.button("🏁 Finalize Route", key=f"finbtn_{prefix}_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
@@ -1463,6 +1475,27 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
 def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     # We now enable Onfleet scrubbing (State 0 check) immediately
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
+
+def assign_tasks_to_fn_team(task_ids, fn_team_id):
+    """Move OnFleet tasks into the Field Nation team's container."""
+    if not task_ids or not fn_team_id:
+        _log_err("assign_tasks_to_fn_team/skip",
+                 f"missing arg(s): tasks={len(task_ids) if task_ids else 0} team={fn_team_id}")
+        return
+    try:
+        auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
+                "Content-Type": "application/json"}
+        payload = json.dumps({"tasks": [1] + list(task_ids)})
+        r = requests.put(
+            f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
+            headers=auth, data=payload, timeout=15,
+        )
+        if r.status_code != 200:
+            _log_err("assign_tasks_to_fn_team",
+                     f"HTTP {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        _log_err("assign_tasks_to_fn_team", e)
+
 
 def revoke_field_nation(cluster_hash, pod_name):
     """Removes route from Field Nation sheet tab AND resets UI state.
@@ -1867,6 +1900,7 @@ def process_digital_pool(master_bar=None):
         return
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
+    st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
@@ -2178,6 +2212,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         target_team_ids    = _onfleet_data['target_team_ids']
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
+        st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
@@ -2951,16 +2986,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     label = f"{ic_name}{cert_icon}{_cnt_tag} ({round(r['d'], 1)} mi)"
                     ic_opts[label] = r
 
-    # --- DYNAMIC PRICING SYNC ---
-    def sync_on_total():
-        val = st.session_state.get(pay_key)
-        if val is not None:
-            st.session_state[rate_key] = round(val / cluster['stops'], 2) if cluster['stops'] > 0 else 0
-
-    def sync_on_rate():
-        val = st.session_state.get(rate_key)
-        if val is not None:
-            st.session_state[pay_key] = round(val * cluster['stops'], 2)
+    # Rate/Stop is computed live from Total Comp — no second input, no sync.
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
@@ -3061,9 +3087,22 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, disabled=not is_unlocked)
+        # Rate/Stop is derived from Total Comp — display as a metric in the
+        # second column so the dispatcher can see it update live without
+        # needing to maintain two synced widget states.
+        _live_pay = float(st.session_state.get(pay_key, 0.0) or 0.0)
+        _live_rate = round(_live_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 0.0
+        # Keep rate_key in session_state for downstream code (FN payloads, etc.)
+        st.session_state[rate_key] = _live_rate
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            st.markdown(
+                f"""<div style="padding-top:24px;">
+                    <div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Rate/Stop</div>
+                    <div style="font-size:18px; font-weight:900; color:#0f172a;">${_live_rate:,.2f}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
@@ -3661,6 +3700,16 @@ text-decoration:none;">📨 Default Mail</a>
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
+            try:
+                _fn_tid = st.session_state.get('_fn_team_id')
+                if _fn_tid and task_ids:
+                    threading.Thread(
+                        target=assign_tasks_to_fn_team,
+                        args=(list(task_ids), _fn_tid),
+                        daemon=True,
+                    ).start()
+            except Exception as _fn_team_e:
+                _log_err("fn_assign_thread_start", _fn_team_e)
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun()
@@ -5149,7 +5198,7 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"))
+                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -5176,7 +5225,7 @@ def run_pod_tab(pod_name):
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"))
+                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:

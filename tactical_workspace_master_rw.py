@@ -3118,7 +3118,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
 
-        curr_rate = st.session_state[rate_key]
+        curr_rate = st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= 25.0) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
         is_unlocked = True
@@ -3776,7 +3776,7 @@ text-decoration:none;">📨 Default Mail</a>
 
         # 🌟 FIELD NATION BUTTONS
         _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(DEFAULT_DUE_DAYS))
-        _pay = st.session_state.get(pay_key, 0.0)
+        _pay = st.session_state.get(_pay_master_key, 0.0)
         fn_buf, _ = generate_fn_upload(stop_metrics, cluster, _due, _pay, cluster_hash)
 
         dl_col, link_col = st.columns(2)

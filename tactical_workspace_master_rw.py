@@ -1,3 +1,6 @@
+import streamlit as st
+import requests
+import base64
 import math
 import pandas as pd
 import time
@@ -1574,6 +1577,46 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
         else:
             _log_err("assign_tasks_to_fn_team/worker_skip",
                      "no fn_worker_id — tasks moved to team but state=0 (still in unassigned pool)")
+
+        # 3) Create an OnFleet route plan named after the WO so the FN tasks
+        #    show up as a grouped, named route in OnFleet under the Field
+        #    Nation team. Mirrors GAS createOnfleetRoute pattern.
+        if fn_worker_id and wo_name and task_ids:
+            try:
+                _start_dt = datetime.now() + timedelta(days=2)
+                _start_dt = _start_dt.replace(hour=16, minute=0, second=0, microsecond=0)
+                _start_ms = int(_start_dt.timestamp() * 1000)
+                _route_payload = {
+                    "name": str(wo_name),
+                    "color": "#FACC15",
+                    "startTime": _start_ms,
+                    "timezone": "America/Los_Angeles",
+                    "worker": fn_worker_id,
+                    "tasks": list(task_ids),
+                }
+                if fn_team_id:
+                    _route_payload["team"] = fn_team_id
+                _rp = requests.post(
+                    "https://onfleet.com/api/v2/routePlans",
+                    headers=auth,
+                    data=json.dumps(_route_payload),
+                    timeout=15,
+                )
+                if _rp.status_code in (200, 201):
+                    try:
+                        _rid = _rp.json().get("id", "?")
+                    except Exception:
+                        _rid = "?"
+                    _log_err("assign_tasks_to_fn_team/route_plan",
+                             f"created route plan '{wo_name}' id={_rid} for {len(task_ids)} tasks")
+                else:
+                    _log_err("assign_tasks_to_fn_team/route_plan",
+                             f"HTTP {_rp.status_code}: {_rp.text[:300]}")
+            except Exception as _re:
+                _log_err("assign_tasks_to_fn_team/route_plan", _re)
+        else:
+            _log_err("assign_tasks_to_fn_team/route_plan_skip",
+                     f"missing fn_worker_id={bool(fn_worker_id)} or wo_name={bool(wo_name)}")
     except Exception as e:
         _log_err("assign_tasks_to_fn_team", e)
         

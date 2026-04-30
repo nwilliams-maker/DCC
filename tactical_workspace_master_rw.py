@@ -2986,7 +2986,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     label = f"{ic_name}{cert_icon}{_cnt_tag} ({round(r['d'], 1)} mi)"
                     ic_opts[label] = r
 
-    # Rate/Stop is computed live from Total Comp — no second input, no sync.
+    # --- DYNAMIC PRICING SYNC ---
+    def sync_on_total():
+        val = st.session_state.get(pay_key)
+        if val is not None:
+            st.session_state[rate_key] = round(val / cluster['stops'], 2) if cluster['stops'] > 0 else 0
+
+    def sync_on_rate():
+        val = st.session_state.get(rate_key)
+        if val is not None:
+            st.session_state[pay_key] = round(val * cluster['stops'], 2)
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
@@ -3087,22 +3096,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, disabled=not is_unlocked)
-        # Rate/Stop is derived from Total Comp — display as a metric in the
-        # second column so the dispatcher can see it update live without
-        # needing to maintain two synced widget states.
-        _live_pay = float(st.session_state.get(pay_key, 0.0) or 0.0)
-        _live_rate = round(_live_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 0.0
-        # Keep rate_key in session_state for downstream code (FN payloads, etc.)
-        st.session_state[rate_key] = _live_rate
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            st.markdown(
-                f"""<div style="padding-top:24px;">
-                    <div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Rate/Stop</div>
-                    <div style="font-size:18px; font-weight:900; color:#0f172a;">${_live_rate:,.2f}</div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 

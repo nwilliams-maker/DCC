@@ -1,5 +1,5 @@
 streamlit==1.39.0
 requests
 pandas
-folium
-streamlit-folium
+folium==0.17.0
+streamlit-folium==0.22.0

@@ -2993,17 +2993,37 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---
-    # Track which field the user last edited so we know which side
-    # is "authoritative" on this render. Reconcile BEFORE the widgets
-    # render — more reliable than on_change callbacks inside fragments.
-    _last_edit_key = f"_last_pay_edit_{pod_name}_{cluster_hash}"
+    # Streamlit silently ignores st.session_state[widget_key] = X writes once the
+    # user has touched the widget. Workaround: store the canonical pay/rate in
+    # NON-widget master keys, and bump a version suffix in the widget keys
+    # whenever sync happens — Streamlit then treats them as fresh widgets and
+    # honors the `value=` parameter from the master.
+    _pay_master_key = f"_pay_master_{pod_name}_{cluster_hash}"
+    _rate_master_key = f"_rate_master_{pod_name}_{cluster_hash}"
+    _pay_ver_key = f"_pay_ver_{pod_name}_{cluster_hash}"
     _stops_for_sync = cluster['stops'] if cluster['stops'] > 0 else 1
 
+    if _pay_ver_key not in st.session_state:
+        st.session_state[_pay_ver_key] = 0
+    _pay_ver = st.session_state[_pay_ver_key]
+
+    # Versioned widget keys — change on every sync so Streamlit re-instantiates
+    pay_key = f"pay_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
+    rate_key = f"rate_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
+
     def sync_on_total():
-        st.session_state[_last_edit_key] = "pay"
+        v = st.session_state.get(pay_key)
+        if v is not None:
+            st.session_state[_pay_master_key] = float(v)
+            st.session_state[_rate_master_key] = round(float(v) / _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
 
     def sync_on_rate():
-        st.session_state[_last_edit_key] = "rate"
+        v = st.session_state.get(rate_key)
+        if v is not None:
+            st.session_state[_rate_master_key] = float(v)
+            st.session_state[_pay_master_key] = round(float(v) * _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
 
     _last_edit = st.session_state.get(_last_edit_key)
     if _last_edit == "pay":
@@ -3026,8 +3046,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # and the dispatcher loses the displayed data even though the route is real.
             if new_pay == 0:
                 new_pay = round(20.0 * cluster.get('stops', 1), 2)
-            st.session_state[pay_key] = new_pay
-            st.session_state[rate_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+            st.session_state[_pay_master_key] = new_pay
+            st.session_state[_rate_master_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+            st.session_state[_pay_ver_key] = _pay_ver + 1
             st.session_state[last_sel_key] = selected_label
 
     # --- 4. INITIAL SETUP (FIXED SAVING LOGIC) ---
@@ -3065,8 +3086,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 Floor: if Maps returned 0 (fail/no IC), seed from $20/stop default
         if initial_pay == 0:
             initial_pay = round(20.0 * cluster.get('stops', 1), 2)
-        st.session_state[pay_key] = initial_pay
-        st.session_state[rate_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+        st.session_state[_pay_master_key] = initial_pay
+        st.session_state[_rate_master_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
     
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
@@ -3114,15 +3135,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
-        final_pay = st.session_state.get(pay_key, 0.0)
-        final_rate = st.session_state.get(rate_key, 0.0)
+        final_pay = st.session_state.get(_pay_master_key, 0.0)
+        final_rate = st.session_state.get(_rate_master_key, 0.0)
 
         if final_rate >= RATE_CRITICAL: status_color = "#ef4444"
         elif final_rate >= RATE_WARNING: status_color = "#f97316"

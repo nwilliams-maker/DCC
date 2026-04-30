@@ -3524,7 +3524,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f" Work Order: {wo_val}\n"
             f"📅 Due Date: {due.strftime('%A, %b %d, %Y')}\n"
             f" Total Stops: {cluster['stops']}\n"
-            f" Estimated Compensation: ${final_pay:.2f}\n\n"
+            f" Estimated Compensation: ${final_pay:.2f} (${final_rate:.2f}/stop)\n\n"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
             f"{install_warning}\n"
@@ -3538,7 +3538,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 UNIQUE KEY
         last_data_key = f"last_data_{pod_name}_{cluster_hash}"
         version_key = f"tx_ver_{pod_name}_{cluster_hash}"
-        current_data_fingerprint = f"{ic.get('name', 'Unknown')}_{final_pay}_{due}_{wo_val}"
+        current_data_fingerprint = (
+            f"{ic.get('name', 'Unknown')}_"
+            f"{ic.get('email', '')}_"
+            f"{final_pay}_{final_rate}_"
+            f"{due}_{wo_val}_"
+            f"{cluster['stops']}_{len(cluster['data'])}"
+        )
     
         if version_key not in st.session_state:
             st.session_state[version_key] = 1

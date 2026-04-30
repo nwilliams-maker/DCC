@@ -104,7 +104,9 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
         existing = [x.get('location_in_venue', '') for x in stop_task_map[addr]]
         if loc not in existing:
             stop_task_map[addr].append(t)
-
+    # Bundle column rule: only fill the Bundle # when this cluster has 2+
+    # venue locations. Single-venue routes leave Bundle blank.
+    _bundle_for_rows = bundle_number if len(stop_task_map) > 1 else ""
     for addr, tasks in stop_task_map.items():
         if not tasks:
             continue
@@ -118,7 +120,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
         manager    = FN_STATE_MANAGER.get(state, '')
 
         base_row = [
-            bundle_number,
+            _bundle_for_rows,
             venue_name,
             street,
             city,

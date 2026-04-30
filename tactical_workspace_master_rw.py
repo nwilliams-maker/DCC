@@ -3042,7 +3042,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             st.session_state[last_sel_key] = selected_label
 
     # --- 4. INITIAL SETUP (FIXED SAVING LOGIC) ---
-    if pay_key not in st.session_state:
+    if _pay_master_key not in st.session_state:
         prev_name = cluster.get('contractor_name', 'Unknown')
         default_label = list(ic_opts.keys())[0] if ic_opts else None
         

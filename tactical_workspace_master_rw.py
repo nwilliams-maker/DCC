@@ -140,6 +140,7 @@ def _fetch_onfleet_open_tasks_cached():
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
+    fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
 
     all_tasks_raw = []
     time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
@@ -173,6 +174,7 @@ def _fetch_onfleet_open_tasks_cached():
         'target_team_ids': target_team_ids,
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
+        'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
     }
@@ -1478,7 +1480,29 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
 def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     # We now enable Onfleet scrubbing (State 0 check) immediately
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
-
+    
+def assign_tasks_to_fn_team(task_ids, fn_team_id):
+    """Move OnFleet tasks into the Field Nation team's container so they appear
+    in OnFleet's FN team view. Uses PUT /containers/teams/{teamId} with
+    operation=1 (append). No-ops if either arg is empty."""
+    if not task_ids or not fn_team_id:
+        _log_err("assign_tasks_to_fn_team/skip",
+                 f"missing arg(s): tasks={len(task_ids) if task_ids else 0} team={fn_team_id}")
+        return
+    try:
+        auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
+                "Content-Type": "application/json"}
+        payload = json.dumps({"tasks": [1] + list(task_ids)})  # 1 = append
+        r = requests.put(
+            f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
+            headers=auth, data=payload, timeout=15,
+        )
+        if r.status_code != 200:
+            _log_err("assign_tasks_to_fn_team",
+                     f"HTTP {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        _log_err("assign_tasks_to_fn_team", e)
+        
 def revoke_field_nation(cluster_hash, pod_name):
     """Removes route from Field Nation sheet tab AND resets UI state.
 
@@ -1882,6 +1906,7 @@ def process_digital_pool(master_bar=None):
         return
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
+    st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
@@ -3676,6 +3701,13 @@ text-decoration:none;">📨 Default Mail</a>
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
+            # 🌐 Move OnFleet tasks into the Field Nation team in parallel
+            # with the sheet write — appears in OnFleet's FN team view.
+            threading.Thread(
+                target=assign_tasks_to_fn_team,
+                args=(list(task_ids), st.session_state.get('_fn_team_id')),
+                daemon=True,
+            ).start()
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun()

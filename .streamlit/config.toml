@@ -13,3 +13,6 @@ headless = true
 enableWebsocketCompression = false
 enableXsrfProtection = false
 enableCORS = false
+
+[client]
+showErrorDetails = false

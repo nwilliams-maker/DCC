@@ -2218,6 +2218,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         target_team_ids    = _onfleet_data['target_team_ids']
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
+        st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
@@ -3703,11 +3704,18 @@ text-decoration:none;">📨 Default Mail</a>
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
             # 🌐 Move OnFleet tasks into the Field Nation team in parallel
             # with the sheet write — appears in OnFleet's FN team view.
-            threading.Thread(
-                target=assign_tasks_to_fn_team,
-                args=(list(task_ids), st.session_state.get('_fn_team_id')),
-                daemon=True,
-            ).start()
+            # Wrapped + pre-checked so a missing team id or thread error can
+            # never block the rerun and break the checkbox UX.
+            try:
+                _fn_tid = st.session_state.get('_fn_team_id')
+                if _fn_tid and task_ids:
+                    threading.Thread(
+                        target=assign_tasks_to_fn_team,
+                        args=(list(task_ids), _fn_tid),
+                        daemon=True,
+                    ).start()
+            except Exception as _fn_team_e:
+                _log_err("fn_assign_thread_start", _fn_team_e)
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun()

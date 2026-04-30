@@ -140,7 +140,6 @@ def _fetch_onfleet_open_tasks_cached():
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
-    fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
 
     all_tasks_raw = []
     time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
@@ -174,7 +173,6 @@ def _fetch_onfleet_open_tasks_cached():
         'target_team_ids': target_team_ids,
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
-        'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
     }
@@ -1418,7 +1416,7 @@ def auto_sync_checker(pod_name):
         _log_err("auto_sync_checker", e)
 
 @st.fragment
-def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False, has_kiosks=False):
+def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False):
     """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
 
     is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
@@ -1426,32 +1424,17 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
     optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
     if is_fn:
-        # FN routes don't go through OnFleet route planning — drop that step.
-        if has_kiosks:
-            cc1, cc2, cc3 = st.columns(3)
-            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
-            chk_k = cc3.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
-            _all_checked = chk1 and chk2 and chk_k
-        else:
-            cc1, cc2 = st.columns(2)
-            chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
-            _all_checked = chk1 and chk2
+        # FN routes don\'t go through OnFleet route planning — drop that step.
+        cc1, cc2 = st.columns(2)
+        chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+        chk2 = cc2.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+        _all_checked = chk1 and chk2
     else:
-        if has_kiosks:
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-            chk4 = cc4.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
-            _all_checked = chk1 and chk2 and chk3 and chk4
-        else:
-            cc1, cc2, cc3 = st.columns(3)
-            chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-            chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-            chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
-            _all_checked = chk1 and chk2 and chk3
+        cc1, cc2, cc3 = st.columns(3)
+        chk1 = cc1.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
+        chk2 = cc2.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+        chk3 = cc3.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+        _all_checked = chk1 and chk2 and chk3
 
     if _all_checked:
         if st.button("🏁 Finalize Route", key=f"finbtn_{prefix}_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
@@ -1480,29 +1463,7 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
 def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     # We now enable Onfleet scrubbing (State 0 check) immediately
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
-    
-def assign_tasks_to_fn_team(task_ids, fn_team_id):
-    """Move OnFleet tasks into the Field Nation team's container so they appear
-    in OnFleet's FN team view. Uses PUT /containers/teams/{teamId} with
-    operation=1 (append). No-ops if either arg is empty."""
-    if not task_ids or not fn_team_id:
-        _log_err("assign_tasks_to_fn_team/skip",
-                 f"missing arg(s): tasks={len(task_ids) if task_ids else 0} team={fn_team_id}")
-        return
-    try:
-        auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
-                "Content-Type": "application/json"}
-        payload = json.dumps({"tasks": [1] + list(task_ids)})  # 1 = append
-        r = requests.put(
-            f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
-            headers=auth, data=payload, timeout=15,
-        )
-        if r.status_code != 200:
-            _log_err("assign_tasks_to_fn_team",
-                     f"HTTP {r.status_code}: {r.text[:300]}")
-    except Exception as e:
-        _log_err("assign_tasks_to_fn_team", e)
-        
+
 def revoke_field_nation(cluster_hash, pod_name):
     """Removes route from Field Nation sheet tab AND resets UI state.
 
@@ -1906,7 +1867,6 @@ def process_digital_pool(master_bar=None):
         return
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
-    st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
@@ -2218,7 +2178,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         target_team_ids    = _onfleet_data['target_team_ids']
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
-        st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
@@ -2993,37 +2952,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---
-    # Streamlit silently ignores st.session_state[widget_key] = X writes once the
-    # user has touched the widget. Workaround: store the canonical pay/rate in
-    # NON-widget master keys, and bump a version suffix in the widget keys
-    # whenever sync happens — Streamlit then treats them as fresh widgets and
-    # honors the `value=` parameter from the master.
-    _pay_master_key = f"_pay_master_{pod_name}_{cluster_hash}"
-    _rate_master_key = f"_rate_master_{pod_name}_{cluster_hash}"
-    _pay_ver_key = f"_pay_ver_{pod_name}_{cluster_hash}"
-    _stops_for_sync = cluster['stops'] if cluster['stops'] > 0 else 1
-
-    if _pay_ver_key not in st.session_state:
-        st.session_state[_pay_ver_key] = 0
-    _pay_ver = st.session_state[_pay_ver_key]
-
-    # Versioned widget keys — change on every sync so Streamlit re-instantiates
-    pay_key = f"pay_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
-    rate_key = f"rate_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
-
     def sync_on_total():
-        v = st.session_state.get(pay_key)
-        if v is not None:
-            st.session_state[_pay_master_key] = float(v)
-            st.session_state[_rate_master_key] = round(float(v) / _stops_for_sync, 2)
-            st.session_state[_pay_ver_key] = _pay_ver + 1
+        val = st.session_state.get(pay_key)
+        if val is not None:
+            st.session_state[rate_key] = round(val / cluster['stops'], 2) if cluster['stops'] > 0 else 0
 
     def sync_on_rate():
-        v = st.session_state.get(rate_key)
-        if v is not None:
-            st.session_state[_rate_master_key] = float(v)
-            st.session_state[_pay_master_key] = round(float(v) * _stops_for_sync, 2)
-            st.session_state[_pay_ver_key] = _pay_ver + 1
+        val = st.session_state.get(rate_key)
+        if val is not None:
+            st.session_state[pay_key] = round(val * cluster['stops'], 2)
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
@@ -3036,13 +2973,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # and the dispatcher loses the displayed data even though the route is real.
             if new_pay == 0:
                 new_pay = round(20.0 * cluster.get('stops', 1), 2)
-            st.session_state[_pay_master_key] = new_pay
-            st.session_state[_rate_master_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
-            st.session_state[_pay_ver_key] = _pay_ver + 1
+            st.session_state[pay_key] = new_pay
+            st.session_state[rate_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
             st.session_state[last_sel_key] = selected_label
 
     # --- 4. INITIAL SETUP (FIXED SAVING LOGIC) ---
-    if _pay_master_key not in st.session_state:
+    if pay_key not in st.session_state:
         prev_name = cluster.get('contractor_name', 'Unknown')
         default_label = list(ic_opts.keys())[0] if ic_opts else None
         
@@ -3076,8 +3012,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 Floor: if Maps returned 0 (fail/no IC), seed from $20/stop default
         if initial_pay == 0:
             initial_pay = round(20.0 * cluster.get('stops', 1), 2)
-        st.session_state[_pay_master_key] = initial_pay
-        st.session_state[_rate_master_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+        st.session_state[pay_key] = initial_pay
+        st.session_state[rate_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
     
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
@@ -3108,7 +3044,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
 
-        curr_rate = st.session_state.get(_rate_master_key, 0.0)
+        curr_rate = st.session_state[rate_key]
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= 25.0) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
         is_unlocked = True
@@ -3125,33 +3061,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            _new_pay_input = st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, disabled=not is_unlocked)
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            _new_rate_input = st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, disabled=not is_unlocked)
+            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
-        # --- RECONCILE PAY ↔ RATE ---
-        # Compare what each widget returned to the master values. If either
-        # drifted, update masters, bump the version key (so widgets get fresh
-        # keys on next render and pick up value= from master), and rerun the
-        # fragment.
-        _master_pay = st.session_state.get(_pay_master_key, 0.0)
-        _master_rate = st.session_state.get(_rate_master_key, 0.0)
-        if _new_pay_input is not None and abs(float(_new_pay_input) - _master_pay) > 0.005:
-            st.session_state[_pay_master_key] = float(_new_pay_input)
-            st.session_state[_rate_master_key] = round(float(_new_pay_input) / _stops_for_sync, 2)
-            st.session_state[_pay_ver_key] = _pay_ver + 1
-            st.rerun(scope="fragment")
-        elif _new_rate_input is not None and abs(float(_new_rate_input) - _master_rate) > 0.005:
-            st.session_state[_rate_master_key] = float(_new_rate_input)
-            st.session_state[_pay_master_key] = round(float(_new_rate_input) * _stops_for_sync, 2)
-            st.session_state[_pay_ver_key] = _pay_ver + 1
-            st.rerun(scope="fragment")
-
         # ── FINANCIALS CARD ──────────────────────────────────────────────
-        final_pay = st.session_state.get(_pay_master_key, 0.0)
-        final_rate = st.session_state.get(_rate_master_key, 0.0)
+        final_pay = st.session_state.get(pay_key, 0.0)
+        final_rate = st.session_state.get(rate_key, 0.0)
 
         if final_rate >= RATE_CRITICAL: status_color = "#ef4444"
         elif final_rate >= RATE_WARNING: status_color = "#f97316"
@@ -3553,7 +3471,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f" Work Order: {wo_val}\n"
             f"📅 Due Date: {due.strftime('%A, %b %d, %Y')}\n"
             f" Total Stops: {cluster['stops']}\n"
-            f" Estimated Compensation: ${final_pay:.2f} (${final_rate:.2f}/stop)\n\n"
+            f" Estimated Compensation: ${final_pay:.2f}\n\n"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
             f"{install_warning}\n"
@@ -3567,13 +3485,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 UNIQUE KEY
         last_data_key = f"last_data_{pod_name}_{cluster_hash}"
         version_key = f"tx_ver_{pod_name}_{cluster_hash}"
-        current_data_fingerprint = (
-            f"{ic.get('name', 'Unknown')}_"
-            f"{ic.get('email', '')}_"
-            f"{final_pay}_{final_rate}_"
-            f"{due}_{wo_val}_"
-            f"{cluster['stops']}_{len(cluster['data'])}"
-        )
+        current_data_fingerprint = f"{ic.get('name', 'Unknown')}_{final_pay}_{due}_{wo_val}"
     
         if version_key not in st.session_state:
             st.session_state[version_key] = 1
@@ -3749,20 +3661,6 @@ text-decoration:none;">📨 Default Mail</a>
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
-            # 🌐 Move OnFleet tasks into the Field Nation team in parallel
-            # with the sheet write — appears in OnFleet's FN team view.
-            # Wrapped + pre-checked so a missing team id or thread error can
-            # never block the rerun and break the checkbox UX.
-            try:
-                _fn_tid = st.session_state.get('_fn_team_id')
-                if _fn_tid and task_ids:
-                    threading.Thread(
-                        target=assign_tasks_to_fn_team,
-                        args=(list(task_ids), _fn_tid),
-                        daemon=True,
-                    ).start()
-            except Exception as _fn_team_e:
-                _log_err("fn_assign_thread_start", _fn_team_e)
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun()
@@ -3784,7 +3682,7 @@ text-decoration:none;">📨 Default Mail</a>
 
         # 🌟 FIELD NATION BUTTONS
         _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(DEFAULT_DUE_DAYS))
-        _pay = st.session_state.get(_pay_master_key, 0.0)
+        _pay = st.session_state.get(pay_key, 0.0)
         fn_buf, _ = generate_fn_upload(stop_metrics, cluster, _due, _pay, cluster_hash)
 
         dl_col, link_col = st.columns(2)
@@ -5238,7 +5136,7 @@ def run_pod_tab(pod_name):
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         _acc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
-                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -5251,7 +5149,7 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
+                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -5271,14 +5169,14 @@ def run_pod_tab(pod_name):
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
                         _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
-                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
+                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
                     with btn_col:
@@ -5347,7 +5245,7 @@ def run_pod_tab(pod_name):
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -5377,7 +5275,7 @@ def run_pod_tab(pod_name):
                     with exp_col:
                         _gfk_total = g.get('kCnt', 0) or 0
                         _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs

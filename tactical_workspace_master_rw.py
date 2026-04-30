@@ -2993,15 +2993,27 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---
+    # Track which field the user last edited so we know which side
+    # is "authoritative" on this render. Reconcile BEFORE the widgets
+    # render — more reliable than on_change callbacks inside fragments.
+    _last_edit_key = f"_last_pay_edit_{pod_name}_{cluster_hash}"
+    _stops_for_sync = cluster['stops'] if cluster['stops'] > 0 else 1
+
     def sync_on_total():
-        val = st.session_state.get(pay_key)
-        if val is not None:
-            st.session_state[rate_key] = round(val / cluster['stops'], 2) if cluster['stops'] > 0 else 0
+        st.session_state[_last_edit_key] = "pay"
 
     def sync_on_rate():
-        val = st.session_state.get(rate_key)
-        if val is not None:
-            st.session_state[pay_key] = round(val * cluster['stops'], 2)
+        st.session_state[_last_edit_key] = "rate"
+
+    _last_edit = st.session_state.get(_last_edit_key)
+    if _last_edit == "pay":
+        _v = st.session_state.get(pay_key)
+        if _v is not None:
+            st.session_state[rate_key] = round(_v / _stops_for_sync, 2)
+    elif _last_edit == "rate":
+        _v = st.session_state.get(rate_key)
+        if _v is not None:
+            st.session_state[pay_key] = round(_v * _stops_for_sync, 2)
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)

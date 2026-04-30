@@ -142,6 +142,40 @@ def _fetch_onfleet_open_tasks_cached():
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
     fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
 
+    # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
+    # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out
+    # of the unassigned pool. Created in Onfleet by Nick on 2026-04-30.
+    FN_WORKER_PHONE = "6302869764"
+    fn_worker_id = None
+    _w_lastid = None
+    _w_seen = set()
+    for _wp in range(10):
+        _wurl = "https://onfleet.com/api/v2/workers" + (f"?lastId={_w_lastid}" if _w_lastid else "")
+        try:
+            _wresp = requests.get(_wurl, headers=headers, timeout=10)
+            if _wresp.status_code != 200:
+                break
+            _wdata = _wresp.json()
+            _wlist = _wdata if isinstance(_wdata, list) else _wdata.get('workers', [])
+            if not _wlist:
+                break
+            _new_count = 0
+            for _w in _wlist:
+                _wid = _w.get('id')
+                if not _wid or _wid in _w_seen:
+                    continue
+                _w_seen.add(_wid)
+                _new_count += 1
+                _wphone_digits = ''.join(c for c in str(_w.get('phone', '') or '') if c.isdigit())[-10:]
+                if _wphone_digits == FN_WORKER_PHONE:
+                    fn_worker_id = _wid
+                    break
+            if fn_worker_id or _new_count == 0:
+                break
+            _w_lastid = _wlist[-1].get('id')
+        except Exception:
+            break
+
     all_tasks_raw = []
     time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
     url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
@@ -175,6 +209,7 @@ def _fetch_onfleet_open_tasks_cached():
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
         'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
+        'fn_worker_id': fn_worker_id,
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
     }
@@ -1419,9 +1454,14 @@ def auto_sync_checker(pod_name):
 
 @st.fragment
 def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=False, has_kiosks=False):
-    """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant."""
+    """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
+
+    is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
+    items — \"Dispatched in Route Planning\" and \"Packing list created\". The OnFleet
+    optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
     if is_fn:
+        # FN routes don't go through OnFleet route planning — drop that step.
         if has_kiosks:
             cc1, cc2, cc3 = st.columns(3)
             chk1 = cc1.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
@@ -1475,28 +1515,77 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
 def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     # We now enable Onfleet scrubbing (State 0 check) immediately
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
+    
+def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="", due_date=""):
+    """Move OnFleet tasks to the Field Nation surface in two steps:
 
-def assign_tasks_to_fn_team(task_ids, fn_team_id):
-    """Move OnFleet tasks into the Field Nation team's container."""
-    if not task_ids or not fn_team_id:
-        _log_err("assign_tasks_to_fn_team/skip",
-                 f"missing arg(s): tasks={len(task_ids) if task_ids else 0} team={fn_team_id}")
+    1. Append into the FN team container (organizational grouping).
+    2. PUT each task with worker=fn_worker_id + WO/DUE metadata so its state
+       flips 0→1 and it drops out of Onfleet's unassigned pool.
+
+    Step 2 is skipped if no FN worker was found (logs a warning); Step 1 still
+    runs so the dispatcher's filter (target_team_ids) keeps them out of view.
+    Throttle of 70ms between task PUTs matches the GAS assignTasksToWorker
+    pattern to stay under Onfleet's ~20 req/sec limit.
+    """
+    if not task_ids:
+        _log_err("assign_tasks_to_fn_team/skip", "no task_ids")
         return
     try:
         auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
                 "Content-Type": "application/json"}
-        payload = json.dumps({"tasks": [1] + list(task_ids)})
-        r = requests.put(
-            f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
-            headers=auth, data=payload, timeout=15,
-        )
-        if r.status_code != 200:
-            _log_err("assign_tasks_to_fn_team",
-                     f"HTTP {r.status_code}: {r.text[:300]}")
+        # 1) Move into FN team container
+        if fn_team_id:
+            try:
+                r = requests.put(
+                    f"https://onfleet.com/api/v2/containers/teams/{fn_team_id}",
+                    headers=auth,
+                    data=json.dumps({"tasks": [1] + list(task_ids)}),  # 1 = append
+                    timeout=15,
+                )
+                if r.status_code != 200:
+                    _log_err("assign_tasks_to_fn_team/team",
+                             f"HTTP {r.status_code}: {r.text[:300]}")
+            except Exception as _te:
+                _log_err("assign_tasks_to_fn_team/team", _te)
+        else:
+            _log_err("assign_tasks_to_fn_team/team_skip", "no fn_team_id")
+
+        # 2) Assign each task to the FN worker (state 0 → 1)
+        if fn_worker_id:
+            assign_payload = json.dumps({
+                "worker": fn_worker_id,
+                "metadata": [
+                    {"name": "WO_NAME", "value": str(wo_name or ""), "type": "string", "visibility": ["api"]},
+                    {"name": "DUE_DATE", "value": str(due_date or ""), "type": "string", "visibility": ["api"]},
+                    {"name": "ASSIGNED_VIA", "value": "DCC_FN", "type": "string", "visibility": ["api"]},
+                ],
+            })
+            _ok = 0
+            for _i, tid in enumerate(task_ids):
+                try:
+                    r = requests.put(
+                        f"https://onfleet.com/api/v2/tasks/{tid}",
+                        headers=auth, data=assign_payload, timeout=10,
+                    )
+                    if r.status_code == 200:
+                        _ok += 1
+                    else:
+                        _log_err("assign_tasks_to_fn_team/worker",
+                                 f"task={tid} HTTP {r.status_code}: {r.text[:200]}")
+                except Exception as _we:
+                    _log_err(f"assign_tasks_to_fn_team/worker task={tid}", _we)
+                # Throttle 70ms — keeps sustained rate ~14 req/sec, under Onfleet ~20 limit
+                if _i < len(task_ids) - 1:
+                    time.sleep(0.07)
+            _log_err("assign_tasks_to_fn_team/done",
+                     f"team_move OK; worker assigned {_ok}/{len(task_ids)}")
+        else:
+            _log_err("assign_tasks_to_fn_team/worker_skip",
+                     "no fn_worker_id — tasks moved to team but state=0 (still in unassigned pool)")
     except Exception as e:
         _log_err("assign_tasks_to_fn_team", e)
-
-
+        
 def revoke_field_nation(cluster_hash, pod_name):
     """Removes route from Field Nation sheet tab AND resets UI state.
 
@@ -1901,6 +1990,7 @@ def process_digital_pool(master_bar=None):
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
     st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
+    st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
@@ -2213,6 +2303,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
         st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
+        st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
@@ -2987,15 +3078,37 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---
+    # Streamlit silently ignores st.session_state[widget_key] = X writes once the
+    # user has touched the widget. Workaround: store the canonical pay/rate in
+    # NON-widget master keys, and bump a version suffix in the widget keys
+    # whenever sync happens — Streamlit then treats them as fresh widgets and
+    # honors the `value=` parameter from the master.
+    _pay_master_key = f"_pay_master_{pod_name}_{cluster_hash}"
+    _rate_master_key = f"_rate_master_{pod_name}_{cluster_hash}"
+    _pay_ver_key = f"_pay_ver_{pod_name}_{cluster_hash}"
+    _stops_for_sync = cluster['stops'] if cluster['stops'] > 0 else 1
+
+    if _pay_ver_key not in st.session_state:
+        st.session_state[_pay_ver_key] = 0
+    _pay_ver = st.session_state[_pay_ver_key]
+
+    # Versioned widget keys — change on every sync so Streamlit re-instantiates
+    pay_key = f"pay_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
+    rate_key = f"rate_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
+
     def sync_on_total():
-        val = st.session_state.get(pay_key)
-        if val is not None:
-            st.session_state[rate_key] = round(val / cluster['stops'], 2) if cluster['stops'] > 0 else 0
+        v = st.session_state.get(pay_key)
+        if v is not None:
+            st.session_state[_pay_master_key] = float(v)
+            st.session_state[_rate_master_key] = round(float(v) / _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
 
     def sync_on_rate():
-        val = st.session_state.get(rate_key)
-        if val is not None:
-            st.session_state[pay_key] = round(val * cluster['stops'], 2)
+        v = st.session_state.get(rate_key)
+        if v is not None:
+            st.session_state[_rate_master_key] = float(v)
+            st.session_state[_pay_master_key] = round(float(v) * _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
@@ -3008,12 +3121,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # and the dispatcher loses the displayed data even though the route is real.
             if new_pay == 0:
                 new_pay = round(20.0 * cluster.get('stops', 1), 2)
-            st.session_state[pay_key] = new_pay
-            st.session_state[rate_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+            st.session_state[_pay_master_key] = new_pay
+            st.session_state[_rate_master_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+            st.session_state[_pay_ver_key] = _pay_ver + 1
             st.session_state[last_sel_key] = selected_label
 
     # --- 4. INITIAL SETUP (FIXED SAVING LOGIC) ---
-    if pay_key not in st.session_state:
+    if _pay_master_key not in st.session_state:
         prev_name = cluster.get('contractor_name', 'Unknown')
         default_label = list(ic_opts.keys())[0] if ic_opts else None
         
@@ -3047,8 +3161,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 Floor: if Maps returned 0 (fail/no IC), seed from $20/stop default
         if initial_pay == 0:
             initial_pay = round(20.0 * cluster.get('stops', 1), 2)
-        st.session_state[pay_key] = initial_pay
-        st.session_state[rate_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+        st.session_state[_pay_master_key] = initial_pay
+        st.session_state[_rate_master_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
     
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
@@ -3079,7 +3193,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
 
-        curr_rate = st.session_state[rate_key]
+        curr_rate = st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= 25.0) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
         is_unlocked = True
@@ -3096,15 +3210,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
-        final_pay = st.session_state.get(pay_key, 0.0)
-        final_rate = st.session_state.get(rate_key, 0.0)
+        final_pay = st.session_state.get(_pay_master_key, 0.0)
+        final_rate = st.session_state.get(_rate_master_key, 0.0)
 
         if final_rate >= RATE_CRITICAL: status_color = "#ef4444"
         elif final_rate >= RATE_WARNING: status_color = "#f97316"
@@ -3506,7 +3620,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f" Work Order: {wo_val}\n"
             f"📅 Due Date: {due.strftime('%A, %b %d, %Y')}\n"
             f" Total Stops: {cluster['stops']}\n"
-            f" Estimated Compensation: ${final_pay:.2f}\n\n"
+            f" Estimated Compensation: ${final_pay:.2f} (${final_rate:.2f}/stop)\n\n"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
             f"{install_warning}\n"
@@ -3520,7 +3634,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 UNIQUE KEY
         last_data_key = f"last_data_{pod_name}_{cluster_hash}"
         version_key = f"tx_ver_{pod_name}_{cluster_hash}"
-        current_data_fingerprint = f"{ic.get('name', 'Unknown')}_{final_pay}_{due}_{wo_val}"
+        current_data_fingerprint = (
+            f"{ic.get('name', 'Unknown')}_"
+            f"{ic.get('email', '')}_"
+            f"{final_pay}_{final_rate}_"
+            f"{due}_{wo_val}_"
+            f"{cluster['stops']}_{len(cluster['data'])}"
+        )
     
         if version_key not in st.session_state:
             st.session_state[version_key] = 1
@@ -3696,12 +3816,22 @@ text-decoration:none;">📨 Default Mail</a>
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
+            # 🌐 Move OnFleet tasks into the Field Nation team in parallel
+            # with the sheet write — appears in OnFleet's FN team view.
+            # Wrapped + pre-checked so a missing team id or thread error can
+            # never block the rerun and break the checkbox UX.
             try:
                 _fn_tid = st.session_state.get('_fn_team_id')
-                if _fn_tid and task_ids:
+                _fn_wid = st.session_state.get('_fn_worker_id')
+                if task_ids and (_fn_tid or _fn_wid):
                     threading.Thread(
                         target=assign_tasks_to_fn_team,
                         args=(list(task_ids), _fn_tid),
+                        kwargs={
+                            'fn_worker_id': _fn_wid,
+                            'wo_name': fn_payload.get('wo', ''),
+                            'due_date': str(_fn_due),
+                        },
                         daemon=True,
                     ).start()
             except Exception as _fn_team_e:
@@ -3727,7 +3857,7 @@ text-decoration:none;">📨 Default Mail</a>
 
         # 🌟 FIELD NATION BUTTONS
         _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(DEFAULT_DUE_DAYS))
-        _pay = st.session_state.get(pay_key, 0.0)
+        _pay = st.session_state.get(_pay_master_key, 0.0)
         fn_buf, _ = generate_fn_upload(stop_metrics, cluster, _due, _pay, cluster_hash)
 
         dl_col, link_col = st.columns(2)
@@ -5181,7 +5311,7 @@ def run_pod_tab(pod_name):
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         _acc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
-                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_k_total}" if _k_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -5214,7 +5344,7 @@ def run_pod_tab(pod_name):
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
                         _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
-                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_gk_total}" if _gk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
+                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -5290,7 +5420,7 @@ def run_pod_tab(pod_name):
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {_fk_total}" if _fk_total > 0 else "") + f"  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -5320,7 +5450,7 @@ def run_pod_tab(pod_name):
                     with exp_col:
                         _gfk_total = g.get('kCnt', 0) or 0
                         _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}" + (f" | 🛠️ {_gfk_total}" if _gfk_total > 0 else "") + f"  ·  :gray[{tasks_cnt} tasks]"):
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs

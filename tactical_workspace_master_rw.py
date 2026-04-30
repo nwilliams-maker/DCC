@@ -3025,16 +3025,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             st.session_state[_pay_master_key] = round(float(v) * _stops_for_sync, 2)
             st.session_state[_pay_ver_key] = _pay_ver + 1
 
-    _last_edit = st.session_state.get(_last_edit_key)
-    if _last_edit == "pay":
-        _v = st.session_state.get(pay_key)
-        if _v is not None:
-            st.session_state[rate_key] = round(_v / _stops_for_sync, 2)
-    elif _last_edit == "rate":
-        _v = st.session_state.get(rate_key)
-        if _v is not None:
-            st.session_state[pay_key] = round(_v * _stops_for_sync, 2)
-
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
         if selected_label and selected_label != st.session_state.get(last_sel_key):

@@ -3125,11 +3125,29 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            _new_pay_input = st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, disabled=not is_unlocked)
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            _new_rate_input = st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
+
+        # --- RECONCILE PAY ↔ RATE ---
+        # Compare what each widget returned to the master values. If either
+        # drifted, update masters, bump the version key (so widgets get fresh
+        # keys on next render and pick up value= from master), and rerun the
+        # fragment.
+        _master_pay = st.session_state.get(_pay_master_key, 0.0)
+        _master_rate = st.session_state.get(_rate_master_key, 0.0)
+        if _new_pay_input is not None and abs(float(_new_pay_input) - _master_pay) > 0.005:
+            st.session_state[_pay_master_key] = float(_new_pay_input)
+            st.session_state[_rate_master_key] = round(float(_new_pay_input) / _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
+            st.rerun(scope="fragment")
+        elif _new_rate_input is not None and abs(float(_new_rate_input) - _master_rate) > 0.005:
+            st.session_state[_rate_master_key] = float(_new_rate_input)
+            st.session_state[_pay_master_key] = round(float(_new_rate_input) * _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
+            st.rerun(scope="fragment")
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
         final_pay = st.session_state.get(_pay_master_key, 0.0)

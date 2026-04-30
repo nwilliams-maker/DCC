@@ -2993,11 +2993,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---
-    # Streamlit silently ignores st.session_state[widget_key] = X writes once the
-    # user has touched the widget. Workaround: store the canonical pay/rate in
-    # NON-widget master keys, and bump a version suffix in the widget keys
-    # whenever sync happens — Streamlit then treats them as fresh widgets and
-    # honors the `value=` parameter from the master.
+    # Streamlit silently ignores st.session_state[widget_key] = X writes once
+    # the user has touched the widget, AND on_change inside fragments doesn't
+    # reliably re-render. Fix: store canonical pay/rate in NON-widget master
+    # keys, render widgets WITHOUT on_change, capture their return values,
+    # and reconcile + bump version + st.rerun() in the script body.
     _pay_master_key = f"_pay_master_{pod_name}_{cluster_hash}"
     _rate_master_key = f"_rate_master_{pod_name}_{cluster_hash}"
     _pay_ver_key = f"_pay_ver_{pod_name}_{cluster_hash}"
@@ -3007,7 +3007,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.session_state[_pay_ver_key] = 0
     _pay_ver = st.session_state[_pay_ver_key]
 
-    # Versioned widget keys — change on every sync so Streamlit re-instantiates
     pay_key = f"pay_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
     rate_key = f"rate_val_{pod_name}_{cluster_hash}_v{_pay_ver}"
 
@@ -3125,12 +3124,32 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, disabled=not is_unlocked)
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
-
+            
+        # --- RECONCILE PAY ↔ RATE ---
+        # Read what the user actually typed into each widget, compare to the
+        # masters, and if either drifted: update masters, bump version (so the
+        # widgets get fresh keys on the next render and pick up the synced
+        # value via value=), and rerun the fragment.
+        _typed_pay = st.session_state.get(pay_key)
+        _typed_rate = st.session_state.get(rate_key)
+        _master_pay = st.session_state.get(_pay_master_key, 0.0)
+        _master_rate = st.session_state.get(_rate_master_key, 0.0)
+        if _typed_pay is not None and abs(float(_typed_pay) - _master_pay) > 0.005:
+            st.session_state[_pay_master_key] = float(_typed_pay)
+            st.session_state[_rate_master_key] = round(float(_typed_pay) / _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
+            st.rerun(scope="fragment")
+        elif _typed_rate is not None and abs(float(_typed_rate) - _master_rate) > 0.005:
+            st.session_state[_rate_master_key] = float(_typed_rate)
+            st.session_state[_pay_master_key] = round(float(_typed_rate) * _stops_for_sync, 2)
+            st.session_state[_pay_ver_key] = _pay_ver + 1
+            st.rerun(scope="fragment")
+            
         # ── FINANCIALS CARD ──────────────────────────────────────────────
         final_pay = st.session_state.get(_pay_master_key, 0.0)
         final_rate = st.session_state.get(_rate_master_key, 0.0)

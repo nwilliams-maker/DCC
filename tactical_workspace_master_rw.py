@@ -3654,7 +3654,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f" Work Order: {wo_val}\n"
             f"📅 Due Date: {due.strftime('%A, %b %d, %Y')}\n"
             f" Total Stops: {cluster['stops']}\n"
-            f" Estimated Compensation: ${final_pay:.2f} (${final_rate:.2f}/stop)\n\n"
+            f" Estimated Compensation: ${final_pay:.2f} \n\n"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
             f"{install_warning}\n"

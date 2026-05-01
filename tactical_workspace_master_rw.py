@@ -36,7 +36,7 @@ if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"
 # GAS_WEB_APP_URL: deployment URL acts as auth — rotate via redeploy and update the Railway env var.
-GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec"
+GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec"
 IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
 
 # --- TUNABLES (hoisted from inline magic numbers) ---

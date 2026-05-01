@@ -5734,15 +5734,68 @@ _de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
 _de_pill_label = _de_saved if _de_saved else "Set email"
 _de_pill_color = "#0f172a" if _de_saved else "#dc2626"
 
+# Hidden Streamlit button whose click sets a session_state flag and triggers
+# a normal Streamlit rerun. The visible ✉️ pill in the header is just an <a>
+# wired up via JavaScript to programmatically click this hidden button — that
+# way no full page reload happens, so st.session_state (including _auth_user)
+# survives. Without this pattern the <a href="?email_settings=1"> approach
+# bounced users who hadn't enabled "Stay signed in" back to the login form.
+_email_pill_btn_label = "__email_pill_open__"
+if st.button(_email_pill_btn_label, key="_email_pill_hidden_btn"):
+    st.session_state['_show_email_settings'] = True
+    st.rerun()
+
 st.markdown(
     f"""
+    <style>
+      /* Hide the bridge button — only its DOM presence matters. */
+      div[data-testid="stButton"] > button:has(div[data-testid="stMarkdownContainer"] p:only-child) {{ }}
+      div[data-testid="stButton"] button[kind="secondary"] p {{ }}
+      /* Match the bridge button by exact text and hide it. */
+      div[data-testid="stButton"] button[kind="secondary"]:has(div p) {{
+          /* fallback — actual hide selector below uses :has(text) via JS */
+      }}
+    </style>
+    <script>
+      (function(){{
+        // Hide the bridge button + wire the visible ✉️ link to click it.
+        const tag = "{_email_pill_btn_label}";
+        function findBridge(){{
+          const btns = window.parent.document.querySelectorAll('div[data-testid="stButton"] button');
+          for (const b of btns) {{ if (b.innerText.trim() === tag) return b; }}
+          return null;
+        }}
+        function hideBridge(){{
+          const b = findBridge(); if (!b) return false;
+          const wrap = b.closest('div[data-testid="stButton"]');
+          if (wrap) wrap.style.display = 'none';
+          return true;
+        }}
+        function wireLink(){{
+          const a = window.parent.document.getElementById('dcc_email_pill_link');
+          if (!a || a._wired) return;
+          a.addEventListener('click', (ev)=>{{
+            ev.preventDefault();
+            const b = findBridge();
+            if (b) b.click();
+          }});
+          a._wired = true;
+        }}
+        // Streamlit rerenders frequently — re-attach on every animation frame
+        // until both elements exist, then keep watching.
+        function tick(){{ hideBridge(); wireLink(); }}
+        const iv = setInterval(tick, 200);
+        // Stop the interval after 60s — by then everything should be wired.
+        setTimeout(()=>clearInterval(iv), 60000);
+      }})();
+    </script>
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
         <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
-        <a href="?email_settings=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
+        <a id="dcc_email_pill_link" href="javascript:void(0)" style="display: inline-block; padding: 3px 10px; background: #ffffff;
                 border: 1px solid #cbd5e1; border-radius: 6px; color: {_de_pill_color}; text-decoration: none;
-                font-size: 11px; font-weight: 700; margin-right: 4px;" title="Email used for route confirmations">✉️ {_de_pill_label}</a>
+                font-size: 11px; font-weight: 700; margin-right: 4px; cursor: pointer;" title="Email used for route confirmations">✉️ {_de_pill_label}</a>
         <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
                 border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
                 font-size: 11px; font-weight: 700;">Sign out</a>
@@ -5758,7 +5811,12 @@ st.markdown(
 # refreshes and tab reopens). Outgoing routes attach this email to the GAS
 # payload as dispatcherEmail; the portal then CCs it on the Formspree
 # confirmation. If empty, no CC is added (Nick still gets the primary email).
-if st.query_params.get("email_settings") == "1":
+# Dialog is triggered by a session_state flag (set by the bridge button above)
+# instead of a URL query param. Avoids the full-page reload that the previous
+# ?email_settings=1 anchor caused — that reload was wiping st.session_state
+# (including _auth_user) and bouncing users who hadn't enabled "Stay signed in"
+# back to the login screen.
+if st.session_state.get('_show_email_settings'):
     @st.dialog("📧 Your Confirmation Email")
     def _email_settings_dialog():
         st.write(
@@ -5790,8 +5848,7 @@ if st.query_params.get("email_settings") == "1":
                         f"<script>try{{localStorage.setItem('dcc_dispatcher_email','{_safe_v}');}}catch(e){{}}</script>",
                         height=0,
                     )
-                    try: del st.query_params["email_settings"]
-                    except Exception: pass
+                    st.session_state['_show_email_settings'] = False
                     st.rerun()
         with c2:
             if st.button("🗑️ Clear", use_container_width=True, key="_email_settings_clear"):
@@ -5800,13 +5857,11 @@ if st.query_params.get("email_settings") == "1":
                     "<script>try{localStorage.removeItem('dcc_dispatcher_email');}catch(e){}</script>",
                     height=0,
                 )
-                try: del st.query_params["email_settings"]
-                except Exception: pass
+                st.session_state['_show_email_settings'] = False
                 st.rerun()
         with c3:
             if st.button("Cancel", use_container_width=True, key="_email_settings_cancel"):
-                try: del st.query_params["email_settings"]
-                except Exception: pass
+                st.session_state['_show_email_settings'] = False
                 st.rerun()
     _email_settings_dialog()
 

@@ -611,6 +611,10 @@ _PACKING_JS_INLINE = r"""
         // campaign + same hardware almost always shares one art file, but it's worth
         // surfacing the rare case where production needs to pull two different files.
         artFiles: new Set(),
+        // Collect distinct SIOs per group. Per dispatcher spec the National Summary
+        // card shows the SIO inline next to the campaign name (and the art file(s)
+        // below it in lighter grey).
+        sios: new Set(),
       })
     );
     // Populate the artFiles set for each grouped item by walking the source rows again.
@@ -619,11 +623,15 @@ _PACKING_JS_INLINE = r"""
     for (const r of nationalRows) {
       const key = (r.boost || '—') + '||' + (r.clientCompany || '—') + '||' + nationalLabel(r) + '||' + (r.kioskType || '');
       const af = (r.artFile || '').trim();
-      if (!af) continue;
+      const sio = (r.sio || '').trim();
+      const sioIsRealValue = sio && !/^(default|0|n\/a|null|—|none)$/i.test(sio);
       const item = nationalByArt.find(it =>
         ((it.art || '—') + '||' + (it.client || '—') + '||' + it.campaign + '||' + (it.kioskType || '')) === key
       );
-      if (item) item.artFiles.add(af);
+      if (item) {
+        if (af) item.artFiles.add(af);
+        if (sioIsRealValue) item.sios.add(sio);
+      }
     }
     nationalByArt.sort((a, b) => {
       const byArt = String(a.art).localeCompare(String(b.art));
@@ -1121,6 +1129,25 @@ _PACKING_JS_INLINE = r"""
               doc.setFontSize(8.5);
               doc.setTextColor(120, 120, 120);
               doc.text('· ' + fitText(doc, item.kioskType, kTypeMaxW), kTypeStartX, cy + 9);
+            }
+          }
+
+          // Per dispatcher spec: render SIO immediately AFTER the campaign on the
+          // primary line (before the kiosk-type suffix consumes the rest of the
+          // width). Same line, slightly muted weight so the campaign stays the
+          // visual anchor. Multiple SIOs per group joined with " · ".
+          const siosArr = item.sios ? [...item.sios] : [];
+          if (siosArr.length) {
+            const consumedW2 = doc.getTextWidth(primaryFitted);
+            // Push past kioskType if present so the two suffixes don't collide.
+            const ktConsumed = item.kioskType ? doc.getTextWidth('· ' + item.kioskType) + 8 : 0;
+            const sioStartX = primaryStartX + consumedW2 + 6 + ktConsumed;
+            const sioMaxW = primaryMaxW - consumedW2 - 8 - ktConsumed;
+            if (sioMaxW > 30) {
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(8.5);
+              doc.setTextColor(90, 90, 90);
+              doc.text('SIO ' + fitText(doc, siosArr.join(' · '), sioMaxW - 22), sioStartX, cy + 9);
             }
           }
 

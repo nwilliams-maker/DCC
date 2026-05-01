@@ -241,6 +241,7 @@ USERS = {
     "admin": {
         "name": "Nick Williams",
         "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
+        "email": "nwilliams@terraboost.biz",
         "pod": "ADMIN",
         "tier": "admin",
     },
@@ -251,6 +252,7 @@ USERS = {
     "blue_assoc": {
         "name": "Blue Dispatch Associate",
         "password_hash": "e7ce65e1ff8c574cb353a8b5ed055a5e01fde717c685f06a538ef6bc57cead01",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Blue",
         "role": "Associate",
     "tier": "guest",
@@ -258,6 +260,7 @@ USERS = {
     "green_assoc": {
         "name": "Green Dispatch Associate",
         "password_hash": "e60d30662e47a2b8c9299c5b3f8fab86bb749a655919873cd6a726cf52578908",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Green",
         "role": "Associate",
     "tier": "guest",
@@ -265,6 +268,7 @@ USERS = {
     "orange_assoc": {
         "name": "Orange Dispatch Associate",
         "password_hash": "b0bb99055d6e1a755bd8dbf310988fd6b167b9b2e0b918cd436c647dd92cb1b8",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Orange",
         "role": "Associate",
     "tier": "guest",
@@ -272,6 +276,7 @@ USERS = {
     "purple_assoc": {
         "name": "Purple Dispatch Associate",
         "password_hash": "74cb0116691b1cc5ddb015f3ec88e9ac6ba363ae32e2d2ddded2e3f1644ca74e",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Purple",
         "role": "Associate",
     "tier": "guest",
@@ -279,6 +284,7 @@ USERS = {
     "red_assoc": {
         "name": "Red Dispatch Associate",
         "password_hash": "5fd1beafa3d940ce3aa002605966d1e34304019e98cacc32fea9a2eda74fc54f",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Red",
         "role": "Associate",
     "tier": "guest",
@@ -289,6 +295,7 @@ USERS = {
     "bluedispatch1811": {
         "name": "Blue Dispatcher",
         "password_hash": "299bb7f09cee5ecb05f7338674fc99d17340445fc64c25ed054a97a64ab3332d",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Blue",
         "role": "Dispatcher",
     "tier": "user",
@@ -296,6 +303,7 @@ USERS = {
     "greendispatch1811": {
         "name": "Green Dispatcher",
         "password_hash": "45a194276bf8a6e2595e3d8cfab8365166ec8dea591643384befe53926bf4cc3",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Green",
         "role": "Dispatcher",
     "tier": "user",
@@ -303,6 +311,7 @@ USERS = {
     "orangedispatch1811": {
         "name": "Orange Dispatcher",
         "password_hash": "768658cedfc1cb9d3001ec707d71b29ddb4d3ee1d670c1f6b8d3bda261efa0f1",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Orange",
         "role": "Dispatcher",
     "tier": "user",
@@ -310,6 +319,7 @@ USERS = {
     "purpledispatch1811": {
         "name": "Purple Dispatcher",
         "password_hash": "81f76219614717b157d2dc8f59e936f727214eda7893430ae875f7cec7128219",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Purple",
         "role": "Dispatcher",
     "tier": "user",
@@ -317,6 +327,7 @@ USERS = {
     "reddispatch1811": {
         "name": "Red Dispatcher",
         "password_hash": "1ed45d815f19ba3d691e4e41bb578d51d6f88aac66e5693573e7da05a19ed389",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Red",
         "role": "Dispatcher",
     "tier": "user",
@@ -326,6 +337,7 @@ USERS = {
     "digital_user": {
         "name": "Digital User",
         "password_hash": "fc72997426be122f0f40e2a4a058de8095f6d5feb5e4de9fa5d207b3f4b58171",
+        "email": "nwilliams@terraboost.biz",
         "pod": "Digital",
         "role": "Dispatcher",
         "tier": "user",
@@ -335,6 +347,7 @@ USERS = {
     "manager": {
         "name": "Pod Manager",
         "password_hash": "2e064c30dfe840ff76432c401a0d0c19f0b30d823f60fd378353a6a63e431e75",
+        "email": "nwilliams@terraboost.biz",
         "pod": "MANAGER",
         "role": "Manager",
         "tier": "manager",
@@ -1639,6 +1652,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
 from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
+# DISABLED (packing-list rollback): from packing_slip import render_packing_slip_button
 
 # --- UTILITIES ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -1651,6 +1665,27 @@ def normalize_state(st_str):
     if not st_str: return "UNKNOWN"
     clean = str(st_str).strip().upper()
     return STATE_MAP.get(clean, clean)
+
+
+# 🎨 Art-file extraction from OnFleet task notes.
+# The "ArtFile" string sits inside the free-form Task Details / notes box on
+# each OnFleet task — typically a token like "Dexcom_Premium_2026Q2_v3.pdf"
+# embedded among normal driver-instruction prose. The Streamlit app surfaces
+# this on the packing slip (dimmed sub-line on the National Summary card +
+# ALLOCATED ART column on the Locals table).
+#
+# Heuristic ported from the existing portal's extractArtFile() in
+# index_45.html — keeps lines that contain an underscore and do NOT end in
+# sentence punctuation (.!?), then joins distinct values with " • ".
+# That filter rules out prose like "Notify the manager." and keeps tokens
+# like "Firkus_Plumbing_Q2_2026.pdf" that look like art file names.
+def extract_art_file(notes: str) -> str:
+    if not notes:
+        return ""
+    lines = [l.strip() for l in str(notes).splitlines() if l.strip()]
+    keep = [l for l in lines if "_" in l and not re.search(r"[.!?]\s*$", l)]
+    return " • ".join(keep)
+
 
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_sent_records_from_sheet():
@@ -2097,6 +2132,9 @@ def process_digital_pool(master_bar=None):
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
+        # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+        # (free-text). See extract_art_file() up top for the heuristic.
+        art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
         
         # Default UI display to native details unless a custom field overwrites it
         tt_val = native_details 
@@ -2172,6 +2210,7 @@ def process_digital_pool(master_bar=None):
             "venue_id": venue_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
+            "art_file": art_file,
         })
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
@@ -2407,6 +2446,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
+            # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+            # (free-text). See extract_art_file() up top for the heuristic.
+            art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
             
             for f in custom_fields:
                 f_name = str(f.get('name', '')).strip().lower()
@@ -2494,6 +2536,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "venue_id": venue_id,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
+                    "art_file": art_file,
                 })
                 
         clusters = []
@@ -3740,6 +3783,18 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     "state": cluster.get('state', 'Unknown'),
                     "due": str(due), "comp": final_pay, "lCnt": cluster['stops'], "mi": mi, "time": t_str,
                     "phone": str(ic.get('phone', '')),
+                    # Dispatcher email priority: user-saved (Settings ✉️ pill) wins over
+                    # the login record's email (which today is hardcoded to Nick for
+                    # every account, so unusable for CC'ing the actual sender). Falls
+                    # back to empty so the portal skips the CC entirely rather than
+                    # CC'ing Nick on his own primary email — Formspree dedupes those
+                    # anyway, which is why nobody else was getting a copy.
+                    "dispatcherEmail": str(
+                        st.session_state.get('dispatcher_email')
+                        or st.session_state.get('_auth_user', {}).get('email', '')
+                        or ''
+                    ).strip(),
+                    "dispatcherName": str(st.session_state.get('_auth_user', {}).get('name', '') or '').strip(),
                     "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
                     "taskIds": ",".join(task_ids),
                     # Apr 27 2026 — list of task IDs that are digital, used by GAS
@@ -4057,6 +4112,9 @@ def smart_sync_pod(pod_name):
         custom_boosted = ""
         tt_val = native_details
         venue_name = ""; venue_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
+        # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+        # (free-text). See extract_art_file() up top for the heuristic.
+        art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
 
         for f in custom_fields:
             f_name = str(f.get('name', '')).strip().lower()
@@ -4125,6 +4183,7 @@ def smart_sync_pod(pod_name):
             "venue_id": venue_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
+            "art_file": art_file,
             "is_new": True,  # 🌟 Flag for UI badge
         })
 
@@ -4843,8 +4902,17 @@ def run_pod_tab(pod_name):
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-                    with st.expander(f"  Stops ({len(_addrs)})", expanded=False):
-                        st.markdown(_addr_lines)
+                    # Native HTML <details> — Streamlit disallows expanders
+                    # nested inside expanders, and this block is rendered inside
+                    # the Task Attrition expander above.
+                    _addr_html_li = "".join(f"<li style='font-family:monospace; font-size:11px; color:#475569;'>{_a}</li>" for _a in _addrs) or "<li style='color:#94a3b8;'>(no addresses)</li>"
+                    st.markdown(
+                        f"<details style='margin:4px 0 8px 0; padding-left:8px;'>"
+                        f"<summary style='cursor:pointer; font-size:11px; color:#475569; font-weight:600;'>Stops ({len(_addrs)})</summary>"
+                        f"<ul style='margin:6px 0 0 0; padding-left:20px;'>{_addr_html_li}</ul>"
+                        f"</details>",
+                        unsafe_allow_html=True,
+                    )
 
             _excluded_section("❌ Accepted (excluded)", accepted)
             _excluded_section("🏁 Finalized (excluded)", finalized)
@@ -5272,6 +5340,10 @@ def run_pod_tab(pod_name):
     </div>
     {_venues_html}
 </div>""", unsafe_allow_html=True)
+                            # 🖨️ Temporary — packing slip button on Sent routes for testing
+                            # before any routes have been accepted. Same call as in Accepted;
+                            # safe to leave here permanently or remove once Accepted has data.
+                            # DISABLED (packing-list rollback): render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -5360,6 +5432,11 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
+                            # 🖨️ Packing slip — generates the warehouse-style PDF (header +
+                            # 3 summary cards + LOCALS + Route Details). Mirrors the same
+                            # button on the index_45.html portal so dispatch + warehouse use
+                            # the same artifact. Renders client-side via jsPDF in an iframe.
+                            # DISABLED (packing-list rollback): render_packing_slip_button(c, pod_name, key=cluster_hash)
                             render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -5553,6 +5630,45 @@ if '_auth_user' not in st.session_state:
             height=0,
         )
 
+# --- DISPATCHER EMAIL AUTO-RESTORE (browser localStorage → session_state) ---
+# Independent of the auth system. The "Email" pill in the top-right header lets
+# any signed-in user save their personal email; we mirror it to localStorage so
+# it survives page refreshes and (eventually) outlives the login system being
+# removed. Same URL-param→reload pattern as the stay-signed-in token above:
+#   1. JS reads localStorage on page load. If found and not yet in URL, it
+#      appends ?dispatcher_email=... and reloads.
+#   2. Python sees the URL param, stores it in session_state, strips it from
+#      the URL on the next rerun (handled inline below).
+# The email is then attached to every "Send to IC" payload as dispatcherEmail
+# so the portal CCs the right human on Formspree confirmations.
+if 'dispatcher_email' not in st.session_state:
+    _de_param = st.query_params.get("dispatcher_email")
+    if _de_param:
+        # Light validation — must contain "@" and a "." somewhere after it.
+        _de_clean = str(_de_param).strip()
+        if "@" in _de_clean and "." in _de_clean.split("@", 1)[-1]:
+            st.session_state['dispatcher_email'] = _de_clean
+        # Strip the param from the URL so it doesn't linger in shareable links.
+        try: del st.query_params["dispatcher_email"]
+        except Exception: pass
+    else:
+        # No URL param — ask the browser if it has a saved email.
+        _components.html(
+            """
+            <script>
+                try {
+                    var e = localStorage.getItem('dcc_dispatcher_email');
+                    var here = window.parent.location;
+                    if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
+                        var sep = here.search ? '&' : '?';
+                        here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
+                    }
+                } catch (err) {}
+            </script>
+            """,
+            height=0,
+        )
+
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
 # their record sits in st.session_state['_auth_user'] for the lifetime of the
@@ -5620,6 +5736,17 @@ _u = st.session_state.get('_auth_user', {})
 _pod_label = _u.get('pod', '?')
 _role_label = _u.get('role')
 _signin_line = f"{_u.get('name','?')} · {_pod_label}" + (f" {_role_label}" if _role_label else "")
+
+# The dispatcher's saved email — shown as a small label so they know what's
+# attached to outgoing routes. Empty string when nothing's configured yet.
+_de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
+_de_pill_label = _de_saved if _de_saved else "Set email"
+_de_pill_color = "#0f172a" if _de_saved else "#dc2626"
+
+# Header markdown — pinned info + Sign out. Email pill is rendered as a real
+# Streamlit button below (NOT inside this markdown) so its click triggers a
+# normal Streamlit rerun without a page reload. Earlier JS-bridge approach
+# was leaking setInterval timers on every rerun — broke the app post-init.
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
@@ -5630,9 +5757,96 @@ st.markdown(
                 border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
                 font-size: 11px; font-weight: 700;">Sign out</a>
     </div>
+    <style>
+      /* Pin the email-settings Streamlit button to the top-right, just under the
+         "Signed in as" block. Targets via st.container's data-testid + the
+         element-key (Streamlit exposes the key as a class on the wrapper). */
+      div.st-key-_email_pill_btn {{
+          position: fixed !important;
+          top: 60px !important;
+          right: 130px !important;
+          z-index: 999999 !important;
+          width: auto !important;
+      }}
+      div.st-key-_email_pill_btn button {{
+          padding: 3px 10px !important;
+          font-size: 11px !important;
+          font-weight: 700 !important;
+          color: {_de_pill_color} !important;
+          background: #ffffff !important;
+          border: 1px solid #cbd5e1 !important;
+          border-radius: 6px !important;
+          min-height: 0 !important;
+          line-height: 1.4 !important;
+      }}
+    </style>
     """,
     unsafe_allow_html=True,
 )
+if st.button(f"✉️ {_de_pill_label}", key="_email_pill_btn", help="Email used for route confirmations"):
+    st.session_state['_show_email_settings'] = True
+    st.rerun()
+
+# --- EMAIL SETTINGS DIALOG ---
+# Triggered by clicking the ✉️ pill in the header (which sets ?email_settings=1).
+# Lets the user save / update / clear their personal email. We persist to BOTH
+# session_state (immediate effect this session) AND localStorage (survives page
+# refreshes and tab reopens). Outgoing routes attach this email to the GAS
+# payload as dispatcherEmail; the portal then CCs it on the Formspree
+# confirmation. If empty, no CC is added (Nick still gets the primary email).
+# Dialog is triggered by a session_state flag (set by the bridge button above)
+# instead of a URL query param. Avoids the full-page reload that the previous
+# ?email_settings=1 anchor caused — that reload was wiping st.session_state
+# (including _auth_user) and bouncing users who hadn't enabled "Stay signed in"
+# back to the login screen.
+if st.session_state.get('_show_email_settings'):
+    @st.dialog("📧 Your Confirmation Email")
+    def _email_settings_dialog():
+        st.write(
+            "When you accept or decline a route, the IC's response email is sent to "
+            "Nick — but it can also CC **you** so you've got the same paper trail. "
+            "Set the email address you want CC'd here. Saved on this device only."
+        )
+        _current = str(st.session_state.get('dispatcher_email', '')).strip()
+        _new_val = st.text_input(
+            "Your email address",
+            value=_current,
+            key="_email_settings_input",
+            placeholder="firstname@terraboost.biz",
+        )
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            if st.button("💾 Save", type="primary", use_container_width=True, key="_email_settings_save"):
+                _v = str(_new_val or "").strip()
+                if not _v:
+                    st.error("Email can't be empty. Use Clear if you want to remove it.")
+                elif "@" not in _v or "." not in _v.split("@", 1)[-1]:
+                    st.error("That doesn't look like a valid email address.")
+                else:
+                    st.session_state['dispatcher_email'] = _v
+                    # Persist to localStorage. Single-quote the value to keep the
+                    # JS literal simple — emails don't contain quotes.
+                    _safe_v = _v.replace("'", "")
+                    _components.html(
+                        f"<script>try{{localStorage.setItem('dcc_dispatcher_email','{_safe_v}');}}catch(e){{}}</script>",
+                        height=0,
+                    )
+                    st.session_state['_show_email_settings'] = False
+                    st.rerun()
+        with c2:
+            if st.button("🗑️ Clear", use_container_width=True, key="_email_settings_clear"):
+                st.session_state.pop('dispatcher_email', None)
+                _components.html(
+                    "<script>try{localStorage.removeItem('dcc_dispatcher_email');}catch(e){}</script>",
+                    height=0,
+                )
+                st.session_state['_show_email_settings'] = False
+                st.rerun()
+        with c3:
+            if st.button("Cancel", use_container_width=True, key="_email_settings_cancel"):
+                st.session_state['_show_email_settings'] = False
+                st.rerun()
+    _email_settings_dialog()
 
 st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 
@@ -6395,6 +6609,9 @@ with tabs[6]:
                                         _dslv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
                                 _ds_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
+                                # 🖨️ Temporary — packing slip button on Sent routes for testing.
+                                # Mirrors the per-pod tab placement; pod name inferred from cluster.
+                                # DISABLED (packing-list rollback): render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):

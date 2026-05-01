@@ -1091,19 +1091,12 @@ _PACKING_JS_INLINE = r"""
           doc.setTextColor(card.accent[0], card.accent[1], card.accent[2]);
           doc.text(String(item.count), x + w - PAD, cy + 10, { align: 'right' });
 
-          // Secondary line — only when both client and campaign exist
-          if (secondaryText) {
-            doc.setFont('helvetica', 'normal');
-            doc.setFontSize(8);
-            doc.setTextColor(140, 140, 140);
-            doc.text(fitText(doc, secondaryText, labelMaxW - 4), x + PAD, cy + 21);
-          }
-
-          // Tertiary line — Allocated Art file(s) for this group. Drawn small but with
-          // enough contrast to read on the warehouse's printed slips — the previous
-          // (215,215,215) at 6.5pt was washing out. We now wrap rather than truncate,
-          // since seeing the full file name matters when verifying art pulls.
-          // Multiple distinct files (rare) are joined with " · ".
+          // Per dispatcher spec: National Summary shows the BOLD campaign on
+          // top + the dimmed Allocated Art file directly underneath. The
+          // intermediate "secondary" line (a dimmed repeat of the campaign)
+          // was dropped — it duplicated the bold primary text most of the
+          // time since clientCompany and nationalLabel resolve to the same
+          // string in our data.
           const artFilesArr = item.artFiles ? [...item.artFiles] : [];
           if (artFilesArr.length) {
             doc.setFont('helvetica', 'normal');
@@ -1111,9 +1104,8 @@ _PACKING_JS_INLINE = r"""
             doc.setTextColor(140, 140, 140);
             const artFilesStr = artFilesArr.join(' · ');
             const wrapped = doc.splitTextToSize(artFilesStr, labelMaxW - 4);
-            // Y-offset depends on whether secondary line was drawn — push art files
-            // below the secondary line when present, otherwise sit them right under primary.
-            const artY = cy + (secondaryText ? 30 : 21);
+            // Sits right under the bold primary line.
+            const artY = cy + 21;
             wrapped.forEach((line, i) => {
               doc.text(line, x + PAD, artY + i * ART_LINE_H);
             });

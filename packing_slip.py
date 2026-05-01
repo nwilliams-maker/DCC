@@ -153,6 +153,20 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
         client_company = str(t.get("client_company", "") or "")
         is_digital = bool(t.get("is_digital", False))
 
+        # Campaign-driven Default override: when task_type is "New Ad" but the
+        # campaign string contains "default" (e.g. "Default", "Default -
+        # Default", "Default - Default - Local"), flip the task type to
+        # "Default". A "New Ad" with no real campaign IS a default ad — the
+        # contractor only needs to know "default ad goes here."
+        # Other task types (Remove Magnet, Photo Retake, Continuity, Kiosk
+        # Install, etc.) stay as-is — those are physical actions the
+        # contractor still has to perform regardless of what's in the slot.
+        # Match is case-insensitive substring; safe because no real client
+        # company name contains the word "default".
+        if (task_type.strip().lower() == "new ad"
+                and "default" in client_company.lower()):
+            task_type = "Default"
+
         rows.append({
             # Identity
             "worker": contractor,

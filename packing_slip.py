@@ -32,9 +32,50 @@ DATA NOTES — what the Streamlit data has vs. what index_45.html had:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 import streamlit.components.v1 as components
+
+
+# ---------------------------------------------------------------------------
+# Campaign string cleanup — strips date ranges and stray single dates from
+# the campaign name before it lands on the slip. Examples:
+#
+#   "Dairy Farmers - National Campaign 04/13/2026-12/31/2026 - National"
+#     → "Dairy Farmers - National Campaign - National"
+#
+#   "Scorch LLC (PG&E) - National Campaign (03/30/2026-06/30/2026)"
+#     → "Scorch LLC (PG&E) - National Campaign"
+#
+#   "Some Campaign 11/15/2026"
+#     → "Some Campaign"
+#
+# Strips MM/DD/YYYY and MM/DD/YY (with or without leading zeros), as a single
+# date or a hyphen-separated range, with optional surrounding parens. Doesn't
+# touch year-only tokens like "2026 Tejava" — slashes are required.
+# ---------------------------------------------------------------------------
+_DATE_PAREN_RE  = re.compile(r"\s*\(\s*\d{1,2}/\d{1,2}/\d{2,4}(?:\s*-\s*\d{1,2}/\d{1,2}/\d{2,4})?\s*\)")
+_DATE_RANGE_RE  = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}")
+_SINGLE_DATE_RE = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}")
+
+
+def _strip_campaign_dates(s: str) -> str:
+    """Remove date ranges / single dates from a campaign string and tidy up
+    any leftover whitespace + orphan dashes."""
+    if not s:
+        return s
+    out = _DATE_PAREN_RE.sub(" ", str(s))
+    out = _DATE_RANGE_RE.sub(" ", out)
+    out = _SINGLE_DATE_RE.sub(" ", out)
+    # Collapse runs of whitespace
+    out = re.sub(r"\s+", " ", out)
+    # Collapse orphan double-dashes left behind ("Campaign  - National" → already fine,
+    # but "Campaign -  - National" → "Campaign - National")
+    out = re.sub(r"\s*-\s*-\s*", " - ", out)
+    # Trim leading/trailing whitespace + stray dashes
+    out = re.sub(r"^[\s\-]+|[\s\-]+$", "", out)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +170,20 @@ def _is_install(task_type: str) -> bool:
 
 
 def _derive_customer_type(client_company: str, task_type: str) -> str:
-    """Heuristic: tasks whose campaign string contains 'national' bucket as National.
-    Otherwise Local. The JS only checks for === 'national' so casing doesn't matter."""
+    """Heuristic for the National vs Local suffix shown in the Client/Campaign
+    column.
+
+      - "default" anywhere in the campaign → empty (suffix dropped — these rows
+        live in their own Defaults bucket and the National/Local label is
+        meaningless for them).
+      - "national" anywhere → "National"
+      - everything else → "Local"
+
+    The JS only checks for === 'national' vs everything else, so casing is
+    irrelevant for the bucketing decision."""
     s = (client_company or "").lower()
+    if "default" in s:
+        return ""
     if "national" in s:
         return "National"
     return "Local"
@@ -150,7 +202,15 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
     rows: List[Dict[str, Any]] = []
     for idx, t in enumerate(data, start=1):
         task_type = str(t.get("task_type", "") or "")
-        client_company = str(t.get("client_company", "") or "")
+        # Clean the campaign string of date ranges before it lands on the slip.
+        # See _strip_campaign_dates above for examples — turns
+        #   "Dairy Farmers - National Campaign 04/13/2026-12/31/2026 - National"
+        # into
+        #   "Dairy Farmers - National Campaign - National".
+        # The cleaned string is used for BOTH the displayed campaign and the
+        # National/Local customer-type detection (the keyword "National" is
+        # preserved by the strip).
+        client_company = _strip_campaign_dates(str(t.get("client_company", "") or ""))
         is_digital = bool(t.get("is_digital", False))
 
         # Campaign-driven Default override: when task_type is "New Ad" but the

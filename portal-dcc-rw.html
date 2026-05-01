@@ -191,16 +191,27 @@
                const _disp_email = (window.payloadData && window.payloadData.dispatcherEmail) ? window.payloadData.dispatcherEmail : PRIMARY_FORMSPREE_EMAIL;
                const _disp_name  = (window.payloadData && window.payloadData.dispatcherName)  ? window.payloadData.dispatcherName  : "";
 
-               // Submit to Formspree. Capture the response so a silent failure
-               // (Formspree rejecting the submission for any reason) becomes visible
-               // instead of disappearing behind the success view.
+               // Submit to Formspree. Capture the response so silent failures surface.
                const _fsResp = await fetch(formspreeUrl, {
                     method: 'POST',
                     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                     _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})${_disp_name ? ' — ' + _disp_name : ''}`,
 
-                    // Dispatcher attribution (body only — no recipient override)
+                    // _cc adds the dispatcher as a CC on the Formspree notification.
+                    // The form's primary recipient (nwilliams@terraboost.biz) still gets
+                    // the email; the dispatcher who sent the route ALSO gets a copy in
+                    // their own inbox. Works on all Formspree tiers — no Routing Rules
+                    // or Conditional Logic required. _cc accepts a single address or a
+                    // comma-separated list. Falls back to empty (no CC added) if the
+                    // route was saved before DCC started writing dispatcherEmail.
+                    _cc: (window.payloadData && window.payloadData.dispatcherEmail) ? _disp_email : "",
+
+                    // Reply-to also points at the dispatcher so a reply from Nick's
+                    // inbox routes to the dispatcher instead of the IC.
+                    _replyto: _disp_email,
+
+                    // Dispatcher attribution in body + subject
                     "Dispatcher": _disp_name || _disp_email,
                     "Dispatcher Email": _disp_email,
 

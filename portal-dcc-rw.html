@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Work Order Dispatch | Terraboost Media</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCDYgNIGcfWPxoux2EILXr60ZK0fZYJPR4&libraries=geometry,drawing"></script>
     <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
         body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; color: #0f172a; }
@@ -187,34 +186,13 @@
                 const result = await response.json();
                 console.log("GAS Response:", JSON.stringify(result));
 
-               // Dispatcher who originally generated this route's link.
-               const _disp_email = (window.payloadData && window.payloadData.dispatcherEmail) ? window.payloadData.dispatcherEmail : PRIMARY_FORMSPREE_EMAIL;
-               const _disp_name  = (window.payloadData && window.payloadData.dispatcherName)  ? window.payloadData.dispatcherName  : "";
-
-               // Submit to Formspree. Capture the response so silent failures surface.
-               const _fsResp = await fetch(formspreeUrl, {
+               await fetch(formspreeUrl, {
                     method: 'POST',
                     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                    _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})${_disp_name ? ' — ' + _disp_name : ''}`,
-
-                    // _cc adds the dispatcher as a CC on the Formspree notification.
-                    // The form's primary recipient (nwilliams@terraboost.biz) still gets
-                    // the email; the dispatcher who sent the route ALSO gets a copy in
-                    // their own inbox. Works on all Formspree tiers — no Routing Rules
-                    // or Conditional Logic required. _cc accepts a single address or a
-                    // comma-separated list. Falls back to empty (no CC added) if the
-                    // route was saved before DCC started writing dispatcherEmail.
-                    _cc: (window.payloadData && window.payloadData.dispatcherEmail) ? _disp_email : "",
-
-                    // Reply-to also points at the dispatcher so a reply from Nick's
-                    // inbox routes to the dispatcher instead of the IC.
-                    _replyto: _disp_email,
-
-                    // Dispatcher attribution in body + subject
-                    "Dispatcher": _disp_name || _disp_email,
-                    "Dispatcher Email": _disp_email,
-
+                    // Subject line for your inbox
+                    _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})`,
+        
                     // Response Data
                     "Decision": decision,
                     "Contractor": window.payloadData.icn,
@@ -241,15 +219,6 @@
                     "Onfleet Route Msg": result.routeMsg || "N/A"
                 })
             });
-            // Surface any Formspree-side rejection so we don't silently lose emails.
-            if (!_fsResp.ok) {
-                let _bodyTxt = "";
-                try { _bodyTxt = await _fsResp.text(); } catch (e) {}
-                console.error("Formspree submission failed", _fsResp.status, _bodyTxt);
-                alert("Confirmation email failed to send (status " + _fsResp.status + "). Your decision was still recorded. Please notify the dispatcher directly.");
-            } else {
-                console.log("Formspree submission OK");
-            }
 
                 // Hide the form UI
                 document.getElementById('icMode').classList.add('hidden');

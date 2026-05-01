@@ -345,17 +345,36 @@ def render_packing_slip_button(
         + f'<button id="{btn_id}" class="ps-btn" type="button">{label_html}</button>'
         + '</div>'
         # jsPDF — pinned. ~250KB, browser-cached after first load.
-        + '<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>'
+        + ''  # jsPDF loaded lazily on first button click — see _loadJsPdf below
         + '<script>(function(){\n'
         + f'const ROWS = {rows_json};\n'
         + f'const WO_NAME = {wo_name_json};\n'
         + f'const POD_NAME = {pod_name_json};\n'
         + f'const BTN_ID = {btn_id_json};\n'
+        + r"""
+  // Lazy-load jsPDF on first click. Each iframe maintains its own promise;
+  // the browser caches the CDN script after the first iframe fetches it,
+  // so subsequent loads in the same page are near-instant.
+  let _jspdfPromise = null;
+  function _loadJsPdf() {
+    if (_jspdfPromise) return _jspdfPromise;
+    _jspdfPromise = new Promise((resolve, reject) => {
+      if (window.jspdf && window.jspdf.jsPDF) { resolve(); return; }
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('jsPDF failed to load'));
+      document.head.appendChild(s);
+    });
+    return _jspdfPromise;
+  }
+"""
         + _JS_HELPERS
         + _packing_js()
         + r"""
   // Click → build doc → save
-  function _onClick(ev) {
+  async function _onClick(ev) {
+    try { await _loadJsPdf(); } catch (e) { console.error(e); alert('Packing slip generator failed to load. Try again.'); return; }
     ev.preventDefault();
     const btn = document.getElementById(BTN_ID);
     if (!btn) return;

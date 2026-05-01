@@ -1730,6 +1730,28 @@ from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_
 from packing_slip import render_packing_slip_button
 
 
+def lazy_packing_slip(cluster_or_ghost, pod_name, route_key):
+    """Render a small "📄 Packing Slip" button. The heavy iframe (jsPDF +
+    rendered slip) only mounts on click and stays mounted only while the
+    flag is True. This keeps the parent page from carrying 50+ iframes
+    just because the route is Accepted — each iframe is its own browser
+    JS context and the cumulative scroll/render cost was unusable.
+
+    Click toggles the flag in session_state. Toggling it back hides the
+    iframe again so the page weight returns to ~zero.
+    """
+    flag_key = f"_show_ps_{route_key}"
+    is_open = st.session_state.get(flag_key, False)
+    btn_label = "📄 Hide Packing Slip" if is_open else "📄 Packing Slip"
+    if st.button(btn_label, key=f"_ps_btn_{route_key}", use_container_width=True):
+        st.session_state[flag_key] = not is_open
+        st.rerun()
+    if is_open:
+        render_packing_slip_button(cluster_or_ghost, pod_name, key=route_key)
+
+
+
+
 def _ghost_to_packing_cluster(g):
     """Build a packing-slip-ready cluster dict from a ghost (sheet-only) route.
 
@@ -5643,7 +5665,7 @@ def run_pod_tab(pod_name):
                             # 3 summary cards + LOCALS + Route Details). Mirrors the same
                             # button on the index_45.html portal so dispatch + warehouse use
                             # the same artifact. Renders client-side via jsPDF in an iframe.
-                            render_packing_slip_button(c, pod_name, key=cluster_hash)
+                            lazy_packing_slip(c, pod_name, cluster_hash)
                             render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -5674,7 +5696,7 @@ def run_pod_tab(pod_name):
                             # 🖨️ Packing slip — ghost accepted routes use synthesized
                             # cluster data (sheet stop_data → fan-out task rows). Same
                             # button as live accepted; warehouse gets the same artifact.
-                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_acc_{ghost_hash}")
+                            lazy_packing_slip(_ghost_to_packing_cluster(g), pod_name, f"ghost_acc_{ghost_hash}")
                             render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)

@@ -905,6 +905,8 @@ label, div[data-testid="stWidgetLabel"] p {{ color: #000000 !important; font-wei
 iframe[title="streamlit_folium.st_folium"] {{
     border-radius: 15px !important;
     box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important;
+    max-height: 420px !important;
+    height: 400px !important;
 }}
 .stFolium {{ background: transparent !important; }}
 

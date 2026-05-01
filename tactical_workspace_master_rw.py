@@ -1392,9 +1392,9 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
-@st.fragment(run_every=10)
+@st.fragment(run_every=3)
 def auto_sync_checker(pod_name):
-    """Polls every 10s. Refreshes the sheet cache and triggers a rerun whenever
+    """Polls every 3s — but uses a sync-version short-circuit to skip the heavy sheet fetch when nothing actually changed (see fetch_sync_version above). Refreshes the sheet cache and triggers a rerun whenever
     any sheet content changed — not just Accepted/Declined status flips. Previously
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
     until a user interaction (zooming the map, clicking somewhere, etc.) forced
@@ -1412,9 +1412,27 @@ def auto_sync_checker(pod_name):
         return
 
     try:
-        # Force-refresh the cached sheet pull. The cached function has a 10s TTL but
-        # only re-runs when something actively calls it — and nothing else does between
-        # user interactions. By clearing here we guarantee the next call is fresh.
+        # 🚀 Fast path: ask GAS for the current sync_version (a single integer
+        # bumped on every mutation). If it hasn't changed since last poll, we
+        # know nothing changed sheet-wide — skip the entire heavy fetch.
+        # This drops the per-poll cost from "fetch entire sheet" to "fetch
+        # ~5 bytes". With run_every=3s × 5 dispatchers, that's a meaningful
+        # reduction in GAS load.
+        cur_ver = fetch_sync_version()
+        last_ver_key = '_sync_version_last'
+        last_ver = st.session_state.get(last_ver_key, None)
+        if cur_ver != -1 and last_ver is not None and cur_ver == last_ver:
+            # No mutations since last poll — nothing to do.
+            return
+        # Either first poll, version actually changed, or version endpoint
+        # not deployed (-1 falls through to the existing fingerprint check
+        # so this code keeps working before/after the GAS patch ships).
+        if cur_ver != -1:
+            st.session_state[last_ver_key] = cur_ver
+
+        # Force-refresh the cached sheet pull (TTL is now 60s — version check
+        # is what makes us refresh on real changes). Clearing guarantees
+        # fresh data for the cluster bucketer in run_pod_tab.
         fetch_sent_records_from_sheet.clear()
         fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
         st.session_state['_history_db'] = _history_db
@@ -1769,7 +1787,27 @@ def extract_art_file(notes: str) -> str:
     return " • ".join(keep)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+def fetch_sync_version() -> int:
+    """Cheap GAS poll — returns just the sync_version integer (~5 bytes).
+    DCC bumps this on every successful mutation server-side. Compare the
+    returned value to st.session_state['_sync_version_last']; only do the
+    heavy fetch_sent_records_from_sheet() call when the number changes.
+
+    Errors and missing endpoint both return -1 — auto_sync_checker treats
+    -1 as 'unknown, fall back to fingerprint diff' so we degrade gracefully
+    if the GAS sync_version patch isn't deployed yet.
+    """
+    try:
+        r = requests.get(GAS_WEB_APP_URL, params={"action": "getSyncVersion"}, timeout=5)
+        if r.status_code != 200:
+            return -1
+        j = r.json()
+        return int(j.get("version", 0) or 0)
+    except Exception:
+        return -1
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_sent_records_from_sheet():
     """
     Returns: (sent_dict, ghost_routes, archived_wos)
@@ -4568,7 +4606,7 @@ def run_pod_tab(pod_name):
 
 
 
-    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 10s
+    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 3s
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())

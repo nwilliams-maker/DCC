@@ -58,16 +58,24 @@ import streamlit.components.v1 as components
 _DATE_PAREN_RE  = re.compile(r"\s*\(\s*\d{1,2}/\d{1,2}/\d{2,4}(?:\s*-\s*\d{1,2}/\d{1,2}/\d{2,4})?\s*\)")
 _DATE_RANGE_RE  = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}")
 _SINGLE_DATE_RE = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}")
+# Per dispatcher spec: strip the literal phrase "National Campaign" from
+# campaign strings — it's redundant since the National Summary card and the
+# trailing " - National" customer type already convey the same information.
+# Match is case-insensitive; surrounding whitespace and dashes are tidied up
+# in the cleanup pass below.
+_NATIONAL_CAMP_RE = re.compile(r"\bnational\s+campaign\b", re.IGNORECASE)
 
 
 def _strip_campaign_dates(s: str) -> str:
-    """Remove date ranges / single dates from a campaign string and tidy up
-    any leftover whitespace + orphan dashes."""
+    """Remove date ranges / single dates / 'National Campaign' boilerplate
+    from a campaign string and tidy up any leftover whitespace + orphan
+    dashes."""
     if not s:
         return s
     out = _DATE_PAREN_RE.sub(" ", str(s))
     out = _DATE_RANGE_RE.sub(" ", out)
     out = _SINGLE_DATE_RE.sub(" ", out)
+    out = _NATIONAL_CAMP_RE.sub(" ", out)
     # Collapse runs of whitespace
     out = re.sub(r"\s+", " ", out)
     # Collapse orphan double-dashes left behind ("Campaign  - National" → already fine,
@@ -237,7 +245,12 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "venue": t.get("venue_name", "") or "",
             "address": t.get("full", "") or "",
             "stateCode": (t.get("state", "") or "").strip().upper(),
-            "kiosk": t.get("venue_id", "") or "",
+            # Kiosk ID column is sourced from the OnFleet "kioskId" custom
+            # field — distinct from the "venueId" custom field that the FN
+            # mass-upload generator uses. Falls back to venue_id ONLY when a
+            # task pre-dates the kioskId capture (data ingested before that
+            # field was added). New data should always populate kiosk_id.
+            "kiosk": t.get("kiosk_id", "") or t.get("venue_id", "") or "",
             "kioskLoc": t.get("location_in_venue", "") or "",
             # Kiosk type — Streamlit doesn't capture a kioskType custom field, so derive
             # from is_digital. Empty string ('Premium') is the default for non-digital,
@@ -1033,8 +1046,14 @@ _PACKING_JS_INLINE = r"""
           //    promote the campaign label to the primary line. If both are populated,
           //    client stays bold on top and campaign sits below in light grey.
           const artText = String(item.art || '—').toUpperCase();
-          const isStandard = artText === 'STANDARD';
-          const isBoosted = artText === 'BOOSTED';
+          // Per dispatcher spec: the pill is ALWAYS S or B in the National
+          // Summary card. Real-world OnFleet boost values come in many
+          // shapes — "Standard", "Premium_Standard", "Boosted",
+          // "Premium_Boosted", "BOOSTED AD", etc. — so we match leniently
+          // on substring rather than requiring an exact 'STANDARD' /
+          // 'BOOSTED' string. Default to Standard when ambiguous.
+          const isBoosted  = /BOOST/.test(artText);
+          const isStandard = !isBoosted;
           const clientText = (item.client || '').trim();
           // 'N/A' is the ingest fallback for missing customField values; treat it (and
           // 'NULL', em-dash, etc.) as no-client so we don't render a meaningless placeholder.
@@ -1050,11 +1069,6 @@ _PACKING_JS_INLINE = r"""
           if (isBoosted) {
             pillFill = [107, 43, 201];      // brand purple for Boosted
             pillLetter = 'B';
-          } else if (!isStandard) {
-            // Other art types (Digital, Local Plus, etc.) — use the card accent color and
-            // the first letter of the art name as the badge.
-            pillFill = card.accent;
-            pillLetter = artText[0] || '?';
           }
           doc.setFillColor(pillFill[0], pillFill[1], pillFill[2]);
           doc.roundedRect(x + PAD, cy + 1, PILL_W, PILL_H, 2, 2, 'F');

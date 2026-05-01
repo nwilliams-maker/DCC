@@ -250,10 +250,14 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "clientCompany": client_company,
             "customerType": _derive_customer_type(client_company, task_type),
             "isInstall": _is_install(task_type),
-            # Fields not captured during ingest — leave blank, JS handles fallbacks
+            # ArtFile — extracted by the Streamlit app from each task's OnFleet
+            # notes/Task Details (free-text). Surfaces dimmed under the campaign
+            # name in the clientCol cell of Route Details + as the Allocated Art
+            # column value in Locals.
+            "artFile": str(t.get("art_file", "") or ""),
+            # Other fields not captured during ingest — leave blank, JS handles fallbacks
             "sio": "",
             "notes": "",
-            "artFile": "",
             "nationalCampName": "",
         })
     return rows
@@ -863,9 +867,9 @@ _PACKING_JS_INLINE = r"""
     // Estimate the height Route Details needs:
     //   ~32pt for section title + subtitle
     //   +22pt for the column header row
-    //   +22pt per data row
+    //   +22pt (or 30pt if any row has an artFile sub-line) per data row
     //   +6pt safety margin for the bottom separator line
-    const ROW_H_EST = 22;
+    const ROW_H_EST = sortedRows.some(r => r && r.artFile && String(r.artFile).trim()) ? 30 : 22;
     const routeDetailsH = 32 + 22 + sortedRows.length * ROW_H_EST + 6;
     // Gap + divider rule that goes between Locals and Route Details when same-page.
     const SAME_PAGE_GAP = 32;
@@ -1132,9 +1136,9 @@ _PACKING_JS_INLINE = r"""
       const allCols = [
         { key: 'stop',      label: '#',                 w: 28 },
         { key: 'kiosk',     label: 'Kiosk ID',          w: 50 },
-        { key: 'venue',     label: 'Venue',             w: 80 },
         { key: 'kioskLoc',  label: 'Location in Venue', w: 95 },
         { key: 'type',      label: 'Task Type',         w: 70 },
+        { key: 'venue',     label: 'Venue',             w: 80 },
         { key: 'clientCol', label: 'Client / Campaign', w: 205 },
         { key: 'address',   label: 'Venue Location',    w: 180 },
         { key: 'state',     label: 'St',                w: 32 },
@@ -1188,7 +1192,13 @@ _PACKING_JS_INLINE = r"""
       cols.forEach(c => c.w *= scale);
 
       const HEAD_H = 22;
-      const ROW_H = 22;
+      // ROW_H grows when this table renders an Allocated Art sub-line beneath
+      // the campaign in the Client/Campaign cell. Tables that don't have a
+      // clientCol column (or where no row has artFile) keep the compact 22pt.
+      // The taller 30pt buys ~9pt for the dim sub-line below the campaign.
+      const _hasClientCol = cols.some(c => c.key === 'clientCol');
+      const _anyArtFileInClientCol = _hasClientCol && rows.some(r => (r && r.artFile && String(r.artFile).trim()));
+      const ROW_H = _anyArtFileInClientCol ? 30 : 22;
       // Title (12pt) + column header (22pt) + at least one data row (22pt) = 56pt minimum.
       // If we don't have that much room, push the entire table to the next page rather than
       // stranding an orphan title+header on the bottom of the previous page.
@@ -1302,10 +1312,13 @@ _PACKING_JS_INLINE = r"""
       // each kiosk on its own line — like a dropdown — instead of a single comma-joined
       // line. SUB_ROW_H is the per-kiosk height; SUB_HEAD_H is the small column header
       // row drawn above the kiosks; SUB_PAD is breathing room above/below.
-      const SUB_ROW_H = 8;
+      // Per dispatcher spec: sub-row text should be 1pt smaller than the master
+      // row text (master = 8.5pt → sub = 7.5pt). SUB_ROW_H bumps to 9 so the
+      // slightly larger text still has a touch of vertical breathing room.
+      const SUB_ROW_H = 9;
       const SUB_HEAD_H = 9;
       const SUB_PAD = 3;
-      const SUB_FONT = 7;
+      const SUB_FONT = 7.5;
 
       let zebra = false;
       for (const item of renderItems) {
@@ -1419,6 +1432,12 @@ _PACKING_JS_INLINE = r"""
           let v = '';
           let valFont = 'normal';
           let valColor = [40, 40, 40];
+          // Optional sub-line rendered BELOW the main cell content. Currently
+          // used by the Client/Campaign cell to surface the Allocated Art file
+          // name in a slightly darker dim — readable but visually subordinate
+          // to the campaign text above it. Empty string = no sub-line.
+          let subText = '';
+          let subColor = [110, 110, 110];
 
           switch (c.key) {
             case 'stop':
@@ -1453,7 +1472,9 @@ _PACKING_JS_INLINE = r"""
                 continue;  // skip the text-rendering tail at the end of the loop
               }
               v = r.kiosk || '';
-              valFont = 'bold';
+              // Render in normal weight per dispatcher spec — bold was making
+              // the column stand out too aggressively and competing with the
+              // bold #/SIO columns for attention.
               break;
             case 'venue':
               v = r.venue || '';
@@ -1578,6 +1599,13 @@ _PACKING_JS_INLINE = r"""
               ].filter(Boolean);
               v = parts.length ? parts.join(' - ') : '—';
               if (!parts.length) valColor = [180, 180, 180];
+              // Allocated Art surfaces under the campaign as a dimmed sub-line.
+              // Slightly darker (110,110,110) than the standard dim (140,140,140)
+              // so warehouse can still scan the filename quickly without it
+              // competing with the main campaign text above. Drawn AFTER the
+              // main cell text via the post-loop render block below.
+              const _af = (r.artFile || '').trim();
+              if (_af) subText = _af;
               break;
             }
             case 'artFile': {
@@ -1629,11 +1657,34 @@ _PACKING_JS_INLINE = r"""
           doc.setTextColor(valColor[0], valColor[1], valColor[2]);
           // The state column is always a 2-letter abbreviation (CA, NY, MA, ...) — never
           // wrap it across two lines. Other columns wrap up to 2 lines when content is long.
+          let _mainLineCount = 1;
           if (c.key === 'state') {
             doc.text(String(v), cx + 5, cy + 13);
           } else {
             const lines = doc.splitTextToSize(String(v), c.w - 8);
-            doc.text(lines.slice(0, 2), cx + 5, cy + (lines.length > 1 ? 9 : 13));
+            // When a subText (Allocated Art) is in play and ROW_H expanded to
+            // 30pt, force the main content to a single line so the sub-line
+            // has a clean place to sit underneath. Without subText we keep the
+            // prior 2-line wrapping budget.
+            const maxMainLines = (subText && ROW_H >= 30) ? 1 : 2;
+            const displayed = lines.slice(0, maxMainLines);
+            _mainLineCount = displayed.length;
+            doc.text(displayed, cx + 5, cy + (_mainLineCount > 1 ? 9 : 13));
+          }
+          // Optional dimmed sub-line — used by clientCol to render the
+          // Allocated Art filename below the campaign text. Slightly darker
+          // than standard dim (110 vs 140) so it stays scannable on a printed
+          // slip without overpowering the primary line above it.
+          if (subText) {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(7);
+            doc.setTextColor(subColor[0], subColor[1], subColor[2]);
+            const subLines = doc.splitTextToSize(String(subText), c.w - 8);
+            // Place the sub-line at the bottom of the row, leaving a tiny
+            // breath of whitespace between it and the bottom border.
+            doc.text(subLines.slice(0, 1), cx + 5, cy + ROW_H - 4);
+            // Restore the row loop's default 8.5pt font for subsequent cells.
+            doc.setFontSize(8.5);
           }
           cx += c.w;
         }

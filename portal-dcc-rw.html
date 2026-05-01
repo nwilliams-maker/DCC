@@ -188,21 +188,19 @@
                 console.log("GAS Response:", JSON.stringify(result));
 
                // Dispatcher who originally generated this route's link.
-               // Pulled from the saveRoute payload (DCC writes it at link-generation time)
-               // so the email body identifies who sent the route.
-               // No _to / _replyto override — those proved to break delivery on this
-               // Formspree plan. Keep the recipient as the form's default notification
-               // address; dispatcher attribution lives in the body.
                const _disp_email = (window.payloadData && window.payloadData.dispatcherEmail) ? window.payloadData.dispatcherEmail : PRIMARY_FORMSPREE_EMAIL;
                const _disp_name  = (window.payloadData && window.payloadData.dispatcherName)  ? window.payloadData.dispatcherName  : "";
-               await fetch(formspreeUrl, {
+
+               // Submit to Formspree. Capture the response so a silent failure
+               // (Formspree rejecting the submission for any reason) becomes visible
+               // instead of disappearing behind the success view.
+               const _fsResp = await fetch(formspreeUrl, {
                     method: 'POST',
                     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                    // Subject line — now includes dispatcher so Nick can see at a glance.
                     _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})${_disp_name ? ' — ' + _disp_name : ''}`,
 
-                    // Dispatcher attribution (in body — no recipient override)
+                    // Dispatcher attribution (body only — no recipient override)
                     "Dispatcher": _disp_name || _disp_email,
                     "Dispatcher Email": _disp_email,
 
@@ -232,6 +230,15 @@
                     "Onfleet Route Msg": result.routeMsg || "N/A"
                 })
             });
+            // Surface any Formspree-side rejection so we don't silently lose emails.
+            if (!_fsResp.ok) {
+                let _bodyTxt = "";
+                try { _bodyTxt = await _fsResp.text(); } catch (e) {}
+                console.error("Formspree submission failed", _fsResp.status, _bodyTxt);
+                alert("Confirmation email failed to send (status " + _fsResp.status + "). Your decision was still recorded. Please notify the dispatcher directly.");
+            } else {
+                console.log("Formspree submission OK");
+            }
 
                 // Hide the form UI
                 document.getElementById('icMode').classList.add('hidden');

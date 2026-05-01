@@ -1392,9 +1392,9 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
-@st.fragment(run_every=3)
+@st.fragment(run_every=60)
 def auto_sync_checker(pod_name):
-    """Polls every 3s. Uses GAS push-style change events to patch sent_db in-memory — no sheet fetch when accept/decline/archive happens. Falls back to full fetch only when the change buffer is empty or stale. Refreshes the sheet cache and triggers a rerun whenever
+    """Polls every 60s. Sync_version short-circuit means the heavy sheet fetch only runs when something ACTUALLY changed — between events, polls are tiny version probes. Uses GAS push-style change events to patch sent_db in-memory — no sheet fetch when accept/decline/archive happens. Falls back to full fetch only when the change buffer is empty or stale. Refreshes the sheet cache and triggers a rerun whenever
     any sheet content changed — not just Accepted/Declined status flips. Previously
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
     until a user interaction (zooming the map, clicking somewhere, etc.) forced
@@ -1898,7 +1898,7 @@ def fetch_sync_status(since: int = 0):
         return (-1, [])
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_sent_records_from_sheet():
     """
     Returns: (sent_dict, ghost_routes, archived_wos)
@@ -4697,7 +4697,7 @@ def run_pod_tab(pod_name):
 
 
 
-    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 3s
+    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 60s
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -5886,15 +5886,22 @@ if 'dispatcher_email' not in st.session_state:
         except Exception: pass
     else:
         # No URL param — ask the browser if it has a saved email.
+        # Idempotency guard: set a flag on the PARENT window so the redirect
+        # only fires once per page load. Without this, Python's st.query_params
+        # cleanup race-loops against the JS re-injecting on every rerun.
         _components.html(
             """
             <script>
                 try {
-                    var e = localStorage.getItem('dcc_dispatcher_email');
-                    var here = window.parent.location;
-                    if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
-                        var sep = here.search ? '&' : '?';
-                        here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
+                    var topwin = window.parent;
+                    if (!topwin._dcc_email_restore_attempted) {
+                        topwin._dcc_email_restore_attempted = true;
+                        var e = localStorage.getItem('dcc_dispatcher_email');
+                        var here = topwin.location;
+                        if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
+                            var sep = here.search ? '&' : '?';
+                            here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
+                        }
                     }
                 } catch (err) {}
             </script>

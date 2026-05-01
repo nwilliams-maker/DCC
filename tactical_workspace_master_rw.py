@@ -5552,7 +5552,11 @@ def run_pod_tab(pod_name):
                             # 🖨️ Temporary — packing slip button on Sent routes for testing
                             # before any routes have been accepted. Same call as in Accepted;
                             # safe to leave here permanently or remove once Accepted has data.
-                            # DISABLED (packing-list rollback): render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
+                            # 🖨️ Admin-only: packing slip on Sent routes (temporary, for warehouse
+                            # pre-staging before the IC accepts). Hidden from Dispatchers and
+                            # Associates so it doesn't clutter their queue.
+                            if _user_tier() == 'admin':
+                                render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -6831,7 +6835,10 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
                                 # 🖨️ Temporary — packing slip button on Sent routes for testing.
                                 # Mirrors the per-pod tab placement; pod name inferred from cluster.
-                                # DISABLED (packing-list rollback): render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
+                                # 🖨️ Admin-only: same as per-pod Sent. Global Overview is admin/manager
+                                # only anyway, but we keep the strict admin check to match the per-pod gate.
+                                if _user_tier() == 'admin':
+                                    render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):

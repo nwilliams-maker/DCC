@@ -218,7 +218,12 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
         # The cleaned string is used for BOTH the displayed campaign and the
         # National/Local customer-type detection (the keyword "National" is
         # preserved by the strip).
-        client_company = _strip_campaign_dates(str(t.get("client_company", "") or ""))
+        # Detect National vs Local on the RAW campaign string BEFORE stripping —
+        # otherwise campaigns like "Acme - National Campaign" become "Acme" after
+        # the "National Campaign" cleanup, lose the only "national" token, and
+        # get miscounted as Local. The cleaned string is still used for display.
+        raw_client_company = str(t.get("client_company", "") or "")
+        client_company = _strip_campaign_dates(raw_client_company)
         is_digital = bool(t.get("is_digital", False))
 
         # Campaign-driven Default override: when task_type is "New Ad" but the
@@ -261,7 +266,8 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "boost": t.get("boosted_standard", "") or "",
             "campaign": client_company,
             "clientCompany": client_company,
-            "customerType": _derive_customer_type(client_company, task_type),
+            # Use raw (pre-strip) campaign string for National/Local detection.
+            "customerType": _derive_customer_type(raw_client_company or client_company, task_type),
             "isInstall": _is_install(task_type),
             # ArtFile — extracted by the Streamlit app from each task's OnFleet
             # notes/Task Details (free-text). Surfaces dimmed under the campaign
@@ -339,36 +345,17 @@ def render_packing_slip_button(
         + f'<button id="{btn_id}" class="ps-btn" type="button">{label_html}</button>'
         + '</div>'
         # jsPDF — pinned. ~250KB, browser-cached after first load.
-        + ''  # jsPDF is loaded lazily on first click — see _loadJsPdf below
+        + '<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>'
         + '<script>(function(){\n'
         + f'const ROWS = {rows_json};\n'
         + f'const WO_NAME = {wo_name_json};\n'
         + f'const POD_NAME = {pod_name_json};\n'
         + f'const BTN_ID = {btn_id_json};\n'
-        + r"""
-  // Lazy-load jsPDF on first click. Per-iframe load (each route card is its
-  // own iframe), but the browser caches the CDN response after the first
-  // iframe fetches it, so subsequent loads in the same page are fast.
-  let _jspdfPromise = null;
-  function _loadJsPdf() {
-    if (_jspdfPromise) return _jspdfPromise;
-    _jspdfPromise = new Promise((resolve, reject) => {
-      if (window.jspdf && window.jspdf.jsPDF) { resolve(); return; }
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error('jsPDF failed to load'));
-      document.head.appendChild(s);
-    });
-    return _jspdfPromise;
-  }
-"""
         + _JS_HELPERS
         + _packing_js()
         + r"""
   // Click → build doc → save
-  async function _onClick(ev) {
-    try { await _loadJsPdf(); } catch (e) { console.error(e); alert('Packing slip generator failed to load. Try again in a moment.'); return; }
+  function _onClick(ev) {
     ev.preventDefault();
     const btn = document.getElementById(BTN_ID);
     if (!btn) return;
@@ -1337,13 +1324,13 @@ _PACKING_JS_INLINE = r"""
       // each kiosk on its own line — like a dropdown — instead of a single comma-joined
       // line. SUB_ROW_H is the per-kiosk height; SUB_HEAD_H is the small column header
       // row drawn above the kiosks; SUB_PAD is breathing room above/below.
-      // Per dispatcher spec: sub-row text should be 1pt smaller than the master
-      // row text (master = 8.5pt → sub = 7.5pt). SUB_ROW_H bumps to 9 so the
-      // slightly larger text still has a touch of vertical breathing room.
+      // Per dispatcher spec: sub-row text should be exactly 0.5pt smaller than
+      // the master row text (master = 8.5pt → sub = 8.0pt). SUB_ROW_H bumps to
+      // 9 so the slightly larger text still has a touch of vertical breathing room.
       const SUB_ROW_H = 9;
       const SUB_HEAD_H = 9;
       const SUB_PAD = 3;
-      const SUB_FONT = 7.5;
+      const SUB_FONT = 8.0;
 
       let zebra = false;
       for (const item of renderItems) {

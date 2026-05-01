@@ -1666,6 +1666,27 @@ def normalize_state(st_str):
     clean = str(st_str).strip().upper()
     return STATE_MAP.get(clean, clean)
 
+
+# 🎨 Art-file extraction from OnFleet task notes.
+# The "ArtFile" string sits inside the free-form Task Details / notes box on
+# each OnFleet task — typically a token like "Dexcom_Premium_2026Q2_v3.pdf"
+# embedded among normal driver-instruction prose. The Streamlit app surfaces
+# this on the packing slip (dimmed sub-line on the National Summary card +
+# ALLOCATED ART column on the Locals table).
+#
+# Heuristic ported from the existing portal's extractArtFile() in
+# index_45.html — keeps lines that contain an underscore and do NOT end in
+# sentence punctuation (.!?), then joins distinct values with " • ".
+# That filter rules out prose like "Notify the manager." and keeps tokens
+# like "Firkus_Plumbing_Q2_2026.pdf" that look like art file names.
+def extract_art_file(notes: str) -> str:
+    if not notes:
+        return ""
+    lines = [l.strip() for l in str(notes).splitlines() if l.strip()]
+    keep = [l for l in lines if "_" in l and not re.search(r"[.!?]\s*$", l)]
+    return " • ".join(keep)
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_sent_records_from_sheet():
     """
@@ -2111,6 +2132,9 @@ def process_digital_pool(master_bar=None):
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
+        # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+        # (free-text). See extract_art_file() up top for the heuristic.
+        art_file = extract_art_file(t.get('notes', ''))
         
         # Default UI display to native details unless a custom field overwrites it
         tt_val = native_details 
@@ -2186,6 +2210,7 @@ def process_digital_pool(master_bar=None):
             "venue_id": venue_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
+            "art_file": art_file,
         })
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
@@ -2421,6 +2446,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
+            # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+            # (free-text). See extract_art_file() up top for the heuristic.
+            art_file = extract_art_file(t.get('notes', ''))
             
             for f in custom_fields:
                 f_name = str(f.get('name', '')).strip().lower()
@@ -2508,6 +2536,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "venue_id": venue_id,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
+                    "art_file": art_file,
                 })
                 
         clusters = []
@@ -4083,6 +4112,9 @@ def smart_sync_pod(pod_name):
         custom_boosted = ""
         tt_val = native_details
         venue_name = ""; venue_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
+        # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+        # (free-text). See extract_art_file() up top for the heuristic.
+        art_file = extract_art_file(t.get('notes', ''))
 
         for f in custom_fields:
             f_name = str(f.get('name', '')).strip().lower()
@@ -4151,6 +4183,7 @@ def smart_sync_pod(pod_name):
             "venue_id": venue_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
+            "art_file": art_file,
             "is_new": True,  # 🌟 Flag for UI badge
         })
 

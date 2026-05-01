@@ -188,25 +188,21 @@
                 console.log("GAS Response:", JSON.stringify(result));
 
                // Dispatcher who originally generated this route's link.
-               // Saved into the route payload at link-generation time and read back via getRoute,
-               // so confirmation emails can be routed back to whoever sent the email — not always Nick.
+               // Pulled from the saveRoute payload (DCC writes it at link-generation time)
+               // so the email body identifies who sent the route.
+               // No _to / _replyto override — those proved to break delivery on this
+               // Formspree plan. Keep the recipient as the form's default notification
+               // address; dispatcher attribution lives in the body.
                const _disp_email = (window.payloadData && window.payloadData.dispatcherEmail) ? window.payloadData.dispatcherEmail : PRIMARY_FORMSPREE_EMAIL;
                const _disp_name  = (window.payloadData && window.payloadData.dispatcherName)  ? window.payloadData.dispatcherName  : "";
                await fetch(formspreeUrl, {
                     method: 'POST',
                     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                    // Subject line for your inbox
-                    _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})`,
-                    // Route confirmation email is routed TO the dispatcher who sent the route.
-                    // Nick is on Formspree Pro, which honors _to as a per-submission recipient
-                    // override (dynamic recipient routing). _replyto stays so hitting Reply
-                    // also goes back to the dispatcher.
-                    _to: _disp_email,
-                    _replyto: _disp_email,
-                    "email": _disp_email,
+                    // Subject line — now includes dispatcher so Nick can see at a glance.
+                    _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})${_disp_name ? ' — ' + _disp_name : ''}`,
 
-                    // Dispatcher attribution
+                    // Dispatcher attribution (in body — no recipient override)
                     "Dispatcher": _disp_name || _disp_email,
                     "Dispatcher Email": _disp_email,
 

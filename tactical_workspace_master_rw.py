@@ -5734,75 +5734,49 @@ _de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
 _de_pill_label = _de_saved if _de_saved else "Set email"
 _de_pill_color = "#0f172a" if _de_saved else "#dc2626"
 
-# Hidden Streamlit button whose click sets a session_state flag and triggers
-# a normal Streamlit rerun. The visible ✉️ pill in the header is just an <a>
-# wired up via JavaScript to programmatically click this hidden button — that
-# way no full page reload happens, so st.session_state (including _auth_user)
-# survives. Without this pattern the <a href="?email_settings=1"> approach
-# bounced users who hadn't enabled "Stay signed in" back to the login form.
-_email_pill_btn_label = "__email_pill_open__"
-if st.button(_email_pill_btn_label, key="_email_pill_hidden_btn"):
-    st.session_state['_show_email_settings'] = True
-    st.rerun()
-
+# Header markdown — pinned info + Sign out. Email pill is rendered as a real
+# Streamlit button below (NOT inside this markdown) so its click triggers a
+# normal Streamlit rerun without a page reload. Earlier JS-bridge approach
+# was leaking setInterval timers on every rerun — broke the app post-init.
 st.markdown(
     f"""
-    <style>
-      /* Hide the bridge button — only its DOM presence matters. */
-      div[data-testid="stButton"] > button:has(div[data-testid="stMarkdownContainer"] p:only-child) {{ }}
-      div[data-testid="stButton"] button[kind="secondary"] p {{ }}
-      /* Match the bridge button by exact text and hide it. */
-      div[data-testid="stButton"] button[kind="secondary"]:has(div p) {{
-          /* fallback — actual hide selector below uses :has(text) via JS */
-      }}
-    </style>
-    <script>
-      (function(){{
-        // Hide the bridge button + wire the visible ✉️ link to click it.
-        const tag = "{_email_pill_btn_label}";
-        function findBridge(){{
-          const btns = window.parent.document.querySelectorAll('div[data-testid="stButton"] button');
-          for (const b of btns) {{ if (b.innerText.trim() === tag) return b; }}
-          return null;
-        }}
-        function hideBridge(){{
-          const b = findBridge(); if (!b) return false;
-          const wrap = b.closest('div[data-testid="stButton"]');
-          if (wrap) wrap.style.display = 'none';
-          return true;
-        }}
-        function wireLink(){{
-          const a = window.parent.document.getElementById('dcc_email_pill_link');
-          if (!a || a._wired) return;
-          a.addEventListener('click', (ev)=>{{
-            ev.preventDefault();
-            const b = findBridge();
-            if (b) b.click();
-          }});
-          a._wired = true;
-        }}
-        // Streamlit rerenders frequently — re-attach on every animation frame
-        // until both elements exist, then keep watching.
-        function tick(){{ hideBridge(); wireLink(); }}
-        const iv = setInterval(tick, 200);
-        // Stop the interval after 60s — by then everything should be wired.
-        setTimeout(()=>clearInterval(iv), 60000);
-      }})();
-    </script>
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
         <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
-        <a id="dcc_email_pill_link" href="javascript:void(0)" style="display: inline-block; padding: 3px 10px; background: #ffffff;
-                border: 1px solid #cbd5e1; border-radius: 6px; color: {_de_pill_color}; text-decoration: none;
-                font-size: 11px; font-weight: 700; margin-right: 4px; cursor: pointer;" title="Email used for route confirmations">✉️ {_de_pill_label}</a>
         <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
                 border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
                 font-size: 11px; font-weight: 700;">Sign out</a>
     </div>
+    <style>
+      /* Pin the email-settings Streamlit button to the top-right, just under the
+         "Signed in as" block. Targets via st.container's data-testid + the
+         element-key (Streamlit exposes the key as a class on the wrapper). */
+      div.st-key-_email_pill_btn {{
+          position: fixed !important;
+          top: 60px !important;
+          right: 130px !important;
+          z-index: 999999 !important;
+          width: auto !important;
+      }}
+      div.st-key-_email_pill_btn button {{
+          padding: 3px 10px !important;
+          font-size: 11px !important;
+          font-weight: 700 !important;
+          color: {_de_pill_color} !important;
+          background: #ffffff !important;
+          border: 1px solid #cbd5e1 !important;
+          border-radius: 6px !important;
+          min-height: 0 !important;
+          line-height: 1.4 !important;
+      }}
+    </style>
     """,
     unsafe_allow_html=True,
 )
+if st.button(f"✉️ {_de_pill_label}", key="_email_pill_btn", help="Email used for route confirmations"):
+    st.session_state['_show_email_settings'] = True
+    st.rerun()
 
 # --- EMAIL SETTINGS DIALOG ---
 # Triggered by clicking the ✉️ pill in the header (which sets ?email_settings=1).

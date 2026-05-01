@@ -1670,6 +1670,12 @@ def _ghost_to_packing_cluster(g):
     for sd in (g.get('stop_data') or []):
         addr = sd.get('addr', '') or ''
         venue = sd.get('venue', '') or ''
+        # New (post-2026-05) saveRoute writes kioskId/venueId/locationInVenue per
+        # stop. Older sheet rows don't have these — they fall back to '' and
+        # show empty in the packing slip's Kiosk / Loc columns.
+        _kiosk_id = str(sd.get('kioskId', '') or '').strip()
+        _venue_id = str(sd.get('venueId', '') or '').strip()
+        _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
         # First non-empty campaign on this stop, if any — used for client_company.
         _camps = sd.get('campaigns') or []
         _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
@@ -1695,8 +1701,9 @@ def _ghost_to_packing_cluster(g):
                     'full': addr,
                     'state': _state,
                     'venue_name': venue,
-                    'venue_id': '',
-                    'location_in_venue': '',
+                    'venue_id': _venue_id,
+                    'kiosk_id': _kiosk_id,
+                    'location_in_venue': _loc_in_venue,
                     'task_type': label,
                     'client_company': _camp_name,
                     'is_digital': label == 'Service',
@@ -1711,8 +1718,9 @@ def _ghost_to_packing_cluster(g):
                 'full': addr,
                 'state': _state,
                 'venue_name': venue,
-                'venue_id': '',
-                'location_in_venue': '',
+                'venue_id': _venue_id,
+                'kiosk_id': _kiosk_id,
+                'location_in_venue': _loc_in_venue,
                 'task_type': '',
                 'client_company': _camp_name,
                 'is_digital': False,
@@ -3900,6 +3908,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "n_ad": metrics.get("n_ad", 0),
                         "c_ad": metrics.get("c_ad", 0),
                         "d_ad": metrics.get("d_ad", 0),
+                        # Per-stop OnFleet customField values — first non-empty value
+                        # wins when multiple tasks at the same address have differing
+                        # values (rare). These flow into the packing slip when the
+                        # route eventually becomes a ghost (sheet-only) row.
+                        "kioskId": next((str(t.get("kiosk_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("kiosk_id","")).strip()), ""),
+                        "venueId": next((str(t.get("venue_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("venue_id","")).strip()), ""),
+                        "locationInVenue": next((str(t.get("location_in_venue","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("location_in_venue","")).strip()), ""),
                         "campaigns": list({
                             (t.get("client_company",""), t.get("escalated",False), str(t.get("boosted_standard","")).lower()):
                             {"name": t.get("client_company",""), "esc": t.get("escalated",False), "bs": str(t.get("boosted_standard","")).lower()}

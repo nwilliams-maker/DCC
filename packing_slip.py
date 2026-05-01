@@ -599,44 +599,53 @@ _PACKING_JS_INLINE = r"""
       if (ncn && !/^(local|n\/a|null|—)$/i.test(ncn)) return ncn;
       return (r.campaign || '').trim() || '—';
     };
+    // Per dispatcher spec, distinct SIOs need their own row on the National Summary
+    // card — same campaign, different special-instruction orders get split into
+    // separate entries so warehouse can pick by SIO. SIO is therefore part of the
+    // grouping key. "Default" / "0" / "N/A" sentinels normalize to empty so all
+    // no-SIO tasks aggregate into a single sio-less row.
+    const nationalSioKey = r => {
+      const raw = String(r.sio || '').trim();
+      if (!raw || /^(default|0|n\/a|null|—|none)$/i.test(raw)) return '';
+      return raw;
+    };
     const nationalByArt = aggregateBy(
       nationalRows,
-      r => (r.boost || '—') + '||' + (r.clientCompany || '—') + '||' + nationalLabel(r) + '||' + (r.kioskType || ''),
+      r => (r.boost || '—') + '||' + (r.clientCompany || '—') + '||' + nationalLabel(r) + '||' + (r.kioskType || '') + '||' + nationalSioKey(r),
       r => ({
         art: r.boost || '—',
         client: r.clientCompany || '—',
         campaign: nationalLabel(r),
         kioskType: r.kioskType || '',
-        // Collect distinct allocated art file names across all tasks in this group. Same
-        // campaign + same hardware almost always shares one art file, but it's worth
-        // surfacing the rare case where production needs to pull two different files.
+        sio: nationalSioKey(r),  // single SIO per item now (or empty)
+        // Collect distinct allocated art file names across all tasks in this group.
+        // Even within a single campaign+SIO, different tasks can carry different
+        // art files in rare cases — surface them all.
         artFiles: new Set(),
-        // Collect distinct SIOs per group. Per dispatcher spec the National Summary
-        // card shows the SIO inline next to the campaign name (and the art file(s)
-        // below it in lighter grey).
-        sios: new Set(),
       })
     );
     // Populate the artFiles set for each grouped item by walking the source rows again.
     // (aggregateBy doesn't expose row-level access to the reducer; this second pass is
     // simple and the row count is small enough that performance doesn't matter here.)
     for (const r of nationalRows) {
-      const key = (r.boost || '—') + '||' + (r.clientCompany || '—') + '||' + nationalLabel(r) + '||' + (r.kioskType || '');
+      const key = (r.boost || '—') + '||' + (r.clientCompany || '—') + '||' + nationalLabel(r) + '||' + (r.kioskType || '') + '||' + nationalSioKey(r);
       const af = (r.artFile || '').trim();
-      const sio = (r.sio || '').trim();
-      const sioIsRealValue = sio && !/^(default|0|n\/a|null|—|none)$/i.test(sio);
+      if (!af) continue;
       const item = nationalByArt.find(it =>
-        ((it.art || '—') + '||' + (it.client || '—') + '||' + it.campaign + '||' + (it.kioskType || '')) === key
+        ((it.art || '—') + '||' + (it.client || '—') + '||' + it.campaign + '||' + (it.kioskType || '') + '||' + (it.sio || '')) === key
       );
-      if (item) {
-        if (af) item.artFiles.add(af);
-        if (sioIsRealValue) item.sios.add(sio);
-      }
+      if (item) item.artFiles.add(af);
     }
     nationalByArt.sort((a, b) => {
       const byArt = String(a.art).localeCompare(String(b.art));
       if (byArt !== 0) return byArt;
-      return String(a.client).localeCompare(String(b.client));
+      const byClient = String(a.client).localeCompare(String(b.client));
+      if (byClient !== 0) return byClient;
+      // Same client — group rows for the same campaign together; within a campaign,
+      // sort by SIO so warehouse can read top-to-bottom in numeric/alpha order.
+      const byCampaign = String(a.campaign).localeCompare(String(b.campaign));
+      if (byCampaign !== 0) return byCampaign;
+      return String(a.sio || '').localeCompare(String(b.sio || ''), undefined, { numeric: true });
     });
 
     function aggregate(arr, keyFn) {
@@ -1132,12 +1141,12 @@ _PACKING_JS_INLINE = r"""
             }
           }
 
-          // Per dispatcher spec: render SIO immediately AFTER the campaign on the
-          // primary line (before the kiosk-type suffix consumes the rest of the
-          // width). Same line, slightly muted weight so the campaign stays the
-          // visual anchor. Multiple SIOs per group joined with " · ".
-          const siosArr = item.sios ? [...item.sios] : [];
-          if (siosArr.length) {
+          // Per dispatcher spec: render this row's SIO immediately AFTER the
+          // campaign + kioskType on the primary line. Each distinct SIO gets
+          // its own row in the National Summary (split happens at grouping
+          // time), so item.sio is a single string here — empty when this row
+          // represents tasks with no specific SIO (Default / "0" / N/A).
+          if (item.sio) {
             const consumedW2 = doc.getTextWidth(primaryFitted);
             // Push past kioskType if present so the two suffixes don't collide.
             const ktConsumed = item.kioskType ? doc.getTextWidth('· ' + item.kioskType) + 8 : 0;
@@ -1147,7 +1156,7 @@ _PACKING_JS_INLINE = r"""
               doc.setFont('helvetica', 'normal');
               doc.setFontSize(8.5);
               doc.setTextColor(90, 90, 90);
-              doc.text('SIO ' + fitText(doc, siosArr.join(' · '), sioMaxW - 22), sioStartX, cy + 9);
+              doc.text('SIO ' + fitText(doc, item.sio, sioMaxW - 22), sioStartX, cy + 9);
             }
           }
 

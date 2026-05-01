@@ -18,6 +18,10 @@ import re
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash
 ONFLEET_KEY = os.environ.get("ONFLEET_KEY")
 GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_KEY")
+# Mapbox replaces Google Directions API for route distance + waypoint optimization.
+# Free tier: 100k Optimization API calls/month, $2/1000 after. Set this in Railway:
+#   MAPBOX_TOKEN=pk.eyJ1...   (the public token from your Mapbox account dashboard)
+MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN")
 
 # If Railway didn't have them, ONLY THEN do we try st.secrets (and we catch the error)
 if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
@@ -2149,47 +2153,135 @@ def fetch_sent_records_from_sheet():
         st.error(f"Failed to fetch portal records: {e}")
         return {}, {}, set(), {}
 
-# Manual session-state cache (replaces @st.cache_data) so we can cache ONLY successes.
-# Previously @st.cache_data(ttl=3600) was caching the (0, 0, "0h 0m", []) failure tuple
-# for an hour after any transient API hiccup — Drive Time / Round Trip would lock to
-# "—" until the TTL expired. The Bundle Routes preview made this very visible because
-# every preview produces a fresh cache key (different waypoint set) → fresh API call →
-# any one bad call locks that bundle preview into dashes.
+# ─── Routing engine: Mapbox Optimization API + persistent shared cache ───
+# Two-stage cache:
+#   1. Geocode (address → lng,lat) — ~unbounded distinct addresses, but routes
+#      revisit the same kiosks for months, so a few hundred warm cache entries
+#      cover everything. Free tier: 100k Mapbox Geocoding calls/month.
+#   2. Optimization (home + waypoints → distance, time, optimized order) —
+#      keyed on (home, ordered tuple of waypoints). Same route bundle viewed
+#      multiple times = single API call across ALL dispatchers for 24h.
+# Both caches are @st.cache_resource (process-wide dict) so they survive
+# Streamlit reruns and are shared across every connected session — was the
+# main cost driver: previous st.session_state cache only helped within one
+# tab and got wiped on every reconnect.
+
+@st.cache_resource(show_spinner=False)
+def _mapbox_geocode_cache():
+    """Process-wide dict: address (str) → (lng, lat) tuple. Lasts until
+    Railway redeploys. Geocoding is dirt cheap to retry on miss but free to
+    serve from cache, so this is overwhelmingly net-positive."""
+    return {}
+
+
+def _mapbox_geocode(address):
+    """Resolve an address to (lng, lat) via Mapbox Geocoding API. Returns
+    None on miss. Cached forever for the address — kiosks don't move."""
+    if not MAPBOX_TOKEN or not address:
+        return None
+    addr_key = str(address).strip()
+    if not addr_key:
+        return None
+    cache = _mapbox_geocode_cache()
+    if addr_key in cache:
+        return cache[addr_key]
+    from urllib.parse import quote
+    enc = quote(addr_key, safe='')
+    url = (
+        f"https://api.mapbox.com/geocoding/v5/mapbox.places/{enc}.json"
+        f"?limit=1&access_token={MAPBOX_TOKEN}"
+    )
+    try:
+        r = requests.get(url, timeout=10).json()
+        feats = r.get('features') or []
+        if feats and feats[0].get('center'):
+            lng, lat = feats[0]['center']
+            cache[addr_key] = (lng, lat)
+            return (lng, lat)
+    except Exception as e:
+        _log_err("_mapbox_geocode", e)
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def _gmaps_route_cache():
+    """Process-wide route cache: (home, waypoints_tuple) → (mi, hrs, str, order, ts).
+    Stores SUCCESSES ONLY — failures fall through and are retried on next call."""
+    return {}
+
+
 def get_gmaps(home, waypoints):
+    """Drop-in replacement for the previous Google Directions optimize:true call.
+    Returns the same (miles, total_hours, "Xh Ym", waypoint_order) tuple shape
+    so call sites need no changes. Internally uses Mapbox Optimization API V1.
+    Per-request cost: $0 within Mapbox's 100k/month free tier, $2/1000 after.
+    """
     _wp_tuple = tuple(waypoints) if waypoints else ()
-    _cache_key = (home, _wp_tuple)
-    _cache = st.session_state.setdefault('_gmaps_cache', {})
+    _key = (home, _wp_tuple)
     _now = time.time()
-    _entry = _cache.get(_cache_key)
-    if _entry is not None and (_now - _entry[1] < 3600):
+    _cache = _gmaps_route_cache()
+    _entry = _cache.get(_key)
+    if _entry is not None and (_now - _entry[1] < 86400):
         return _entry[0]
 
-    # Encode each waypoint so addresses containing '&', '=', '|' or other reserved
-    # characters don't corrupt the query string. Google's directions API accepts
-    # 'optimize:true|<wp1>|<wp2>...' as the value of the waypoints param — we URL-encode
-    # each piece individually then join with literal '|'.
-    from urllib.parse import quote
-    enc_wp = "optimize:true|" + "|".join(quote(w, safe='') for w in waypoints)
-    enc_home = quote(home, safe='')
+    if not MAPBOX_TOKEN:
+        _log_err("get_gmaps", "MAPBOX_TOKEN not set in env — can't compute route")
+        return 0, 0, "0h 0m", []
+    if not waypoints:
+        return 0, 0, "0h 0m", []
+
+    # Geocode home + each waypoint to (lng, lat). Each is cached forever.
+    home_ll = _mapbox_geocode(home)
+    if not home_ll:
+        return 0, 0, "0h 0m", []
+    wp_lls = [_mapbox_geocode(w) for w in waypoints]
+    if any(c is None for c in wp_lls):
+        return 0, 0, "0h 0m", []
+
+    # Build the Mapbox Optimization V1 path: lng,lat;lng,lat;...
+    # Submit as [home, wp1, wp2, ..., wpN, home] then ask Mapbox to optimize
+    # the middle waypoints (source=first, destination=last fixes both ends).
+    coord_list = [home_ll] + wp_lls + [home_ll]
+    coords_str = ";".join(f"{lng},{lat}" for lng, lat in coord_list)
     url = (
-        "https://maps.googleapis.com/maps/api/directions/json"
-        f"?origin={enc_home}&destination={enc_home}"
-        f"&waypoints={enc_wp}"
-        f"&departure_time=now&key={GOOGLE_MAPS_KEY}"
+        f"https://api.mapbox.com/optimized-trips/v1/mapbox/driving-traffic/{coords_str}"
+        f"?source=first&destination=last&roundtrip=false"
+        f"&access_token={MAPBOX_TOKEN}"
     )
     try:
         res = requests.get(url, timeout=15).json()
-        if res.get('status') == 'OK':
-            mi = sum(l['distance']['value'] for l in res['routes'][0]['legs']) * 0.000621371
-            drive_hrs = sum(l['duration']['value'] for l in res['routes'][0]['legs']) / 3600
-            service_hrs = len(waypoints) * (10/60)
+        if res.get('code') == 'Ok' and res.get('trips'):
+            trip = res['trips'][0]
+            mi = trip['distance'] * 0.000621371
+            drive_hrs = trip['duration'] / 3600
+            service_hrs = len(waypoints) * (10 / 60)
             total_hrs = drive_hrs + service_hrs
-            waypoint_order = res['routes'][0].get('waypoint_order', list(range(len(waypoints))))
-            _result = (round(mi, 1), total_hrs, f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m", waypoint_order)
-            _cache[_cache_key] = (_result, _now)  # only cache successes
+            # Mapbox returns each input waypoint with a `waypoint_index` field —
+            # the position it ended up in the optimized trip. Indexes 0 and last
+            # are the fixed home pinned via source=first / destination=last.
+            wps = res.get('waypoints', [])
+            try:
+                middle = wps[1:-1]
+                ordered_pairs = sorted(
+                    enumerate(middle),
+                    key=lambda p: p[1].get('waypoint_index', p[0])
+                )
+                waypoint_order = [orig_idx for orig_idx, _ in ordered_pairs]
+            except Exception:
+                waypoint_order = list(range(len(waypoints)))
+            _result = (
+                round(mi, 1),
+                total_hrs,
+                f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m",
+                waypoint_order,
+            )
+            _cache[_key] = (_result, _now)  # cache success only
             return _result
         else:
-            _log_err("get_gmaps", f"API status: {res.get('status')} / msg: {res.get('error_message','')[:200]}")
+            _log_err(
+                "get_gmaps",
+                f"Mapbox code: {res.get('code')} / msg: {res.get('message','')[:200]}",
+            )
     except Exception as e:
         _log_err("get_gmaps", e)
     return 0, 0, "0h 0m", []

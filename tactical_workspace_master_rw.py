@@ -5564,7 +5564,13 @@ if '_auth_user' not in st.session_state:
 # --- STAY-SIGNED-IN PROMPT ---
 # After a successful FRESH login (URL has no ?auth= and no prior dismissal),
 # show a modal asking if the user wants to stay signed in on this device.
+# Mark dismissed BEFORE rendering so the modal opens exactly ONCE per session,
+# regardless of how the user closes it (Yes / Not now / X / Esc / click-outside).
+# Without this pre-flag, clicking the X close button would close the dialog
+# without firing either button handler, and the next Streamlit rerun would
+# re-open it, pestering the user repeatedly.
 if not st.session_state.get('_stay_prompt_dismissed'):
+    st.session_state['_stay_prompt_dismissed'] = True
     @st.dialog("Stay signed in?")
     def _stay_dialog():
         st.write("Save your login on this device so you don't have to sign in again next time?")
@@ -5580,11 +5586,9 @@ if not st.session_state.get('_stay_prompt_dismissed'):
                     height=0,
                 )
                 st.query_params['auth'] = _tok
-                st.session_state['_stay_prompt_dismissed'] = True
                 st.rerun()
         with c2:
             if st.button("Not now", use_container_width=True, key="_stay_no"):
-                st.session_state['_stay_prompt_dismissed'] = True
                 st.rerun()
     _stay_dialog()
 

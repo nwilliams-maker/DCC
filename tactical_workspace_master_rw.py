@@ -1392,9 +1392,9 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
-@st.fragment(run_every=15)
+@st.fragment(run_every=5)
 def auto_sync_checker(pod_name):
-    """Polls every 15s. Refreshes the sheet cache and triggers a rerun whenever
+    """Polls every 5s. Refreshes the sheet cache and triggers a rerun whenever
     any sheet content changed — not just Accepted/Declined status flips. Previously
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
     until a user interaction (zooming the map, clicking somewhere, etc.) forced
@@ -1412,7 +1412,7 @@ def auto_sync_checker(pod_name):
         return
 
     try:
-        # Force-refresh the cached sheet pull. The cached function has a 15s TTL but
+        # Force-refresh the cached sheet pull. The cached function has a 5s TTL but
         # only re-runs when something actively calls it — and nothing else does between
         # user interactions. By clearing here we guarantee the next call is fresh.
         fetch_sent_records_from_sheet.clear()
@@ -1761,7 +1761,7 @@ def extract_art_file(notes: str) -> str:
     return " • ".join(keep)
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def fetch_sent_records_from_sheet():
     """
     Returns: (sent_dict, ghost_routes, archived_wos)
@@ -2203,6 +2203,7 @@ def process_digital_pool(master_bar=None):
         custom_boosted = ""
         venue_name = ""
         venue_id = ""
+        kiosk_id = ""
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
@@ -2238,6 +2239,10 @@ def process_digital_pool(master_bar=None):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # kioskid is a separate OnFleet custom field — surfaces on the
+            # packing slip's "Kiosk" column.
+            if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
                 client_company = f_val
             if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
@@ -2282,6 +2287,7 @@ def process_digital_pool(master_bar=None):
             "boosted_standard": custom_boosted,
             "venue_name": venue_name,
             "venue_id": venue_id,
+            "kiosk_id": kiosk_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
@@ -2517,6 +2523,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             tt_val = native_details # Fallback UI display
             venue_name = ""
             venue_id = ""
+            kiosk_id = ""
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
@@ -2608,6 +2615,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "wo": t_wo,
                     "venue_name": venue_name,
                     "venue_id": venue_id,
+                    "kiosk_id": kiosk_id,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
                     "art_file": art_file,
@@ -4185,7 +4193,7 @@ def smart_sync_pod(pod_name):
         custom_task_type = ""
         custom_boosted = ""
         tt_val = native_details
-        venue_name = ""; venue_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
+        venue_name = ""; venue_id = ""; kiosk_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -4206,6 +4214,10 @@ def smart_sync_pod(pod_name):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # kioskid is a separate OnFleet custom field — surfaces on the
+            # packing slip's "Kiosk" column.
+            if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
                 client_company = f_val
             if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
@@ -4255,6 +4267,7 @@ def smart_sync_pod(pod_name):
             "wo": t_wo,
             "venue_name": venue_name,
             "venue_id": venue_id,
+            "kiosk_id": kiosk_id,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
@@ -4542,7 +4555,7 @@ def run_pod_tab(pod_name):
 
 
 
-    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 15s
+    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 5s
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())

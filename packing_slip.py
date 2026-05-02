@@ -1158,11 +1158,23 @@ _PACKING_JS_INLINE = r"""
 
           const primaryStartX = x + PAD + PILL_W + 6;
 
+          // Reserve room on the right for the SIO BEFORE drawing the campaign,
+          // so when "Dairy Farmers of America SIO 26015970" doesn't all fit on
+          // one line it's the campaign that gets truncated, not the SIO. The
+          // SIO is the warehouse pull key — it must always read in full.
+          const sioStr = item.sio ? ('SIO ' + item.sio) : '';
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.5);
+          const sioWidth = sioStr ? doc.getTextWidth(sioStr) : 0;
+          const SIO_GAP = 8;  // gap between campaign-and-kioskType end and SIO
+
           // Primary line — bold, dark. Append kiosk type as a quiet suffix when present.
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(9);
           doc.setTextColor(40, 40, 40);
-          const primaryMaxW = labelMaxW - (primaryStartX - (x + PAD)) - 22;
+          // Full primary width minus right-edge count column minus SIO reservation
+          const primaryMaxW = labelMaxW - (primaryStartX - (x + PAD)) - 22
+                              - (sioWidth ? sioWidth + SIO_GAP : 0);
           const primaryFitted = fitText(doc, primaryText, primaryMaxW);
           doc.text(primaryFitted, primaryStartX, cy + 9);
           // Render the kioskType label after the primary text in lighter weight/color
@@ -1178,23 +1190,17 @@ _PACKING_JS_INLINE = r"""
             }
           }
 
-          // Per dispatcher spec: render this row's SIO immediately AFTER the
-          // campaign + kioskType on the primary line. Each distinct SIO gets
-          // its own row in the National Summary (split happens at grouping
-          // time), so item.sio is a single string here — empty when this row
-          // represents tasks with no specific SIO (Default / "0" / N/A).
-          if (item.sio) {
-            const consumedW2 = doc.getTextWidth(primaryFitted);
-            // Push past kioskType if present so the two suffixes don't collide.
-            const ktConsumed = item.kioskType ? doc.getTextWidth('· ' + item.kioskType) + 8 : 0;
-            const sioStartX = primaryStartX + consumedW2 + 6 + ktConsumed;
-            const sioMaxW = primaryMaxW - consumedW2 - 8 - ktConsumed;
-            if (sioMaxW > 30) {
-              doc.setFont('helvetica', 'normal');
-              doc.setFontSize(8.5);
-              doc.setTextColor(90, 90, 90);
-              doc.text('SIO ' + fitText(doc, item.sio, sioMaxW - 22), sioStartX, cy + 9);
-            }
+          // SIO — drawn in full at a fixed right-anchored position (just left
+          // of the count column) so it never gets truncated. Each distinct SIO
+          // gets its own row in the National Summary; empty SIO means this
+          // row aggregates tasks with no specific SIO (Default / "0" / N/A).
+          if (sioStr) {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8.5);
+            doc.setTextColor(90, 90, 90);
+            // Right-aligned at (x + w - PAD - 22) — same right edge the count
+            // uses minus the count-column reservation.
+            doc.text(sioStr, x + w - PAD - 22, cy + 9, { align: 'right' });
           }
 
           // Count (right edge)

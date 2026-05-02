@@ -392,11 +392,36 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "isInstall": _is_install(task_type),
             # ArtFile — Print Ready Art Files Collection name
             "artFile": _tb_art_for(_tb, str(t.get("art_file", "") or "")),
-            # SIO (orderNumber) from the active campaign on this kiosk
-            "sio": _tb.get("sio", ""),
+            # SIO priority: OnFleet's "sio" customField if non-empty,
+            # otherwise the Terraboost active campaign's orderNumber.
+            "sio": (str(t.get("sio", "")).strip()
+                     or _tb.get("sio", "")),
             "notes": "",
             "nationalCampName": "",
         })
+
+    # ---- Row-list back-fill for artFile ----
+    # When Terraboost has NO printCollection for a campaign at all (e.g.
+    # Scorch LLC - 26015924) but OnFleet's free-text heuristic surfaced an
+    # art file on SOME tasks on that campaign, propagate that string to
+    # sibling tasks on the same campaign that ended up blank. Scoped by
+    # (clientCompany, sio) so we don't bleed across distinct campaigns.
+    by_camp_artfile = {}
+    for r in rows:
+        if not r.get("artFile"):
+            continue
+        key = (str(r.get("clientCompany") or ""),
+               str(r.get("sio") or ""))
+        if key not in by_camp_artfile:
+            by_camp_artfile[key] = r["artFile"]
+    for r in rows:
+        if r.get("artFile"):
+            continue  # own value wins
+        key = (str(r.get("clientCompany") or ""),
+               str(r.get("sio") or ""))
+        sibling = by_camp_artfile.get(key)
+        if sibling:
+            r["artFile"] = sibling
     return rows
 
 

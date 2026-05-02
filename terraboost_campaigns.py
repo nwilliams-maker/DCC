@@ -240,21 +240,39 @@ def _parse_date(s: str | None) -> date | None:
 
 
 def _pick_active(campaign_kiosks: list, today: date) -> dict | None:
-    """Return the most-recently-assigned campaignKiosk on the kiosk.
+    """Return the most-relevant campaignKiosk for this kiosk.
 
     Per dispatcher spec: no date filtering — whatever the Terraboost portal
     shows as the kiosk's current/latest assignment is what the packing slip
-    pulls. We pick the campaignKiosk with the LATEST reservationStart.
+    pulls. Tie-breakers when multiple entries share the same reservationStart:
+
+      1. Latest reservationStart wins.
+      2. Entry with a populated printCollection beats one without (a real
+         campaign with art beats a RESERVED placeholder dupe).
+      3. Campaign name NOT starting with "RESERVED" beats one that does.
+
+    This handles the common Terraboost data pattern where a kiosk has both
+    "Scorch LLC - ..." (real, with art) and "RESERVED - Scorch LLC - ..."
+    (placeholder, no art) on the same start date.
     """
+    def _score(ck: dict) -> tuple:
+        start = _parse_date(ck.get("reservationStart")) or date(1900, 1, 1)
+        has_collection = bool((ck.get("printCollection") or {}).get("collectionName"))
+        camp_name = ((ck.get("campaign") or {}).get("name") or "").strip()
+        is_reserved = camp_name.upper().startswith("RESERVED")
+        # Higher tuple sorts later (we pick max). Tie-breakers in priority order:
+        #   start date, has-collection, NOT reserved
+        return (start, 1 if has_collection else 0, 0 if is_reserved else 1)
+
     best = None
-    best_start = None
+    best_score = None
     for ck in campaign_kiosks or []:
-        start = _parse_date(ck.get("reservationStart"))
-        if not start:
+        if not _parse_date(ck.get("reservationStart")):
             continue
-        if best_start is None or start > best_start:
+        s = _score(ck)
+        if best_score is None or s > best_score:
             best = ck
-            best_start = start
+            best_score = s
     return best
 
 
@@ -447,38 +465,63 @@ def _do_fetch_venues(venue_ids: tuple) -> dict:
                 "ad_placement": ((active.get("kioskAdPlacement") or {}).get("typeName") or "").strip(),
             }
         out.setdefault(vid, []).append(entry)
-    # Back-fill: when Terraboost has printCollection on some kiosks but not
-    # others AT THE SAME VENUE on the SAME CAMPAIGN, the missing kiosks get
-    # the collection from a sibling at that venue. Scoped to (campaign_id,
-    # venue_id) so we don't propagate across venues — different geographic
-    # locations on a national campaign can legitimately have different art
-    # variants (regional creative, A/B test, etc.).
-    by_camp_venue = {}  # (cid, vid) -> {collection_name, collection_label, top_url, bot_url}
+    # ---- Back-fill missing collection names ----
+    # When Terraboost has printCollection set on some kiosks but not others on
+    # the SAME campaign, propagate the collection to the missing kiosks. Two
+    # passes — wide-scope first, narrow-scope fallback:
+    #
+    #   1. Per-campaign GLOBAL: gather every distinct non-blank collection_name
+    #      across ALL kiosks on the campaign. If they all share ONE name,
+    #      that's the campaign's canonical art — propagate to every blank
+    #      kiosk on the campaign, even across venues. (Scorch LLC at Save Mart
+    #      and at Foods Co. share the same PG&E art, etc.)
+    #
+    #   2. Per-(campaign, venue) FALLBACK: when a campaign has multiple
+    #      distinct collection names across venues (genuine regional variants),
+    #      we DON'T cross venue boundaries — only kiosks at the same venue
+    #      share that venue's specific variant.
+    #
+    # A kiosk that already has its own non-blank collection is never
+    # overwritten — own value always wins.
+    from collections import defaultdict as _dd
+    by_camp_names = _dd(set)        # cid -> set of distinct collection_names
+    by_camp_global = {}             # cid -> {name, label, top, bot} canonical
+    by_camp_venue = {}              # (cid, vid) -> {name, label, top, bot}
+
+    for vid, entries in out.items():
+        for e in entries:
+            cid = e.get("campaign_id")
+            cn = e.get("collection_name")
+            if not cid or not cn:
+                continue
+            by_camp_names[cid].add(cn)
+            # Stash a canonical bundle keyed globally and per-venue
+            bundle = {
+                "collection_name": cn,
+                "collection_label": e.get("collection_label") or "",
+                "top_file_url": e.get("top_file_url") or "",
+                "bottom_file_url": e.get("bottom_file_url") or "",
+            }
+            by_camp_global.setdefault(cid, bundle)
+            by_camp_venue.setdefault((cid, vid), bundle)
+
     for vid, entries in out.items():
         for e in entries:
             cid = e.get("campaign_id")
             if not cid:
                 continue
-            key = (cid, vid)
-            existing = by_camp_venue.get(key, {})
-            if e.get("collection_name") and not existing.get("collection_name"):
-                existing["collection_name"] = e["collection_name"]
-            if e.get("collection_label") and not existing.get("collection_label"):
-                existing["collection_label"] = e["collection_label"]
-            if e.get("top_file_url") and not existing.get("top_file_url"):
-                existing["top_file_url"] = e["top_file_url"]
-            if e.get("bottom_file_url") and not existing.get("bottom_file_url"):
-                existing["bottom_file_url"] = e["bottom_file_url"]
-            by_camp_venue[key] = existing
-    for vid, entries in out.items():
-        for e in entries:
-            cid = e.get("campaign_id")
-            if not cid:
-                continue
-            sibling = by_camp_venue.get((cid, vid))
+            if e.get("collection_name"):
+                continue  # own value wins, never overwritten
+            # Pick the global bundle if the campaign has exactly one canonical
+            # collection across all venues; else fall back to same-venue.
+            distinct = by_camp_names.get(cid) or set()
+            sibling = (by_camp_global.get(cid)
+                       if len(distinct) == 1
+                       else by_camp_venue.get((cid, vid)))
             if not sibling:
                 continue
-            for k in ("collection_name", "collection_label", "top_file_url", "bottom_file_url"):
+            for k in ("collection_name", "collection_label",
+                      "top_file_url", "bottom_file_url"):
                 if not e.get(k) and sibling.get(k):
                     e[k] = sibling[k]
     return out

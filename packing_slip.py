@@ -102,6 +102,16 @@ def _strip_campaign_dates(s: str) -> str:
     # word. Trailing/leading whitespace cleanup happens after dedup below.
     out = re.sub(r"\bCampaign\b", " ", out, flags=re.IGNORECASE)
 
+    # Strip trailing " - National" / " - Local" / " - Regional" tags — the
+    # customer-type chip and bucket placement already convey this on the slip,
+    # so it's redundant in the campaign name. Loop until stable so chains like
+    # "Foo - Regional - Local" or "Foo - National - National" fully collapse.
+    _trail_re = re.compile(r"\s*[-,]?\s*\b(?:National|Local|Regional)\s*$", re.IGNORECASE)
+    prev = None
+    while prev != out:
+        prev = out
+        out = _trail_re.sub("", out)
+
     # Collapse runs of whitespace
     out = re.sub(r"\s+", " ", out)
     # Collapse orphan double-dashes left behind (" - - " → " - ")

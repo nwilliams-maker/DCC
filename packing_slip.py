@@ -271,48 +271,50 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
                 and "default" in client_company.lower()):
             task_type = "Default"
 
+        # Terraboost is the canonical source for kiosk/venue metadata; OnFleet
+        # is the fallback when a Terraboost lookup misses (e.g. KID not in the
+        # current active-campaign window or env vars unset). DCC-owned workflow
+        # state (worker, route, pod, stopNumber, type, boost, customerType)
+        # always comes from OnFleet/DCC.
+        _kid_str = (str(t.get("kiosk_id", "")) or "").strip()
+        _tb = _campaign_index.get(_kid_str) or {}
+
+        # Pick Terraboost over OnFleet for venue/kiosk metadata
+        venue_val      = _tb.get("venue_name", "")    or (t.get("venue_name", "") or "")
+        address_val    = _tb.get("venue_address", "") or (t.get("full", "") or "")
+        state_val      = (_tb.get("venue_state", "")  or (t.get("state", "") or "")).strip().upper()
+        kiosk_val      = _kid_str or t.get("venue_id", "") or ""
+        kiosk_loc_val  = _tb.get("kiosk_loc", "")     or (t.get("location_in_venue", "") or "")
+        kiosk_type_val = _tb.get("kiosk_type", "")    or ("Digital" if is_digital else "")
+        # Campaign name — Terraboost's full campaign string is canonical
+        campaign_val   = _tb.get("campaign_name", "") or client_company
+        raw_campaign_for_type = _tb.get("campaign_name", "") or raw_client_company
+
         rows.append({
-            # Identity
+            # Identity (DCC-owned)
             "worker": contractor,
             "route": cluster.get("wo") or contractor,
             "pod": pod_name or "",
-            # Stop / location
+            # Stop / location (Terraboost-first, OnFleet fallback)
             "stopNumber": idx,
-            "venue": t.get("venue_name", "") or "",
-            "address": t.get("full", "") or "",
-            "stateCode": (t.get("state", "") or "").strip().upper(),
-            # Kiosk ID column is sourced from the OnFleet "kioskId" custom
-            # field — distinct from the "venueId" custom field that the FN
-            # mass-upload generator uses. Falls back to venue_id ONLY when a
-            # task pre-dates the kioskId capture (data ingested before that
-            # field was added). New data should always populate kiosk_id.
-            "kiosk": t.get("kiosk_id", "") or t.get("venue_id", "") or "",
-            "kioskLoc": t.get("location_in_venue", "") or "",
-            # Kiosk type — Streamlit doesn't capture a kioskType custom field, so derive
-            # from is_digital. Empty string ('Premium') is the default for non-digital,
-            # which the JS normalizeKioskType drops from the display.
-            "kioskType": "Digital" if is_digital else "",
-            # Task / campaign / art
+            "venue": venue_val,
+            "address": address_val,
+            "stateCode": state_val,
+            "kiosk": kiosk_val,
+            "kioskLoc": kiosk_loc_val,
+            "kioskType": kiosk_type_val,
+            # Task / workflow (DCC-owned)
             "type": task_type,
             "boost": t.get("boosted_standard", "") or "",
-            "campaign": client_company,
-            "clientCompany": client_company,
-            # Use raw (pre-strip) campaign string for National/Local detection.
-            "customerType": _derive_customer_type(raw_client_company or client_company, task_type),
+            # Campaign (Terraboost-first — its name field is the canonical campaign label)
+            "campaign": campaign_val,
+            "clientCompany": campaign_val,
+            "customerType": _derive_customer_type(raw_campaign_for_type, task_type),
             "isInstall": _is_install(task_type),
-            # ArtFile — extracted by the Streamlit app from each task's OnFleet
-            # notes/Task Details (free-text). Surfaces dimmed under the campaign
-            # name in the clientCol cell of Route Details + as the Allocated Art
-            # column value in Locals.
-            "artFile": _tb_art_for(
-                (str(t.get("kiosk_id", "")) or "").strip(),
-                str(t.get("art_file", "") or ""),
-            ),
-            # SIO (orderNumber) sourced from the active campaign on this kiosk
-            # at manage.terraboost.com. Blank when lookup misses.
-            "sio": _campaign_index.get(
-                (str(t.get("kiosk_id", "")) or "").strip(), {}
-            ).get("sio", ""),
+            # ArtFile — Print Ready Art Files Collection name
+            "artFile": _tb_art_for(_kid_str, str(t.get("art_file", "") or "")),
+            # SIO (orderNumber) from the active campaign on this kiosk
+            "sio": _tb.get("sio", ""),
             "notes": "",
             "nationalCampName": "",
         })

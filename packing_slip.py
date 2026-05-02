@@ -673,12 +673,16 @@ _PACKING_JS_INLINE = r"""
     // Summary because Digital screens don't pull paper artwork from the default pool.
     // They still appear in Route Details so the worker sees the stop, with the task type
     // relabeled as "Remove Magnet" and the row dimmed.
-    const isDigitalDefault = r => {
-      if (!isDefault(r)) return false;
+    // Generic predicate: digital kiosk where the task type doesn't include
+    // "magnet" (Digital With Magnet jobs DO need physical art). Used by both
+    // Default and National summary filters — neither bucket should display
+    // pure-digital rows since they don't generate a paper pull.
+    const isDigitalNoMagnet = r => {
       const kt = (r.kioskType || '').toLowerCase();
       const tt = (r.type || '').toLowerCase();
       return kt === 'digital' && !/magnet/.test(tt);
     };
+    const isDigitalDefault = r => isDefault(r) && isDigitalNoMagnet(r);
     const isNational  = r => (r.customerType || '').toLowerCase() === 'national';
     const isIncorrect = r => /photo\s*retake|location\s+in\s+venue\s+incorrect|incorrect/i.test(r.type || '');
 
@@ -686,10 +690,11 @@ _PACKING_JS_INLINE = r"""
     // Incorrect supersedes nothing now — incorrect tasks stay in their natural bucket
     // (Local / National / Default) but get highlighted red in the detail table.
     // Default supersedes National (a Pull Down on a National task is still "Default")
-    // EXCEPT for Digital Defaults — those are stripped from every summary bucket since
-    // they don't represent a paper-pull operation. They still appear in Route Details.
-    const defaultRows  = rows.filter(r => isDefault(r) && !isDigitalDefault(r));
-    const nationalRows = rows.filter(r => !isDefault(r) && isNational(r));
+    // EXCEPT for Digital Defaults / Digital Nationals — those are stripped from every
+    // summary bucket since they don't represent a paper-pull operation. They still
+    // appear in Route Details so the worker sees the stop.
+    const defaultRows  = rows.filter(r => isDefault(r) && !isDigitalNoMagnet(r));
+    const nationalRows = rows.filter(r => !isDefault(r) && isNational(r) && !isDigitalNoMagnet(r));
     // Locals = all non-default/non-national tasks
     const localRows    = rows.filter(r => !isDefault(r) && !isNational(r));
     // Kiosk Summary specifically counts only physical Kiosk Install tasks

@@ -240,17 +240,18 @@ def _parse_date(s: str | None) -> date | None:
 
 
 def _pick_active(campaign_kiosks: list, today: date) -> dict | None:
-    """Return the campaignKiosk where today is within reservationStart..reservationEnd."""
+    """Return the most-recently-assigned campaignKiosk on the kiosk.
+
+    Per dispatcher spec: no date filtering — whatever the Terraboost portal
+    shows as the kiosk's current/latest assignment is what the packing slip
+    pulls. We pick the campaignKiosk with the LATEST reservationStart.
+    """
     best = None
     best_start = None
     for ck in campaign_kiosks or []:
         start = _parse_date(ck.get("reservationStart"))
-        if not start or start > today:
+        if not start:
             continue
-        end = _parse_date(ck.get("reservationEnd")) or date(2099, 1, 1)
-        if today > end:
-            continue
-        # Pick the most recently-started one (in case of overlap)
         if best_start is None or start > best_start:
             best = ck
             best_start = start
@@ -335,6 +336,120 @@ def _do_fetch(kids: tuple) -> dict:
     return out
 
 
+# -- Venue-based lookup (fallback when OnFleet has no kioskid customField) ---
+_VENUE_LOOKUP_QUERY = """query VenueLookup($vids: [Int!]) {
+  kiosks(where: {venueId: {in: $vids}}) {
+    importKioskId
+    venueId
+    kioskLocationId
+    isDigital
+    kioskLocation { id typeName }
+    kioskType { id typeName }
+    venue {
+      id
+      venueName
+      address1
+      address2
+      city
+      state
+      zip
+    }
+    campaignKiosks {
+      reservationStart
+      reservationEnd
+      boosted
+      kioskAdPlacement { typeName }
+      printCollection {
+        id
+        collectionName
+        topFileUrl
+        bottomFileUrl
+      }
+      campaign {
+        id
+        name
+        orderNumber
+        statusId
+      }
+    }
+  }
+}"""
+
+
+def _do_fetch_venues(venue_ids: tuple) -> dict:
+    """Returns {venue_id (int): [kiosk_entry, ...]} where each kiosk_entry is
+    the same shape produced by _do_fetch() (sio, campaign_name, venue_*, etc.),
+    plus an "importKioskId" field so the caller can identify which kiosk it is.
+    """
+    if not venue_ids:
+        return {}
+    clean = []
+    for v in venue_ids:
+        try:
+            clean.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    if not clean:
+        return {}
+    resp = _query(_VENUE_LOOKUP_QUERY, {"vids": sorted(set(clean))})
+    out: dict = {}
+    today = date.today()
+    for k in (resp.get("data") or {}).get("kiosks") or []:
+        vid = k.get("venueId")
+        if vid is None:
+            continue
+        active = _pick_active(k.get("campaignKiosks") or [], today)
+        if not active:
+            # Still include the kiosk so callers know it exists; just no campaign data.
+            entry = {"importKioskId": k.get("importKioskId") or "", "_no_active_campaign": True}
+        else:
+            pc = active.get("printCollection") or {}
+            cmp_ = active.get("campaign") or {}
+            top_url = pc.get("topFileUrl") or ""
+            bot_url = pc.get("bottomFileUrl") or ""
+            label = (
+                _extract_collection_label(top_url)
+                or _extract_collection_label(bot_url)
+                or (pc.get("collectionName") or "")
+            )
+            ven = k.get("venue") or {}
+            addr_parts = []
+            if ven.get("address1"):
+                addr_parts.append(ven["address1"])
+            if ven.get("address2"):
+                addr_parts.append(ven["address2"])
+            csz = ", ".join(p for p in [
+                ven.get("city") or "",
+                (ven.get("state") or "") + (" " + ven["zip"] if ven.get("zip") else ""),
+            ] if p.strip(", "))
+            if csz.strip(", "):
+                addr_parts.append(csz)
+            full_address = ", ".join(addr_parts)
+            ktype_name = ((k.get("kioskType") or {}).get("typeName") or "").strip()
+            if k.get("isDigital") and not ktype_name:
+                ktype_name = "Digital"
+            entry = {
+                "importKioskId": k.get("importKioskId") or "",
+                "sio": str(cmp_.get("orderNumber") or ""),
+                "campaign_id": cmp_.get("id"),
+                "campaign_name": cmp_.get("name") or "",
+                "top_file_url": top_url,
+                "bottom_file_url": bot_url,
+                "collection_name": pc.get("collectionName") or "",
+                "collection_label": label,
+                "venue_name": ven.get("venueName") or "",
+                "venue_address": full_address,
+                "venue_state": (ven.get("state") or "").strip().upper(),
+                "kiosk_loc": ((k.get("kioskLocation") or {}).get("typeName") or "").strip(),
+                "kiosk_type": ktype_name,
+                "is_digital": bool(k.get("isDigital")),
+                "boosted": bool(active.get("boosted")),
+                "ad_placement": ((active.get("kioskAdPlacement") or {}).get("typeName") or "").strip(),
+            }
+        out.setdefault(vid, []).append(entry)
+    return out
+
+
 if _HAS_STREAMLIT:
     @st.cache_data(ttl=3600, show_spinner=False)
     def fetch_campaign_index(kids_tuple: tuple) -> dict:
@@ -343,9 +458,22 @@ if _HAS_STREAMLIT:
         for each. Cached for 1 hour, shared across all dispatchers.
         """
         return _do_fetch(kids_tuple)
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def fetch_venue_index(venue_ids_tuple: tuple) -> dict:
+        """
+        For a tuple of OnFleet venue IDs (VIDs), returns
+        {vid: [list of kiosk entries at that venue with current-campaign data]}.
+        Used as a fallback when OnFleet's kioskid customField is missing —
+        the caller uses venue + campaign-name match to identify which kiosk.
+        """
+        return _do_fetch_venues(venue_ids_tuple)
 else:
     def fetch_campaign_index(kids_tuple: tuple) -> dict:
         return _do_fetch(kids_tuple)
+
+    def fetch_venue_index(venue_ids_tuple: tuple) -> dict:
+        return _do_fetch_venues(venue_ids_tuple)
 
 
 # -- Smoke test (run this module directly: `python terraboost_campaigns.py`) -

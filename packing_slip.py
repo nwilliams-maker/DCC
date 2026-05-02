@@ -392,10 +392,8 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "isInstall": _is_install(task_type),
             # ArtFile — Print Ready Art Files Collection name
             "artFile": _tb_art_for(_tb, str(t.get("art_file", "") or "")),
-            # SIO priority: OnFleet's "sio" customField if non-empty,
-            # otherwise the Terraboost active campaign's orderNumber.
-            "sio": (str(t.get("sio", "")).strip()
-                     or _tb.get("sio", "")),
+            # SIO (orderNumber) from the active campaign on this kiosk
+            "sio": _tb.get("sio", ""),
             "notes": "",
             "nationalCampName": "",
         })

@@ -41,9 +41,14 @@ import streamlit.components.v1 as components
 # URLs that aren't carried in OnFleet customFields). Safe to import — fails open
 # if env vars (TERRABOOST_EMAIL / TERRABOOST_PASSWORD) aren't set.
 try:
-    from terraboost_campaigns import fetch_campaign_index as _tb_fetch_campaign_index
+    from terraboost_campaigns import (
+        fetch_campaign_index as _tb_fetch_campaign_index,
+        fetch_venue_index as _tb_fetch_venue_index,
+    )
 except Exception:
     def _tb_fetch_campaign_index(_kids_tuple):
+        return {}
+    def _tb_fetch_venue_index(_vids_tuple):
         return {}
 
 
@@ -216,24 +221,76 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
     contractor = cluster.get("contractor_name") or "Unassigned"
     data = cluster.get("data") or []
 
-    # ----- Pull SIO + art-file URLs from manage.terraboost.com (read-only) -----
-    # Each task on the slip needs an SIO and a top/bottom art file. These aren't
-    # carried in OnFleet customFields, so we look them up live from Terraboost.
-    # The lookup is cached for 1 hour across all dispatchers via @st.cache_data.
-    _kids = tuple({(str(t.get("kiosk_id", "")) or "").strip()
+    # ----- Pull venue/kiosk metadata from manage.terraboost.com (read-only) -----
+    # PRIMARY lookup is by VID (venue_id) — we query Terraboost for every venue
+    # touched on this slip and get the full list of kiosks at each venue with
+    # current-campaign data. For each task we then pick the matching kiosk
+    # (by kiosk_id if OnFleet has it, otherwise by campaign-name overlap, or
+    # by elimination if there's only one kiosk at the venue).
+    # OnFleet data is the FINAL fallback when Terraboost has nothing for a VID.
+    _vids = tuple({(str(t.get("venue_id", "")) or "").strip()
                    for t in data
-                   if (t.get("kiosk_id") or "").strip()})
+                   if (t.get("venue_id") or "").strip()})
     try:
-        _campaign_index = _tb_fetch_campaign_index(_kids) if _kids else {}
+        _venue_index = _tb_fetch_venue_index(_vids) if _vids else {}
     except Exception:
-        _campaign_index = {}
+        _venue_index = {}
 
-    def _tb_art_for(kid: str, fallback: str) -> str:
-        # Use the Print Ready Art Files "Collection" column value
-        # (e.g. "Liz Donnelly_3/4/26_C") — matches what production sees
-        # on the Terraboost UI for the kiosk's assigned printCollection.
-        # URL-derived label and OnFleet free-text are fallbacks only.
-        entry = _campaign_index.get(kid) or {}
+    def _normalize(s: str) -> str:
+        # Lowercase, alphanum-only, for fuzzy campaign-name comparison
+        return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+    def _resolve_kiosk_entry(t: dict) -> dict:
+        """Resolve the Terraboost kiosk entry for this task.
+
+        VID is the primary lookup; KID and campaign-name are discriminators
+        when a venue has multiple kiosks.
+        """
+        try:
+            vid = int(str(t.get("venue_id", "")).strip())
+        except (TypeError, ValueError):
+            vid = None
+        if vid is None:
+            return {}
+        candidates = _venue_index.get(vid) or []
+        if not candidates:
+            return {}
+        # Single-kiosk venue — easy.
+        if len(candidates) == 1:
+            return candidates[0]
+        # Multi-kiosk venue — try KID first as exact match
+        kid = (str(t.get("kiosk_id", "")) or "").strip()
+        if kid:
+            for c in candidates:
+                if (c.get("importKioskId") or "").strip() == kid:
+                    return c
+        # Fall back to campaign-name overlap with OnFleet client_company
+        on_camp = _normalize(t.get("client_company", "") or "")
+        if on_camp:
+            best = None
+            best_score = 0
+            for c in candidates:
+                tb_camp = _normalize(c.get("campaign_name", "") or c.get("collection_name", ""))
+                if not tb_camp:
+                    continue
+                score = 0
+                for L in range(min(len(on_camp), len(tb_camp)), 3, -1):
+                    for i in range(0, len(on_camp) - L + 1):
+                        if on_camp[i:i + L] in tb_camp:
+                            score = L
+                            break
+                    if score:
+                        break
+                if score > best_score:
+                    best_score = score
+                    best = c
+            if best:
+                return best
+        # Last resort: first kiosk at the venue (rare — only when both KID and
+        # campaign matching fail). Caller still gets venue-level data correct.
+        return candidates[0]
+
+    def _tb_art_for(entry: dict, fallback: str) -> str:
         return (entry.get("collection_name", "")
                 or entry.get("collection_label", "")
                 or fallback)
@@ -271,19 +328,19 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
                 and "default" in client_company.lower()):
             task_type = "Default"
 
-        # Terraboost is the canonical source for kiosk/venue metadata; OnFleet
-        # is the fallback when a Terraboost lookup misses (e.g. KID not in the
-        # current active-campaign window or env vars unset). DCC-owned workflow
-        # state (worker, route, pod, stopNumber, type, boost, customerType)
-        # always comes from OnFleet/DCC.
-        _kid_str = (str(t.get("kiosk_id", "")) or "").strip()
-        _tb = _campaign_index.get(_kid_str) or {}
+        # Resolve the Terraboost kiosk entry (KID-direct or venue-fallback)
+        _tb = _resolve_kiosk_entry(t)
+
+        # KID — prefer the resolved Terraboost importKioskId so when OnFleet
+        # was missing the customField the column still reads correctly.
+        kid_resolved = (_tb.get("importKioskId", "")
+                        or (str(t.get("kiosk_id", "")) or "").strip()
+                        or t.get("venue_id", "") or "")
 
         # Pick Terraboost over OnFleet for venue/kiosk metadata
         venue_val      = _tb.get("venue_name", "")    or (t.get("venue_name", "") or "")
         address_val    = _tb.get("venue_address", "") or (t.get("full", "") or "")
         state_val      = (_tb.get("venue_state", "")  or (t.get("state", "") or "")).strip().upper()
-        kiosk_val      = _kid_str or t.get("venue_id", "") or ""
         kiosk_loc_val  = _tb.get("kiosk_loc", "")     or (t.get("location_in_venue", "") or "")
         kiosk_type_val = _tb.get("kiosk_type", "")    or ("Digital" if is_digital else "")
         # Campaign name — Terraboost's full campaign string is canonical
@@ -300,7 +357,7 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "venue": venue_val,
             "address": address_val,
             "stateCode": state_val,
-            "kiosk": kiosk_val,
+            "kiosk": kid_resolved,
             "kioskLoc": kiosk_loc_val,
             "kioskType": kiosk_type_val,
             # Task / workflow (DCC-owned)
@@ -312,7 +369,7 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "customerType": _derive_customer_type(raw_campaign_for_type, task_type),
             "isInstall": _is_install(task_type),
             # ArtFile — Print Ready Art Files Collection name
-            "artFile": _tb_art_for(_kid_str, str(t.get("art_file", "") or "")),
+            "artFile": _tb_art_for(_tb, str(t.get("art_file", "") or "")),
             # SIO (orderNumber) from the active campaign on this kiosk
             "sio": _tb.get("sio", ""),
             "notes": "",

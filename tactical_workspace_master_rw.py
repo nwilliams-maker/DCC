@@ -222,6 +222,82 @@ def _fetch_onfleet_open_tasks_cached():
 st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
 
 # ============================================================================
+# 🔄 DEPLOY-RECOVERY WATCHER — silent auto-recovery from Railway redeploys
+# ============================================================================
+# When DCC redeploys, browser tabs that were open before the deploy can hit
+# Streamlit "Bad message format" / "SessionInfo" / "fragment id" errors when
+# the user next interacts. This watcher prevents that from ever showing:
+#
+#   • A unique INSTANCE_ID is generated when the Python process starts.
+#     It's rendered into the DOM as a hidden data attribute.
+#   • Browser-side JS captures the instance ID on first load.
+#   • Every 30s it compares — if the server's instance ID changed (Python
+#     process restarted), it shows a small "App was updated" banner with a
+#     "Refresh now" button. No popup, no countdown, no forced reload.
+#   • If the user has been idle 10+ min when the change is detected, the
+#     reload happens silently in the background.
+#   • Streamlit's own error events (Bad message / setIn / fragment id) are
+#     caught by a global error listener — if the user is idle (>5s no input)
+#     the page reloads silently. Otherwise the banner appears instead of
+#     the red error toast.
+#
+# Net: dispatchers never see a Streamlit error popup, never get yanked
+# mid-typing, and the latest code reaches them on their schedule.
+# ============================================================================
+import uuid as _uuid
+INSTANCE_ID = str(_uuid.uuid4())
+
+st.markdown(
+    f"""
+    <div id="dcc-instance-id" data-id="{INSTANCE_ID}" style="display:none;"></div>
+    <div id="dcc-update-banner" style="display:none;position:fixed;top:0;left:0;right:0;background:#fef3c7;border-bottom:1px solid #f59e0b;color:#78350f;padding:10px 16px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;z-index:99999;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,.08);">
+      <span>📦 App was updated. Refresh when you\'re ready.</span>
+      <span>
+        <button onclick="window.location.reload()" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Refresh now</button>
+        <button onclick="document.getElementById(\'dcc-update-banner\').style.display=\'none\'" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
+      </span>
+    </div>
+    <script>
+    (function() {{
+      if (window._dccDeployWatcher) return;
+      window._dccDeployWatcher = true;
+      const myId = "{INSTANCE_ID}";
+      let lastActivity = Date.now();
+      ['click','keydown','mousemove','scroll','input','touchstart'].forEach(function(ev) {{
+        document.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
+      }});
+      function showBanner() {{
+        var b = document.getElementById('dcc-update-banner');
+        if (b) b.style.display = 'flex';
+      }}
+      function maybeReload() {{
+        var idleMs = Date.now() - lastActivity;
+        if (idleMs > 600000) {{ window.location.reload(); }} else {{ showBanner(); }}
+      }}
+      setInterval(function() {{
+        var el = document.getElementById('dcc-instance-id');
+        var cur = el && el.dataset && el.dataset.id;
+        if (cur && cur !== myId) maybeReload();
+      }}, 30000);
+      window.addEventListener('error', function(e) {{
+        var msg = String((e && e.message) || '');
+        if (/Bad message format|Bad \'setIn\' index|Could not find fragment id|SessionInfo/i.test(msg)) {{
+          var idleMs = Date.now() - lastActivity;
+          if (idleMs > 5000) {{
+            try {{ e.preventDefault(); }} catch(_) {{}}
+            window.location.reload();
+          }} else {{
+            showBanner();
+          }}
+        }}
+      }}, true);
+    }})();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ============================================================================
 # 🔐 LOGIN — per-user authentication
 # ============================================================================
 # Each entry below is a user account.
@@ -7095,7 +7171,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style="text-align: center; color: #94a3b8; font-size: 12px; padding: 20px;">
-        Tactical Workspace Master • 2026 Digital Logistics Interface • <b>v2.4.0</b><br>
+        Tactical Workspace Master • 2026 Terraboost Media • <b>v2.4.0</b><br>
         <i>All digital and static route data is synced in real-time.</i>
     </div>
     """,

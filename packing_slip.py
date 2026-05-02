@@ -72,29 +72,45 @@ except Exception:
 _DATE_PAREN_RE  = re.compile(r"\s*\(\s*\d{1,2}/\d{1,2}/\d{2,4}(?:\s*-\s*\d{1,2}/\d{1,2}/\d{2,4})?\s*\)")
 _DATE_RANGE_RE  = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}")
 _SINGLE_DATE_RE = re.compile(r"\s*\d{1,2}/\d{1,2}/\d{2,4}")
-# Per dispatcher spec: strip the literal phrase "National Campaign" from
-# campaign strings — it's redundant since the National Summary card and the
-# trailing " - National" customer type already convey the same information.
-# Match is case-insensitive; surrounding whitespace and dashes are tidied up
-# in the cleanup pass below.
-_NATIONAL_CAMP_RE = re.compile(r"\bnational\s+campaign\b", re.IGNORECASE)
 
 
 def _strip_campaign_dates(s: str) -> str:
-    """Remove date ranges / single dates / 'National Campaign' boilerplate
-    from a campaign string and tidy up any leftover whitespace + orphan
-    dashes."""
+    """Clean a campaign string for display:
+
+      • Remove date ranges and stray single dates (MM/DD/YYYY forms).
+      • Strip the literal word "Campaign" wherever it appears.
+      • Collapse repeated dash-separated tokens (e.g. "Default - Default"
+        → "Default", "Foo - Foo - Bar" → "Foo - Bar").
+      • Tidy up stray whitespace and orphan dashes.
+    """
     if not s:
         return s
     out = _DATE_PAREN_RE.sub(" ", str(s))
     out = _DATE_RANGE_RE.sub(" ", out)
     out = _SINGLE_DATE_RE.sub(" ", out)
-    out = _NATIONAL_CAMP_RE.sub(" ", out)
+
+    # Strip everything from " Renewal" / "-Renewal" / ",Renewal" onward.
+    # Examples removed: " - Renewal January 2026", ", Renewal", " Renewal 2026".
+    out = re.sub(r"\s*[-,]?\s*\bRenew(?:al)?\b.*$", "", out, flags=re.IGNORECASE)
+
+    # Strip the standalone word "Campaign" (case-insensitive). Word boundary so
+    # we don't chop into something like "CampaignName" — just the standalone
+    # word. Trailing/leading whitespace cleanup happens after dedup below.
+    out = re.sub(r"\bCampaign\b", " ", out, flags=re.IGNORECASE)
+
     # Collapse runs of whitespace
     out = re.sub(r"\s+", " ", out)
-    # Collapse orphan double-dashes left behind ("Campaign  - National" → already fine,
-    # but "Campaign -  - National" → "Campaign - National")
+    # Collapse orphan double-dashes left behind (" - - " → " - ")
     out = re.sub(r"\s*-\s*-\s*", " - ", out)
+
+    # Dedupe consecutive identical dash-separated tokens
+    parts = [p.strip() for p in out.split(" - ")]
+    deduped = []
+    for p in parts:
+        if p and (not deduped or deduped[-1].lower() != p.lower()):
+            deduped.append(p)
+    out = " - ".join(deduped)
+
     # Trim leading/trailing whitespace + stray dashes
     out = re.sub(r"^[\s\-]+|[\s\-]+$", "", out)
     return out
@@ -343,9 +359,11 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
         state_val      = (_tb.get("venue_state", "")  or (t.get("state", "") or "")).strip().upper()
         kiosk_loc_val  = _tb.get("kiosk_loc", "")     or (t.get("location_in_venue", "") or "")
         kiosk_type_val = _tb.get("kiosk_type", "")    or ("Digital" if is_digital else "")
-        # Campaign name — Terraboost's full campaign string is canonical
-        campaign_val   = _tb.get("campaign_name", "") or client_company
-        raw_campaign_for_type = _tb.get("campaign_name", "") or raw_client_company
+        # Campaign name — Terraboost's full campaign string is canonical.
+        # Strip embedded date ranges + redundant trailing tags before display.
+        _tb_campaign = _strip_campaign_dates(_tb.get("campaign_name", "") or "")
+        campaign_val   = _tb_campaign or client_company
+        raw_campaign_for_type = _tb_campaign or raw_client_company
 
         rows.append({
             # Identity (DCC-owned)

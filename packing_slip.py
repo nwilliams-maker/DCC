@@ -229,10 +229,14 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
         _campaign_index = {}
 
     def _tb_art_for(kid: str, fallback: str) -> str:
+        # Use the Print Ready Art Files "Collection" column value
+        # (e.g. "Liz Donnelly_3/4/26_C") — matches what production sees
+        # on the Terraboost UI for the kiosk's assigned printCollection.
+        # URL-derived label and OnFleet free-text are fallbacks only.
         entry = _campaign_index.get(kid) or {}
-        urls = [entry.get("top_file_url", ""), entry.get("bottom_file_url", "")]
-        joined = " • ".join(u for u in urls if u)
-        return joined or fallback
+        return (entry.get("collection_name", "")
+                or entry.get("collection_label", "")
+                or fallback)
 
     rows: List[Dict[str, Any]] = []
     for idx, t in enumerate(data, start=1):
@@ -1412,13 +1416,13 @@ _PACKING_JS_INLINE = r"""
       // each kiosk on its own line — like a dropdown — instead of a single comma-joined
       // line. SUB_ROW_H is the per-kiosk height; SUB_HEAD_H is the small column header
       // row drawn above the kiosks; SUB_PAD is breathing room above/below.
-      // Per dispatcher spec: sub-row text should be exactly 0.5pt smaller than
-      // the master row text (master = 8.5pt → sub = 8.0pt). SUB_ROW_H bumps to
-      // 9 so the slightly larger text still has a touch of vertical breathing room.
-      const SUB_ROW_H = 9;
-      const SUB_HEAD_H = 9;
+      // Per dispatcher spec: sub-row text matches the master row size exactly
+      // (master = 8.5pt → sub = 8.5pt). SUB_ROW_H stays at 9.5 so the slightly
+      // taller text reads cleanly with the same vertical breathing room.
+      const SUB_ROW_H = 9.5;
+      const SUB_HEAD_H = 9.5;
       const SUB_PAD = 3;
-      const SUB_FONT = 8.0;
+      const SUB_FONT = 8.5;
 
       let zebra = false;
       for (const item of renderItems) {
@@ -1892,7 +1896,7 @@ _PACKING_JS_INLINE = r"""
             for (const c of subCols) {
               const raw =
                 c.key === 'idx'       ? `${idx + 1}.` :
-                c.key === 'kiosk'     ? (k.kiosk || '—') :
+                c.key === 'kiosk'     ? (k.kiosk || '') :
                 c.key === 'kioskType' ? ((k.kioskType || '').trim() || 'Premium') :
                 c.key === 'type'      ? (k.type  || '—') :
                 c.key === 'venue'     ? (k.venue || '—') :

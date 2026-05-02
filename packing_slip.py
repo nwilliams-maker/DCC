@@ -89,6 +89,10 @@ def _strip_campaign_dates(s: str) -> str:
     out = _DATE_RANGE_RE.sub(" ", out)
     out = _SINGLE_DATE_RE.sub(" ", out)
 
+    # Strip a leading "RESERVED -" / "RESERVED:" / bare "RESERVED" prefix.
+    # It's just placeholder fluff that production doesn't need to see.
+    out = re.sub(r"^\s*RESERVED\b\s*[-:]?\s*", "", out, flags=re.IGNORECASE)
+
     # Strip everything from " Renewal" / "-Renewal" / ",Renewal" onward.
     # Examples removed: " - Renewal January 2026", ", Renewal", " Renewal 2026".
     out = re.sub(r"\s*[-,]?\s*\bRenew(?:al)?\b.*$", "", out, flags=re.IGNORECASE)
@@ -1089,11 +1093,36 @@ _PACKING_JS_INLINE = r"""
       const ART_LINE_H = 9;
       const ART_TOP_GAP = 4;
       const ART_FONT_SIZE = 7;
+      // Primary line wraps when the campaign name doesn't fit alongside the
+      // SIO + count column on one line. Each extra wrap line adds PRIM_LINE_H.
+      const PRIM_LINE_H = 10;
       const labelMaxWPre = w - PAD * 2 - 6;
+      // Same pill / SIO / count reservations the draw code uses.
+      const PILL_W_PRE = 12;
+      const PRIMARY_START_DELTA = PILL_W_PRE + 6;
+      const COUNT_RESERVE = 22;
+      const SIO_GAP_PRE = 8;
 
       const rowHeights = [];
+      const primaryLinesByIdx = [];  // pre-computed wrap count per row
       if (card.layout === 'nationalByArt') {
         for (const item of data) {
+          // Primary text width budget — same calc as the draw code below.
+          const sioStrPre = item.sio ? ('SIO ' + item.sio) : '';
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.5);
+          const sioWidthPre = sioStrPre ? doc.getTextWidth(sioStrPre) : 0;
+          const primaryMaxWPre = labelMaxWPre - PRIMARY_START_DELTA - COUNT_RESERVE
+                                 - (sioWidthPre ? sioWidthPre + SIO_GAP_PRE : 0);
+
+          const clientText = (item.client || '').trim();
+          const hasRealClient = clientText && !/^(n\/a|null|—|-|none)$/i.test(clientText);
+          const primaryText = hasRealClient ? clientText : (item.campaign || '—');
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          const primLines = doc.splitTextToSize(String(primaryText), Math.max(40, primaryMaxWPre)).length || 1;
+          primaryLinesByIdx.push(primLines);
+
           const artFilesArr = item.artFiles ? [...item.artFiles] : [];
           let artLines = 0;
           if (artFilesArr.length) {
@@ -1102,7 +1131,9 @@ _PACKING_JS_INLINE = r"""
             const wrapped = doc.splitTextToSize(artFilesArr.join(' · '), labelMaxWPre - 4);
             artLines = wrapped.length;
           }
-          const h = BASE_H + (artLines ? ART_TOP_GAP + artLines * ART_LINE_H : 0);
+          const h = BASE_H
+                    + Math.max(0, primLines - 1) * PRIM_LINE_H
+                    + (artLines ? ART_TOP_GAP + artLines * ART_LINE_H : 0);
           rowHeights.push(h);
         }
       }
@@ -1245,25 +1276,32 @@ _PACKING_JS_INLINE = r"""
           const sioWidth = sioStr ? doc.getTextWidth(sioStr) : 0;
           const SIO_GAP = 8;  // gap between campaign-and-kioskType end and SIO
 
-          // Primary line — bold, dark. Append kiosk type as a quiet suffix when present.
+          // Primary line — bold, dark. Wraps onto multiple lines when the
+          // campaign name is too long to fit alongside the SIO + count column.
+          // The row's pre-computed height has already reserved space for these
+          // wrap lines (see rowHeights / primaryLinesByIdx above).
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(9);
           doc.setTextColor(40, 40, 40);
-          // Full primary width minus right-edge count column minus SIO reservation
           const primaryMaxW = labelMaxW - (primaryStartX - (x + PAD)) - 22
                               - (sioWidth ? sioWidth + SIO_GAP : 0);
-          const primaryFitted = fitText(doc, primaryText, primaryMaxW);
-          doc.text(primaryFitted, primaryStartX, cy + 9);
-          // Render the kioskType label after the primary text in lighter weight/color
+          const primaryLines = doc.splitTextToSize(String(primaryText), Math.max(40, primaryMaxW));
+          primaryLines.forEach((line, i) => {
+            doc.text(line, primaryStartX, cy + 9 + i * PRIM_LINE_H);
+          });
+          // Render the kioskType label after the LAST primary line (or skip if
+          // there's no horizontal room left on that line).
           if (item.kioskType) {
-            const consumedW = doc.getTextWidth(primaryFitted);
+            const lastLine = primaryLines[primaryLines.length - 1];
+            const consumedW = doc.getTextWidth(lastLine);
             const kTypeStartX = primaryStartX + consumedW + 6;
             const kTypeMaxW = primaryMaxW - consumedW - 8;
             if (kTypeMaxW > 20) {
               doc.setFont('helvetica', 'normal');
               doc.setFontSize(8.5);
               doc.setTextColor(120, 120, 120);
-              doc.text('· ' + fitText(doc, item.kioskType, kTypeMaxW), kTypeStartX, cy + 9);
+              const kTypeY = cy + 9 + (primaryLines.length - 1) * PRIM_LINE_H;
+              doc.text('· ' + fitText(doc, item.kioskType, kTypeMaxW), kTypeStartX, kTypeY);
             }
           }
 
@@ -1299,8 +1337,9 @@ _PACKING_JS_INLINE = r"""
             doc.setTextColor(140, 140, 140);
             const artFilesStr = artFilesArr.join(' · ');
             const wrapped = doc.splitTextToSize(artFilesStr, labelMaxW - 4);
-            // Sits right under the bold primary line.
-            const artY = cy + 21;
+            // Sits right under the bold primary line(s) — shifts down when the
+            // primary text wrapped onto multiple lines.
+            const artY = cy + 21 + (primaryLines.length - 1) * PRIM_LINE_H;
             wrapped.forEach((line, i) => {
               doc.text(line, x + PAD, artY + i * ART_LINE_H);
             });

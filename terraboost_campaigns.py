@@ -16,8 +16,18 @@ Safety contract (enforced in code):
 Public API:
     fetch_campaign_index(kids_tuple: tuple[str, ...]) -> dict[str, dict]
 
-    Returns: {KID → {"sio": str, "top_file_url": str, "bottom_file_url": str,
-                     "collection_name": str, "campaign_id": int}}
+    Returns: {KID → {
+        # campaign / art
+        "sio", "campaign_id", "campaign_name",
+        "top_file_url", "bottom_file_url",
+        "collection_name", "collection_label",
+        # venue
+        "venue_name", "venue_address", "venue_state",
+        # kiosk
+        "kiosk_loc", "kiosk_type", "is_digital",
+        # placement / boost
+        "boosted", "ad_placement",
+    }}
     For each KID, picks the campaignKiosk where today is within reservation dates.
     Cached for 1 hour via @st.cache_data so DCC doesn't hammer Terraboost.
 """
@@ -56,9 +66,25 @@ _LOGIN_MUTATION = """mutation Login($email: String!, $password: String!) {
 _KIDS_LOOKUP_QUERY = """query KidLookup($kids: [String!]) {
   kiosks(where: {importKioskId: {in: $kids}}) {
     importKioskId
+    venueId
+    kioskLocationId
+    isDigital
+    kioskLocation { id typeName }
+    kioskType { id typeName }
+    venue {
+      id
+      venueName
+      address1
+      address2
+      city
+      state
+      zip
+    }
     campaignKiosks {
       reservationStart
       reservationEnd
+      boosted
+      kioskAdPlacement { typeName }
       printCollection {
         id
         collectionName
@@ -67,6 +93,7 @@ _KIDS_LOOKUP_QUERY = """query KidLookup($kids: [String!]) {
       }
       campaign {
         id
+        name
         orderNumber
         statusId
       }
@@ -260,13 +287,50 @@ def _do_fetch(kids: tuple) -> dict:
             or _extract_collection_label(bot_url)
             or (pc.get("collectionName") or "")
         )
+        # Compose a single-line full address from venue parts
+        ven = k.get("venue") or {}
+        addr_parts = []
+        if ven.get("address1"):
+            addr_parts.append(ven["address1"])
+        if ven.get("address2"):
+            addr_parts.append(ven["address2"])
+        city_state_zip = ", ".join(p for p in [
+            ven.get("city") or "",
+            (ven.get("state") or "") + (" " + ven["zip"] if ven.get("zip") else ""),
+        ] if p.strip(", "))
+        if city_state_zip.strip(", "):
+            addr_parts.append(city_state_zip)
+        full_address = ", ".join(addr_parts)
+
+        # Kiosk type prefers explicit Premium/Luxury/Digital naming.
+        ktype_name = ((k.get("kioskType") or {}).get("typeName") or "").strip()
+        if k.get("isDigital") and not ktype_name:
+            ktype_name = "Digital"
+
+        # boosted (the workflow flag) on the active campaignKiosk — boolean.
+        boosted_bool = bool(active.get("boosted"))
+        ad_placement = ((active.get("kioskAdPlacement") or {}).get("typeName") or "").strip()
+
         out[kid] = {
+            # campaign / art
             "sio": str(cmp_.get("orderNumber") or ""),
             "campaign_id": cmp_.get("id"),
+            "campaign_name": cmp_.get("name") or "",
             "top_file_url": top_url,
             "bottom_file_url": bot_url,
             "collection_name": pc.get("collectionName") or "",
             "collection_label": label,
+            # venue
+            "venue_name": ven.get("venueName") or "",
+            "venue_address": full_address,
+            "venue_state": (ven.get("state") or "").strip().upper(),
+            # kiosk
+            "kiosk_loc": ((k.get("kioskLocation") or {}).get("typeName") or "").strip(),
+            "kiosk_type": ktype_name,
+            "is_digital": bool(k.get("isDigital")),
+            # placement / boost
+            "boosted": boosted_bool,
+            "ad_placement": ad_placement,
         }
     return out
 

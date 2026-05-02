@@ -447,6 +447,40 @@ def _do_fetch_venues(venue_ids: tuple) -> dict:
                 "ad_placement": ((active.get("kioskAdPlacement") or {}).get("typeName") or "").strip(),
             }
         out.setdefault(vid, []).append(entry)
+    # Back-fill: when Terraboost has printCollection on some kiosks but not
+    # others AT THE SAME VENUE on the SAME CAMPAIGN, the missing kiosks get
+    # the collection from a sibling at that venue. Scoped to (campaign_id,
+    # venue_id) so we don't propagate across venues — different geographic
+    # locations on a national campaign can legitimately have different art
+    # variants (regional creative, A/B test, etc.).
+    by_camp_venue = {}  # (cid, vid) -> {collection_name, collection_label, top_url, bot_url}
+    for vid, entries in out.items():
+        for e in entries:
+            cid = e.get("campaign_id")
+            if not cid:
+                continue
+            key = (cid, vid)
+            existing = by_camp_venue.get(key, {})
+            if e.get("collection_name") and not existing.get("collection_name"):
+                existing["collection_name"] = e["collection_name"]
+            if e.get("collection_label") and not existing.get("collection_label"):
+                existing["collection_label"] = e["collection_label"]
+            if e.get("top_file_url") and not existing.get("top_file_url"):
+                existing["top_file_url"] = e["top_file_url"]
+            if e.get("bottom_file_url") and not existing.get("bottom_file_url"):
+                existing["bottom_file_url"] = e["bottom_file_url"]
+            by_camp_venue[key] = existing
+    for vid, entries in out.items():
+        for e in entries:
+            cid = e.get("campaign_id")
+            if not cid:
+                continue
+            sibling = by_camp_venue.get((cid, vid))
+            if not sibling:
+                continue
+            for k in ("collection_name", "collection_label", "top_file_url", "bottom_file_url"):
+                if not e.get(k) and sibling.get(k):
+                    e[k] = sibling[k]
     return out
 
 

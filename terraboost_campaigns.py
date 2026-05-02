@@ -170,6 +170,39 @@ def _query(query_str: str, variables: dict | None = None) -> dict:
         return {}
 
 
+import re as _re
+import os as _os
+import urllib.parse as _urlparse
+
+_UUID_PREFIX_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-",
+    _re.IGNORECASE,
+)
+_EXT_RE = _re.compile(r"\.[a-z0-9]+$", _re.IGNORECASE)
+_TB_SUFFIX_RE = _re.compile(r"_[TB]$", _re.IGNORECASE)
+
+
+def _extract_collection_label(url: str) -> str:
+    """Turn an Azure blob URL into the clean collection identifier.
+
+    Example:
+        https://.../storage/52/655f20b6-...-Alta_Dena_April_2026_T.pdf
+        -> "Alta_Dena_April_2026"
+    """
+    if not url:
+        return ""
+    try:
+        path = _urlparse.urlparse(url).path
+    except Exception:
+        return ""
+    name = _os.path.basename(path)
+    # Strip leading UUID-dash, the file extension, and the trailing _T or _B.
+    name = _UUID_PREFIX_RE.sub("", name)
+    name = _EXT_RE.sub("", name)
+    name = _TB_SUFFIX_RE.sub("", name)
+    return name.strip()
+
+
 def _parse_date(s: str | None) -> date | None:
     if not s:
         return None
@@ -217,12 +250,23 @@ def _do_fetch(kids: tuple) -> dict:
             continue
         pc = active.get("printCollection") or {}
         cmp_ = active.get("campaign") or {}
+        top_url = pc.get("topFileUrl") or ""
+        bot_url = pc.get("bottomFileUrl") or ""
+        # Clean human-readable label derived from the file name
+        # (preferred over the free-form `collectionName` because the
+        # filename uses underscores and is what production looks for).
+        label = (
+            _extract_collection_label(top_url)
+            or _extract_collection_label(bot_url)
+            or (pc.get("collectionName") or "")
+        )
         out[kid] = {
             "sio": str(cmp_.get("orderNumber") or ""),
             "campaign_id": cmp_.get("id"),
-            "top_file_url": pc.get("topFileUrl") or "",
-            "bottom_file_url": pc.get("bottomFileUrl") or "",
+            "top_file_url": top_url,
+            "bottom_file_url": bot_url,
             "collection_name": pc.get("collectionName") or "",
+            "collection_label": label,
         }
     return out
 

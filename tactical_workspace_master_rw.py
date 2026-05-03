@@ -287,13 +287,23 @@ _components.html(
     <script>
     (function() {{
       try {{
-        var parentDoc = window.parent.document;
-        if (parentDoc.getElementById('dcc-watcher-loader')) return;
-        var s = parentDoc.createElement('script');
-        s.id = 'dcc-watcher-loader';
-        s.src = '/app/static/dcc_watcher.js?v={INSTANCE_ID}';
-        s.defer = true;
-        parentDoc.head.appendChild(s);
+        var parentWin = window.parent;
+        if (parentWin._dccWatcherLoaded) return;
+        parentWin._dccWatcherLoaded = true;
+        // Fetch the watcher source and eval it in the parent window context.
+        // Dynamically-inserted <script src=> tags don't reliably execute in some
+        // browser/iframe combinations; fetch+eval bypasses that.
+        fetch('/app/static/dcc_watcher.js?v={INSTANCE_ID}', {{cache: 'no-cache'}})
+          .then(function(r) {{ return r.text(); }})
+          .then(function(code) {{
+            try {{
+              // Use indirect eval so the code runs in global scope of parent window.
+              parentWin.eval(code);
+            }} catch (e) {{
+              console.error('[dcc-watcher] eval failed:', e);
+            }}
+          }})
+          .catch(function(e) {{ console.error('[dcc-watcher] fetch failed:', e); }});
       }} catch(e) {{}}
     }})();
     </script>
@@ -6197,22 +6207,12 @@ _de_pill_label = _de_saved if _de_saved else "Set email"
 _de_pill_color = "#0f172a" if _de_saved else "#dc2626"
 
 # Header markdown — pinned info + email pill + Sign out, all in one fixed-position
-# block. Email pill and Sign out are styled identical anchors so they read as one
-# pair of pill buttons. Email pill uses ?email_settings=1 URL trigger (handled
-# above the login gate) — preserves session_state by re-applying ?auth=TOKEN +
-# ?tab=NAME during the navigation so auth + tab restore right after.
-_auth_param_now = st.query_params.get("auth", "")
-_tab_param_now = st.query_params.get("tab", "")
-import urllib.parse as _up
-_email_qs_parts = ["email_settings=1"]
-if _auth_param_now: _email_qs_parts.append(f"auth={_auth_param_now}")
-if _tab_param_now: _email_qs_parts.append(f"tab={_up.quote(_tab_param_now)}")
-_email_href = "?" + "&".join(_email_qs_parts)
-
-# Common pill style — used for both email + Sign out so they're visually identical.
+# block. Email pill is a styled <a> with onclick that triggers a hidden Streamlit
+# button (rendered below). NO href, so clicking does NOT navigate or reload.
+# Sign out remains an anchor since it intentionally drops session state.
 _pill_base = ("display: inline-block; padding: 3px 10px; background: #ffffff;"
               " border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none;"
-              " font-size: 11px; font-weight: 700; line-height: 1.4;")
+              " font-size: 11px; font-weight: 700; line-height: 1.4; cursor: pointer;")
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
@@ -6220,14 +6220,26 @@ st.markdown(
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
         <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
         <span style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
-          <a href="{_email_href}" target="_self" style="{_pill_base} color: {_de_pill_color};"
+          <a href="javascript:void(0)" id="dcc-email-pill" data-action="email-settings"
+             style="{_pill_base} color: {_de_pill_color};"
              title="Email used for route confirmations">✉️ {_de_pill_label}</a>
           <a href="?logout=1" target="_self" style="{_pill_base} color: #475569;">Sign out</a>
         </span>
     </div>
+    <style>
+      /* Hide the real Streamlit button — it exists only to receive programmatic clicks
+         from the visible anchor above. */
+      div.st-key-_email_pill_hidden {{ display: none !important; }}
+    </style>
     """,
     unsafe_allow_html=True,
 )
+
+# Hidden Streamlit button — clicked programmatically by the anchor's onclick handler.
+# When clicked, sets the dialog flag and reruns (NO page reload).
+if st.button("✉️ Set email (hidden)", key="_email_pill_hidden"):
+    st.session_state['_show_email_settings'] = True
+    st.rerun()
 
 # --- EMAIL SETTINGS DIALOG ---
 # Triggered by clicking the ✉️ pill in the header (which sets ?email_settings=1).

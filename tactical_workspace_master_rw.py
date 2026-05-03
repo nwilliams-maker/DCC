@@ -6381,12 +6381,18 @@ st.markdown(
       /* Pin the email-settings Streamlit button to the top-right, just under the
          "Signed in as" block. Targets via st.container's data-testid + the
          element-key (Streamlit exposes the key as a class on the wrapper). */
+      /* Email pill: pinned INLINE with the Sign out button (same row, just left of it).
+         Matches Sign out's styling exactly so the two buttons read as one banner. */
       div.st-key-_email_pill_btn {{
           position: fixed !important;
-          top: 60px !important;
-          right: 130px !important;
+          top: 42px !important;
+          right: 128px !important;
+          left: auto !important;
+          bottom: auto !important;
           z-index: 999999 !important;
           width: auto !important;
+          margin: 0 !important;
+          padding: 0 !important;
       }}
       div.st-key-_email_pill_btn button {{
           padding: 3px 10px !important;
@@ -6398,6 +6404,11 @@ st.markdown(
           border-radius: 6px !important;
           min-height: 0 !important;
           line-height: 1.4 !important;
+          box-shadow: none !important;
+      }}
+      div.st-key-_email_pill_btn button:hover {{
+          background: #f8fafc !important;
+          border-color: #94a3b8 !important;
       }}
     </style>
     """,

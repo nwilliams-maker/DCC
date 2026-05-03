@@ -272,38 +272,73 @@ _components.html(
     (function() {{
       var parentDoc, parentWin;
       try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
-      if (parentWin._dccDeployWatcher) return;
-      parentWin._dccDeployWatcher = true;
-
-      // Move banner element to top-level body so Streamlit container clipping
-      // doesn\'t hide it. We reach across the iframe into parent doc to do this.
-      var banner = parentDoc.getElementById('dcc-update-banner');
-      if (banner && banner.parentElement !== parentDoc.body) {{
-        try {{ parentDoc.body.appendChild(banner); }} catch(_) {{}}
-      }}
-      // Same for the instance-id marker — anchor to body.
-      var idEl = parentDoc.getElementById('dcc-instance-id');
-      if (idEl && idEl.parentElement !== parentDoc.body) {{
-        try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}}
-      }}
-      // Wire up banner buttons (Streamlit strips inline onclick attrs).
-      var rb = parentDoc.getElementById('dcc-refresh-btn');
-      if (rb) rb.addEventListener('click', function() {{ parentWin.location.reload(); }});
-      var db = parentDoc.getElementById('dcc-dismiss-btn');
-      if (db) db.addEventListener('click', function() {{
-        var b = parentDoc.getElementById('dcc-update-banner');
-        if (b) b.style.setProperty('display', 'none', 'important');
-      }});
-
       var myId = "{INSTANCE_ID}";
-      var lastActivity = Date.now();
-      ['click','keydown','mousemove','scroll','input','touchstart'].forEach(function(ev) {{
-        parentDoc.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
-      }});
-      function showBanner() {{
+
+      // ── Persistent known-id key. Survives full DOM re-render / reconnect.
+      var LS_KEY = 'dcc_known_instance_id';
+      var lsKnown = null;
+      try {{ lsKnown = parentWin.localStorage.getItem(LS_KEY); }} catch(_) {{}}
+
+      // ── Inject CSS once into parent doc to NUKE Streamlit's skeleton state.
+      // Any time Streamlit tries to render its gray placeholder bars (during
+      // websocket reconnect, network blip, deploy, etc.), this rule hides
+      // them and our banner takes their place.
+      function ensureKillSkeletonCSS() {{
+        if (parentDoc.getElementById('dcc-kill-skeleton-css')) return;
+        var st = parentDoc.createElement('style');
+        st.id = 'dcc-kill-skeleton-css';
+        st.textContent = (
+          '[data-testid="stSkeleton"], .stSkeleton,' +
+          '[data-testid="stAppViewBlockContainer"] [class*="skeleton" i],' +
+          '[class*="ReconnectDialog" i], [class*="reconnect-dialog" i] {{' +
+          '  display: none !important; visibility: hidden !important;' +
+          '}}' +
+          '/* Streamlit "Connection lost" red toast — hide it; our banner replaces it */' +
+          'div[data-testid="stStatusWidget"][data-status="error"],' +
+          'div[data-testid="stToast"][data-baseweb*="toast"][data-baseweb-status="error"],' +
+          'div[role="alert"][class*="connectionStatus" i] {{' +
+          '  display: none !important;' +
+          '}}'
+        );
+        parentDoc.head.appendChild(st);
+      }}
+      ensureKillSkeletonCSS();
+
+      // ── Re-anchor banner + id marker every time (idempotent).
+      function anchorElements() {{
+        ensureKillSkeletonCSS();
+        var b = parentDoc.getElementById('dcc-update-banner');
+        if (b && b.parentElement !== parentDoc.body) {{
+          try {{ parentDoc.body.appendChild(b); }} catch(_) {{}}
+        }}
+        var idEl = parentDoc.getElementById('dcc-instance-id');
+        if (idEl && idEl.parentElement !== parentDoc.body) {{
+          try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}}
+        }}
+        var rb = parentDoc.getElementById('dcc-refresh-btn');
+        if (rb && !rb._dccWired) {{
+          rb._dccWired = true;
+          rb.addEventListener('click', function() {{ parentWin.location.reload(); }});
+        }}
+        var db = parentDoc.getElementById('dcc-dismiss-btn');
+        if (db && !db._dccWired) {{
+          db._dccWired = true;
+          db.addEventListener('click', function() {{
+            var x = parentDoc.getElementById('dcc-update-banner');
+            if (x) x.style.setProperty('display', 'none', 'important');
+          }});
+        }}
+      }}
+      anchorElements();
+
+      function showBanner(msg) {{
+        anchorElements();
         var b = parentDoc.getElementById('dcc-update-banner');
         if (!b) return;
-        // Force-override Streamlit's high-specificity rules with inline !important
+        if (msg) {{
+          var span = b.querySelector('span');
+          if (span) span.textContent = msg;
+        }}
         b.setAttribute('style',
           'position:fixed !important;top:0 !important;left:0 !important;right:0 !important;' +
           'background:#fef3c7 !important;border-bottom:2px solid #f59e0b !important;' +
@@ -314,18 +349,125 @@ _components.html(
           'box-shadow:0 2px 8px rgba(0,0,0,0.15) !important;visibility:visible !important;opacity:1 !important;'
         );
       }}
-      function maybeReload() {{
+
+      // ── Single-init guard for parentWin-scoped hooks.
+      if (parentWin._dccDeployWatcher) return;
+      parentWin._dccDeployWatcher = true;
+
+      var lastActivity = Date.now();
+      ['click','keydown','mousemove','scroll','input','touchstart'].forEach(function(ev) {{
+        parentDoc.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
+      }});
+
+      function maybeReload(forceBanner) {{
         var idleMs = Date.now() - lastActivity;
-        if (idleMs > 600000) {{ parentWin.location.reload(); }} else {{ showBanner(); }}
+        if (!forceBanner && idleMs > 600000) {{ parentWin.location.reload(); }} else {{ showBanner(); }}
       }}
+
+      // ── Initial localStorage seed / compare.
+      try {{
+        if (lsKnown && lsKnown !== myId) {{
+          parentWin.localStorage.setItem(LS_KEY, myId);
+        }} else if (!lsKnown) {{
+          parentWin.localStorage.setItem(LS_KEY, myId);
+        }}
+      }} catch(_) {{}}
+
+      // ── Periodic poll: detect deploys that happen WHILE the tab is open.
       setInterval(function() {{
+        anchorElements();
         var el = parentDoc.getElementById('dcc-instance-id');
         var cur = el && el.dataset && el.dataset.id;
-        if (cur && cur !== myId) maybeReload();
-      }}, 30000);
+        if (cur && cur !== myId) {{
+          try {{ parentWin.localStorage.setItem(LS_KEY, cur); }} catch(_) {{}}
+          maybeReload();
+        }}
+      }}, 15000);
+
+      // ── WEBSOCKET HOOK: any non-OPEN transition on Streamlit's WS triggers
+      // banner. Covers: deploy WS close, network drop, server kick, etc.
+      try {{
+        var OrigWS = parentWin.WebSocket;
+        if (OrigWS && !parentWin._dccWSHooked) {{
+          parentWin._dccWSHooked = true;
+          var WrappedWS = function(url, protocols) {{
+            var ws = protocols !== undefined
+              ? new OrigWS(url, protocols)
+              : new OrigWS(url);
+            try {{
+              if (typeof url === 'string' && /\/_stcore\/stream/.test(url)) {{
+                var openedOnce = false;
+                ws.addEventListener('open', function() {{ openedOnce = true; }});
+                ws.addEventListener('close', function(ev) {{
+                  // ANY close after the WS was once open = problem worth surfacing.
+                  // Even code 1000 during deploy means the user's session is gone.
+                  if (openedOnce) {{
+                    var idleMs = Date.now() - lastActivity;
+                    if (idleMs > 600000) {{
+                      setTimeout(function() {{ parentWin.location.reload(); }}, 1200);
+                    }} else {{
+                      showBanner('📦 Connection updated — click Refresh now to continue.');
+                    }}
+                  }}
+                }});
+                ws.addEventListener('error', function() {{
+                  if (openedOnce) showBanner('📦 Connection blip detected — click Refresh now to continue.');
+                }});
+              }}
+            }} catch(_) {{}}
+            return ws;
+          }};
+          WrappedWS.prototype = OrigWS.prototype;
+          WrappedWS.CONNECTING = OrigWS.CONNECTING;
+          WrappedWS.OPEN = OrigWS.OPEN;
+          WrappedWS.CLOSING = OrigWS.CLOSING;
+          WrappedWS.CLOSED = OrigWS.CLOSED;
+          parentWin.WebSocket = WrappedWS;
+        }}
+      }} catch(_) {{}}
+
+      // ── MutationObserver: watch the parent body. Any time a Streamlit
+      // skeleton element gets added, kill it and replace with banner.
+      try {{
+        var mo = new parentWin.MutationObserver(function(muts) {{
+          var sawSkeleton = false;
+          for (var i = 0; i < muts.length; i++) {{
+            var added = muts[i].addedNodes || [];
+            for (var j = 0; j < added.length; j++) {{
+              var n = added[j];
+              if (n && n.nodeType === 1) {{
+                var t = n.getAttribute && n.getAttribute('data-testid');
+                var c = (n.className && typeof n.className === 'string') ? n.className : '';
+                if (t === 'stSkeleton' || /skeleton/i.test(c) || /reconnect/i.test(c)) {{
+                  sawSkeleton = true;
+                  try {{ n.style.setProperty('display', 'none', 'important'); }} catch(_) {{}}
+                }}
+                // Also catch them if added deeper inside
+                if (n.querySelectorAll) {{
+                  var inner = n.querySelectorAll('[data-testid="stSkeleton"], [class*="skeleton" i], [class*="reconnect" i]');
+                  if (inner && inner.length) {{
+                    sawSkeleton = true;
+                    for (var k = 0; k < inner.length; k++) {{
+                      try {{ inner[k].style.setProperty('display', 'none', 'important'); }} catch(_) {{}}
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+          if (sawSkeleton) showBanner('📦 App is reconnecting — click Refresh now to continue.');
+        }});
+        mo.observe(parentDoc.body, {{childList: true, subtree: true}});
+      }} catch(_) {{}}
+
+      // ── Streamlit error events (Bad message / setIn / fragment id /
+      // SessionInfo / loadable failed / ChunkLoadError).
+      function isStreamlitError(msg) {{
+        return /Bad message format|Bad 'setIn' index|Could not find fragment id|SessionInfo|ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk|NetworkError|Failed to fetch/i.test(msg);
+      }}
       parentWin.addEventListener('error', function(e) {{
-        var msg = String((e && e.message) || '');
-        if (/Bad message format|Bad \'setIn\' index|Could not find fragment id|SessionInfo/i.test(msg)) {{
+        var msg = String((e && e.message) || (e && e.error && e.error.message) || '');
+        if (isStreamlitError(msg)) {{
           var idleMs = Date.now() - lastActivity;
           if (idleMs > 5000) {{
             try {{ e.preventDefault(); }} catch(_) {{}}
@@ -335,12 +477,51 @@ _components.html(
           }}
         }}
       }}, true);
+
+      // ── Unhandled promise rejections (Streamlit chunk-load + fetch fails).
+      parentWin.addEventListener('unhandledrejection', function(e) {{
+        var msg = '';
+        try {{ msg = String((e.reason && (e.reason.message || e.reason)) || ''); }} catch(_) {{}}
+        if (isStreamlitError(msg)) {{
+          var idleMs = Date.now() - lastActivity;
+          if (idleMs > 5000) {{
+            try {{ e.preventDefault(); }} catch(_) {{}}
+            parentWin.location.reload();
+          }} else {{
+            showBanner();
+          }}
+        }}
+      }}, true);
+
+      // ── Visibility resume: tab was hidden, now visible. If the WS is no
+      // longer OPEN, surface the banner immediately rather than letting
+      // Streamlit paint the skeleton.
+      parentDoc.addEventListener('visibilitychange', function() {{
+        if (parentDoc.visibilityState === 'visible') {{
+          // We can't read the WS instance directly, but the instance-id check
+          // is fast and covers the deploy case.
+          anchorElements();
+          var el = parentDoc.getElementById('dcc-instance-id');
+          var cur = el && el.dataset && el.dataset.id;
+          if (cur && cur !== myId) {{
+            try {{ parentWin.localStorage.setItem(LS_KEY, cur); }} catch(_) {{}}
+            maybeReload(true);
+          }}
+        }}
+      }});
+
+      // ── Online/offline events: surface banner on offline.
+      parentWin.addEventListener('offline', function() {{
+        showBanner('📡 Connection lost — click Refresh now once back online.');
+      }});
+      parentWin.addEventListener('online', function() {{
+        // Don't auto-hide; user clicks Refresh or Dismiss.
+      }});
     }})();
     </script>
     """,
     height=1,
 )
-
 # ============================================================================
 # 🔐 LOGIN — per-user authentication
 # ============================================================================

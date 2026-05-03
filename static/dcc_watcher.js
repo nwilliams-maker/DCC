@@ -46,6 +46,24 @@
     if (ensureBaseline() || baselineAttempts > 25) clearInterval(baselineIv);
   }, 200);
 
+  // Delegated click handler for header pill anchors with data-action attributes.
+  // Email pill anchor in header has data-action="email-settings"; click forwards
+  // to the hidden Streamlit button (key="_email_pill_hidden") so dialog opens
+  // via a normal Streamlit rerun (no page reload).
+  doc.addEventListener("click", function(e) {
+    var a = e.target && e.target.closest && e.target.closest('[data-action]');
+    if (!a) return;
+    var action = a.getAttribute("data-action");
+    if (action === "email-settings") {
+      e.preventDefault();
+      // Find the hidden Streamlit button and click it.
+      var btn = doc.querySelector('div.st-key-_email_pill_hidden button');
+      if (btn) {
+        btn.click();
+      }
+    }
+  }, true);
+
   ["click", "keydown", "mousemove", "scroll", "input", "touchstart"].forEach(function(ev) {
     doc.addEventListener(ev, function() { lastActivity = Date.now(); }, { capture: true, passive: true });
   });

@@ -6289,6 +6289,19 @@ if 'dispatcher_email' not in st.session_state:
             height=0,
         )
 
+# --- EMAIL SETTINGS URL HANDLER ---
+# Click on the email pill anchor in the header navigates with ?email_settings=1.
+# We catch it AFTER auth-restore (above) so the user is still signed in, then
+# strip the param + flip the dialog flag + rerun. The dialog renders on next pass.
+try:
+    if st.query_params.get("email_settings") == "1":
+        st.session_state['_show_email_settings'] = True
+        try: del st.query_params["email_settings"]
+        except Exception: pass
+        st.rerun()
+except Exception:
+    pass
+
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
 # their record sits in st.session_state['_auth_user'] for the lifetime of the
@@ -6363,63 +6376,38 @@ _de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
 _de_pill_label = _de_saved if _de_saved else "Set email"
 _de_pill_color = "#0f172a" if _de_saved else "#dc2626"
 
-# Header markdown — pinned info + Sign out. Email pill is rendered as a real
-# Streamlit button below (NOT inside this markdown) so its click triggers a
-# normal Streamlit rerun without a page reload. Earlier JS-bridge approach
-# was leaking setInterval timers on every rerun — broke the app post-init.
+# Header markdown — pinned info + email pill + Sign out, all in one fixed-position
+# block. Email pill and Sign out are styled identical anchors so they read as one
+# pair of pill buttons. Email pill uses ?email_settings=1 URL trigger (handled
+# above the login gate) — preserves session_state by re-applying ?auth=TOKEN +
+# ?tab=NAME during the navigation so auth + tab restore right after.
+_auth_param_now = st.query_params.get("auth", "")
+_tab_param_now = st.query_params.get("tab", "")
+import urllib.parse as _up
+_email_qs_parts = ["email_settings=1"]
+if _auth_param_now: _email_qs_parts.append(f"auth={_auth_param_now}")
+if _tab_param_now: _email_qs_parts.append(f"tab={_up.quote(_tab_param_now)}")
+_email_href = "?" + "&".join(_email_qs_parts)
+
+# Common pill style — used for both email + Sign out so they're visually identical.
+_pill_base = ("display: inline-block; padding: 3px 10px; background: #ffffff;"
+              " border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none;"
+              " font-size: 11px; font-weight: 700; line-height: 1.4;")
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
         <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
-        <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
-                border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
-                font-size: 11px; font-weight: 700;">Sign out</a>
+        <span style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
+          <a href="{_email_href}" target="_self" style="{_pill_base} color: {_de_pill_color};"
+             title="Email used for route confirmations">✉️ {_de_pill_label}</a>
+          <a href="?logout=1" target="_self" style="{_pill_base} color: #475569;">Sign out</a>
+        </span>
     </div>
-    <style>
-      /* Pin the email-settings Streamlit button to the top-right, just under the
-         "Signed in as" block. Targets via st.container's data-testid + the
-         element-key (Streamlit exposes the key as a class on the wrapper). */
-      /* Email pill: pinned INLINE with the Sign out button (same row, just left of it).
-         Matches Sign out's styling exactly so the two buttons read as one banner. */
-      div.st-key-_email_pill_btn {{
-          position: fixed !important;
-          top: 42px !important;
-          right: 128px !important;
-          left: auto !important;
-          bottom: auto !important;
-          z-index: 999999 !important;
-          width: max-content !important;
-          max-width: max-content !important;
-          min-width: 0 !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          display: inline-block !important;
-      }}
-      div.st-key-_email_pill_btn button {{
-          padding: 3px 10px !important;
-          font-size: 11px !important;
-          font-weight: 700 !important;
-          color: {_de_pill_color} !important;
-          background: #ffffff !important;
-          border: 1px solid #cbd5e1 !important;
-          border-radius: 6px !important;
-          min-height: 0 !important;
-          line-height: 1.4 !important;
-          box-shadow: none !important;
-      }}
-      div.st-key-_email_pill_btn button:hover {{
-          background: #f8fafc !important;
-          border-color: #94a3b8 !important;
-      }}
-    </style>
     """,
     unsafe_allow_html=True,
 )
-if st.button(f"✉️ {_de_pill_label}", key="_email_pill_btn", help="Email used for route confirmations"):
-    st.session_state['_show_email_settings'] = True
-    st.rerun()
 
 # --- EMAIL SETTINGS DIALOG ---
 # Triggered by clicking the ✉️ pill in the header (which sets ?email_settings=1).

@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import base64
@@ -569,11 +568,45 @@ def _can_access_tab(tab_pod: str) -> bool:
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
+    # CSS to vertically center the title + form pair in the viewport.
+    # Without this, the form gets pushed to the lower half of the page when
+    # other Streamlit elements (components iframes, etc.) take vertical space.
     st.markdown(
-        "<div style='text-align:center; padding-top:60px; width:100%;'>"
-        "<h1 style='color:#633094; margin: 0 auto 6px auto; font-weight:800; text-align:center;'>Terraboost Media</h1>"
-        "<p style='color:#64748b; margin:0 auto 32px auto; font-size:14px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700; text-align:center;'>Dispatch Command Center · Sign in</p>"
-        "</div>",
+        """
+        <style>
+          /* Pull main Streamlit container's top padding down on the login page */
+          [data-testid="stMainBlockContainer"] {
+            padding-top: 0 !important;
+          }
+          /* Title block + form container — center vertically in viewport */
+          .dcc-login-wrap {
+            min-height: 75vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            width: 100%;
+          }
+          .dcc-login-wrap h1 {
+            color: #633094;
+            margin: 0 0 6px 0;
+            font-weight: 800;
+          }
+          .dcc-login-wrap p {
+            color: #64748b;
+            margin: 0 0 18px 0;
+            font-size: 14px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            font-weight: 700;
+          }
+        </style>
+        <div class="dcc-login-wrap">
+          <h1>Terraboost Media</h1>
+          <p>Dispatch Command Center · Sign in</p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
     _spacer_l, col, _spacer_r = st.columns([1, 2, 1])

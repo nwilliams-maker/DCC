@@ -586,12 +586,17 @@ def _can_access_tab(tab_pod: str) -> bool:
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
-    # Login title block — sits in the upper-middle of the viewport (per
-    # dispatcher spec). Don't fight Streamlit's natural flow; just style the
-    # title pair and let it land where Streamlit's default padding puts it.
+    # Login title block — pulled up into the upper third of the viewport.
+    # Streamlit's natural padding alone pushes it to mid-page; we trim that
+    # padding modestly (not all the way to the top — that looked cramped).
     st.markdown(
         """
         <style>
+          /* Trim Streamlit's main container top padding so the login starts higher */
+          [data-testid="stMainBlockContainer"],
+          .main .block-container {
+            padding-top: 60px !important;
+          }
           .dcc-login-wrap {
             text-align: center;
             width: 100%;

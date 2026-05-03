@@ -277,9 +277,28 @@ st.markdown(
 # tag is rendered via st.markdown(unsafe_allow_html=True). Streamlit normally
 # strips <script> tags, but a script with src= on an external URL passes through.
 # We append ?v=INSTANCE_ID for cache-busting per deploy.
-st.markdown(
-    f'<script src="/app/static/dcc_watcher.js?v={INSTANCE_ID}" defer></script>',
-    unsafe_allow_html=True,
+# Browsers refuse to execute scripts inserted via innerHTML (which is what
+# st.markdown uses). To get an external script to actually run, we use a tiny
+# components.v1.html iframe that uses document.createElement() + appendChild()
+# in the parent doc — that DOES trigger script execution. The iframe itself is
+# only ~30 lines of bootstrap; all real logic is in the static dcc_watcher.js.
+_components.html(
+    f"""
+    <script>
+    (function() {{
+      try {{
+        var parentDoc = window.parent.document;
+        if (parentDoc.getElementById('dcc-watcher-loader')) return;
+        var s = parentDoc.createElement('script');
+        s.id = 'dcc-watcher-loader';
+        s.src = '/app/static/dcc_watcher.js?v={INSTANCE_ID}';
+        s.defer = true;
+        parentDoc.head.appendChild(s);
+      }} catch(e) {{}}
+    }})();
+    </script>
+    """,
+    height=0,
 )
 # ============================================================================
 # 🔐 LOGIN — per-user authentication

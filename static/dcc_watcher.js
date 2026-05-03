@@ -80,10 +80,11 @@
     if (bn.parentElement !== doc.body) {
       try { doc.body.appendChild(bn); } catch (_) {}
     }
-    if (msg) {
-      var sp = bn.querySelector("span");
-      if (sp) sp.textContent = msg;
-    }
+    // Always reset the message text so a stale custom message from a previous
+    // trigger doesn't carry over after dismiss + re-trigger. Defaults to the
+    // generic "App was updated" string when no msg is passed.
+    var sp = bn.querySelector("span");
+    if (sp) sp.textContent = msg || "📦 App was updated. Reload when you're ready.";
     bn.setAttribute("style",
       "position:fixed !important;top:0 !important;left:0 !important;right:0 !important;" +
       "background:#fef3c7 !important;border-bottom:2px solid #f59e0b !important;" +

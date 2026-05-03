@@ -6655,6 +6655,64 @@ if (_locked_pod.upper() not in ('ADMIN', 'MANAGER', 'ALL')
     st.stop()
 
 tabs = st.tabs(["Global", "Blue Pod", "Green Pod", "Orange Pod", "Purple Pod", "Red Pod", "Digital"])
+
+# ── TAB PERSISTENCE: keep the user on whatever tab they were on across deploys.
+# Streamlit's st.tabs() is stateless and resets to tab[0] on every fresh server
+# start (which is what a Railway redeploy looks like — session_state wiped, but
+# the URL ?auth= survives so the user stays signed in). We layer URL-param
+# persistence on top: every click on a tab writes ?tab=<name> via history.replaceState
+# (no navigation), and on first paint we click whichever tab matches ?tab=.
+_persist_target = st.query_params.get("tab", "")
+_components.html(
+    f"""
+    <script>
+    (function() {{
+      var parentDoc, parentWin;
+      try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
+      var TARGET = {repr(str(_persist_target))};
+
+      // Restore the last-active tab on page load.
+      function restoreTab() {{
+        if (!TARGET) return true;
+        var btns = parentDoc.querySelectorAll('button[role="tab"]');
+        for (var i = 0; i < btns.length; i++) {{
+          var label = (btns[i].innerText || '').trim();
+          if (label === TARGET) {{
+            if (btns[i].getAttribute('aria-selected') !== 'true') {{
+              try {{ btns[i].click(); }} catch(_) {{}}
+            }}
+            return true;
+          }}
+        }}
+        return false;
+      }}
+      var attempts = 0;
+      var iv = parentWin.setInterval(function() {{
+        attempts++;
+        if (restoreTab() || attempts > 25) parentWin.clearInterval(iv);
+      }}, 120);
+
+      // Persist tab clicks to URL so the next reload (deploy or otherwise) lands here.
+      if (!parentWin._dccTabPersist) {{
+        parentWin._dccTabPersist = true;
+        parentDoc.addEventListener('click', function(e) {{
+          var t = e.target && e.target.closest && e.target.closest('button[role="tab"]');
+          if (!t) return;
+          var name = (t.innerText || '').trim();
+          if (!name) return;
+          try {{
+            var u = new URL(parentWin.location.href);
+            u.searchParams.set('tab', name);
+            parentWin.history.replaceState({{}}, '', u.toString());
+          }} catch(_) {{}}
+        }}, true);
+      }}
+    }})();
+    </script>
+    """,
+    height=0,
+)
+
 # --- TAB 0: GLOBAL CONTROL ---
 with tabs[0]:
     if not _can_access_tab('Global'):

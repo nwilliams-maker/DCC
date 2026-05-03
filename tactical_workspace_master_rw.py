@@ -256,8 +256,8 @@ st.markdown(
     <div id="dcc-update-banner" style="display:none;position:fixed;top:0;left:0;right:0;background:#fef3c7;border-bottom:1px solid #f59e0b;color:#78350f;padding:10px 16px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;z-index:99999;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,.08);">
       <span>📦 App was updated. Refresh when you\'re ready.</span>
       <span>
-        <button onclick="window.parent.location.reload()" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Refresh now</button>
-        <button onclick="window.parent.document.getElementById(\'dcc-update-banner\').style.display=\'none\'" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
+        <button id="dcc-refresh-btn" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Refresh now</button>
+        <button id="dcc-dismiss-btn" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
       </span>
     </div>
     """,
@@ -286,6 +286,14 @@ _components.html(
       if (idEl && idEl.parentElement !== parentDoc.body) {{
         try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}}
       }}
+      // Wire up banner buttons (Streamlit strips inline onclick attrs).
+      var rb = parentDoc.getElementById('dcc-refresh-btn');
+      if (rb) rb.addEventListener('click', function() {{ parentWin.location.reload(); }});
+      var db = parentDoc.getElementById('dcc-dismiss-btn');
+      if (db) db.addEventListener('click', function() {{
+        var b = parentDoc.getElementById('dcc-update-banner');
+        if (b) b.style.setProperty('display', 'none', 'important');
+      }});
 
       var myId = "{INSTANCE_ID}";
       var lastActivity = Date.now();
@@ -294,7 +302,17 @@ _components.html(
       }});
       function showBanner() {{
         var b = parentDoc.getElementById('dcc-update-banner');
-        if (b) b.style.display = 'flex';
+        if (!b) return;
+        // Force-override Streamlit's high-specificity rules with inline !important
+        b.setAttribute('style',
+          'position:fixed !important;top:0 !important;left:0 !important;right:0 !important;' +
+          'background:#fef3c7 !important;border-bottom:2px solid #f59e0b !important;' +
+          'color:#78350f !important;padding:12px 20px !important;' +
+          'font-family:system-ui,-apple-system,sans-serif !important;font-size:14px !important;' +
+          'font-weight:500 !important;z-index:2147483647 !important;' +
+          'display:flex !important;justify-content:space-between !important;align-items:center !important;' +
+          'box-shadow:0 2px 8px rgba(0,0,0,0.15) !important;visibility:visible !important;opacity:1 !important;'
+        );
       }}
       function maybeReload() {{
         var idleMs = Date.now() - lastActivity;
@@ -568,17 +586,12 @@ def _can_access_tab(tab_pod: str) -> bool:
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
-    # Pull the entire login (title + form + Streamlit container padding) up to
-    # the top of the viewport so it's not floating in the middle of the page.
+    # Login title block — sits in the upper-middle of the viewport (per
+    # dispatcher spec). Don't fight Streamlit's natural flow; just style the
+    # title pair and let it land where Streamlit's default padding puts it.
     st.markdown(
         """
         <style>
-          /* Kill Streamlit's default top padding on the login page */
-          [data-testid="stMainBlockContainer"],
-          .main .block-container {
-            padding-top: 8px !important;
-          }
-          /* Tight, top-anchored title block */
           .dcc-login-wrap {
             text-align: center;
             width: 100%;
@@ -586,14 +599,14 @@ def _render_login_form():
           }
           .dcc-login-wrap h1 {
             color: #633094;
-            margin: 0 0 4px 0;
+            margin: 0 0 6px 0;
             font-weight: 800;
-            font-size: 28px;
+            font-size: 32px;
           }
           .dcc-login-wrap p {
             color: #64748b;
-            margin: 0 0 14px 0;
-            font-size: 13px;
+            margin: 0 0 16px 0;
+            font-size: 14px;
             letter-spacing: 0.04em;
             text-transform: uppercase;
             font-weight: 700;

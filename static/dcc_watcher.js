@@ -16,6 +16,12 @@
 (function() {
   if (window._dccWatcherV9) return;
   window._dccWatcherV9 = true;
+  // Dev hint — visible in browser console for debugging shipped builds.
+  try {
+    var idEl = document.getElementById("dcc-instance-id");
+    var bid = idEl && idEl.dataset && idEl.dataset.id;
+    console.info("%c[dcc-watcher] v9 loaded · instance=" + bid, "color:#633094;font-weight:bold");
+  } catch (_) {}
 
   var doc = document, win = window;
   var LS_KEY = "dcc_known_instance_id";

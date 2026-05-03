@@ -568,35 +568,32 @@ def _can_access_tab(tab_pod: str) -> bool:
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
-    # CSS to vertically center the title + form pair in the viewport.
-    # Without this, the form gets pushed to the lower half of the page when
-    # other Streamlit elements (components iframes, etc.) take vertical space.
+    # Pull the entire login (title + form + Streamlit container padding) up to
+    # the top of the viewport so it's not floating in the middle of the page.
     st.markdown(
         """
         <style>
-          /* Pull main Streamlit container's top padding down on the login page */
-          [data-testid="stMainBlockContainer"] {
-            padding-top: 0 !important;
+          /* Kill Streamlit's default top padding on the login page */
+          [data-testid="stMainBlockContainer"],
+          .main .block-container {
+            padding-top: 8px !important;
           }
-          /* Title block + form container — center vertically in viewport */
+          /* Tight, top-anchored title block */
           .dcc-login-wrap {
-            min-height: 75vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
             text-align: center;
             width: 100%;
+            margin: 0 auto 12px auto;
           }
           .dcc-login-wrap h1 {
             color: #633094;
-            margin: 0 0 6px 0;
+            margin: 0 0 4px 0;
             font-weight: 800;
+            font-size: 28px;
           }
           .dcc-login-wrap p {
             color: #64748b;
-            margin: 0 0 18px 0;
-            font-size: 14px;
+            margin: 0 0 14px 0;
+            font-size: 13px;
             letter-spacing: 0.04em;
             text-transform: uppercase;
             font-weight: 700;

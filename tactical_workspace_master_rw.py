@@ -6024,7 +6024,7 @@ def run_pod_tab(pod_name):
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of
 # using an unstyleable st.button). Catch it here, before the login gate.
-import streamlit.components.v1 as _components
+# (Note: _components is imported once at the top of the file, line ~248.)
 try:
     if st.query_params.get("logout") == "1":
         st.session_state.pop('_auth_user', None)
@@ -6453,6 +6453,25 @@ _components.html(
       var parentDoc, parentWin;
       try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
       var TARGET = {repr(str(_persist_target))};
+      var LS_LAST_TAB = "dcc_last_tab";
+
+      // Fallback: if URL has no ?tab= param, check localStorage for the last
+      // tab the user clicked. This catches the case where they hard-reload
+      // (Ctrl+R) before clicking any tab on a fresh sign-in.
+      if (!TARGET) {{
+        try {{
+          var lsTab = parentWin.localStorage.getItem(LS_LAST_TAB);
+          if (lsTab) {{
+            TARGET = lsTab;
+            // Also write it to the URL so subsequent navigation matches.
+            try {{
+              var u0 = new URL(parentWin.location.href);
+              u0.searchParams.set('tab', lsTab);
+              parentWin.history.replaceState({{}}, '', u0.toString());
+            }} catch(_) {{}}
+          }}
+        }} catch(_) {{}}
+      }}
 
       // Restore the last-active tab on page load.
       function restoreTab() {{
@@ -6487,6 +6506,7 @@ _components.html(
             var u = new URL(parentWin.location.href);
             u.searchParams.set('tab', name);
             parentWin.history.replaceState({{}}, '', u.toString());
+            try {{ parentWin.localStorage.setItem("dcc_last_tab", name); }} catch(_) {{}}
           }} catch(_) {{}}
         }}, true);
       }}

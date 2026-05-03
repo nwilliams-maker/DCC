@@ -827,7 +827,17 @@ def _render_login_form():
             if _submitted:
                 _rec = _check_password(_username, _password)
                 if _rec:
-                    st.session_state['_auth_user'] = {**_rec, 'username': str(_username).lower().strip()}
+                    _u_clean = str(_username).lower().strip()
+                    st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
+                    # ALWAYS set ?auth=TOKEN in URL so this tab survives deploys.
+                    # Independent of stay-signed-in (which controls localStorage).
+                    # Without this, a Railway redeploy boots active users back to
+                    # the login screen because Streamlit session_state is wiped
+                    # on server restart and there's no per-tab restore key.
+                    try:
+                        st.query_params['auth'] = _stay_token_for(_u_clean)
+                    except Exception:
+                        pass
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")

@@ -273,228 +273,10 @@ st.markdown(
 )
 
 # Active JS lives in a components.v1.html iframe (Streamlit allows scripts there).
-# CRITICAL: The watcher logic must live in the PARENT window, not in the iframe —
-# every Streamlit rerun rebuilds the iframe and would destroy our timers.
-# So the iframe injects a <script> into the parent document that runs once and stays put.
-import json as _wjson
-_dcc_watcher_js_template = """(function() {
-  var doc = document, win = window;
-  if (win._dccWatcherV6) return;
-  win._dccWatcherV6 = true;
-
-  var MY_ID = __INSTANCE_ID__;
-  var LS_KEY = "dcc_known_instance_id";
-  var lastActivity = Date.now();
-  var stuckCheckStart = null;
-
-  ["click","keydown","mousemove","scroll","input","touchstart"].forEach(function(ev){
-    doc.addEventListener(ev, function(){ lastActivity = Date.now(); }, {capture:true, passive:true});
-  });
-
-  // ── Banner show with !important inline style
-  function showBanner(msg) {
-    var bn = doc.getElementById("dcc-update-banner");
-    if (!bn) return;
-    if (bn.parentElement !== doc.body) {
-      try { doc.body.appendChild(bn); } catch(_) {}
-    }
-    if (msg) {
-      var sp = bn.querySelector("span");
-      if (sp) sp.textContent = msg;
-    }
-    bn.setAttribute("style",
-      "position:fixed !important;top:0 !important;left:0 !important;right:0 !important;" +
-      "background:#fef3c7 !important;border-bottom:2px solid #f59e0b !important;" +
-      "color:#78350f !important;padding:12px 20px !important;" +
-      "font-family:system-ui,-apple-system,sans-serif !important;font-size:14px !important;" +
-      "font-weight:500 !important;z-index:2147483647 !important;" +
-      "display:flex !important;justify-content:space-between !important;align-items:center !important;" +
-      "box-shadow:0 2px 8px rgba(0,0,0,0.15) !important;visibility:visible !important;opacity:1 !important;"
-    );
-  }
-  win._dccShowBanner = showBanner;
-
-  // ── Wire banner buttons (idempotent)
-  function wireBannerButtons() {
-    var rb = doc.getElementById("dcc-refresh-btn");
-    if (rb && !rb._dccWired) {
-      rb._dccWired = true;
-      rb.addEventListener("click", function(){ win.location.reload(); });
-    }
-    var db = doc.getElementById("dcc-dismiss-btn");
-    if (db && !db._dccWired) {
-      db._dccWired = true;
-      db.addEventListener("click", function(){
-        var x = doc.getElementById("dcc-update-banner");
-        if (x) x.style.setProperty("display", "none", "important");
-        // Cancel any pending auto-reload — user wants to keep working.
-        if (win._dccPendingReload) { try { clearTimeout(win._dccPendingReload); } catch(_) {} win._dccPendingReload = null; }
-      });
-    }
-  }
-  wireBannerButtons();
-
-  // ── Skeleton-kill CSS (broad selector — hide ALL Streamlit placeholders)
-  function ensureKillCSS() {
-    if (doc.getElementById("dcc-kill-skeleton-css")) return;
-    var st = doc.createElement("style");
-    st.id = "dcc-kill-skeleton-css";
-    st.textContent = [
-      '[data-testid="stSkeleton"], .stSkeleton { display:none !important; visibility:hidden !important; }',
-      '[class*="ReconnectDialog" i], [class*="reconnect-dialog" i], [class*="reconnect" i][role="dialog"] { display:none !important; }',
-      'div[data-testid="stStatusWidget"][data-status="error"] { display:none !important; }',
-      '[data-testid="stApp"][data-test-connection-state="DISCONNECTED"] [data-testid="stSkeleton"] { display:none !important; }'
-    ].join("\n");
-    doc.head.appendChild(st);
-  }
-  ensureKillCSS();
-
-  // ── 15s INSTANCE_ID poll (lives on parent window — survives iframe rebuilds)
-  win.setInterval(function(){
-    wireBannerButtons();
-    var bn = doc.getElementById("dcc-update-banner");
-    if (bn && bn.parentElement !== doc.body) { try { doc.body.appendChild(bn); } catch(_) {} }
-    var el = doc.getElementById("dcc-instance-id");
-    var cur = el && el.dataset && el.dataset.id;
-    if (cur && cur !== MY_ID) {
-      try { win.localStorage.setItem(LS_KEY, cur); } catch(_) {}
-      var idleMs = Date.now() - lastActivity;
-      if (idleMs > 600000) { win.location.reload(); }
-      else { showBanner(); }
-    }
-  }, 15000);
-
-  // ── 2s STUCK-SKELETON recovery: if Streamlit has been disconnected with
-  // no real content for 4+ seconds, force reload. Auth + tab survive.
-  win.setInterval(function(){
-    var stApp = doc.querySelector('[data-testid="stApp"]');
-    if (!stApp) return;
-    var connState = stApp.getAttribute("data-test-connection-state") || "";
-    var hasContent = !!doc.querySelector('[data-testid="stMarkdown"], [data-testid="stHorizontalBlock"], [data-testid="stTabs"], [data-testid="stForm"]');
-    var skeletonCount = doc.querySelectorAll('[data-testid="stSkeleton"], .stSkeleton').length;
-    var isStuck = (connState === "DISCONNECTED") || (!hasContent && skeletonCount > 0);
-    if (isStuck) {
-      if (stuckCheckStart === null) stuckCheckStart = Date.now();
-      var stuckMs = Date.now() - stuckCheckStart;
-      if (stuckMs > 4000) {
-        // Force-reload: URL has ?auth= and ?tab= so user lands back on their page.
-        win.location.reload();
-      }
-    } else {
-      stuckCheckStart = null;
-    }
-  }, 2000);
-
-  // ── WebSocket hook: deploy detection + AUTO-RELOAD (don't wait for user)
-  try {
-    var OrigWS = win.WebSocket;
-    if (OrigWS && !win._dccWSHooked) {
-      win._dccWSHooked = true;
-      var W = function(url, p) {
-        var ws = (p !== undefined) ? new OrigWS(url, p) : new OrigWS(url);
-        try {
-          if (typeof url === "string" && /\/_stcore\/stream/.test(url)) {
-            var openedOnce = false;
-            ws.addEventListener("open", function(){ openedOnce = true; });
-            ws.addEventListener("close", function(ev){
-              if (openedOnce && ev && ev.code !== 1000 && ev.code !== 1001) {
-                showBanner("📦 App was updated — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-                // 30s grace period so dispatcher can finish their action. URL ?auth=
-                // and ?tab= preserve session + tab on reload. Dismiss cancels.
-                if (win._dccPendingReload) { try { clearTimeout(win._dccPendingReload); } catch(_) {} }
-                win._dccPendingReload = setTimeout(function(){ win.location.reload(); }, 30000);
-              }
-            });
-          }
-        } catch(_) {}
-        return ws;
-      };
-      W.prototype = OrigWS.prototype;
-      W.CONNECTING = OrigWS.CONNECTING;
-      W.OPEN = OrigWS.OPEN;
-      W.CLOSING = OrigWS.CLOSING;
-      W.CLOSED = OrigWS.CLOSED;
-      win.WebSocket = W;
-    }
-  } catch(_) {}
-
-  // ── MutationObserver: silently hide skeletons added after page load
-  try {
-    var mo = new win.MutationObserver(function(muts){
-      for (var i = 0; i < muts.length; i++) {
-        var added = muts[i].addedNodes || [];
-        for (var j = 0; j < added.length; j++) {
-          var n = added[j];
-          if (n && n.nodeType === 1) {
-            var t = n.getAttribute && n.getAttribute("data-testid");
-            if (t === "stSkeleton") {
-              try { n.style.setProperty("display", "none", "important"); } catch(_) {}
-            }
-            if (n.querySelectorAll) {
-              var inner = n.querySelectorAll('[data-testid="stSkeleton"], .stSkeleton');
-              for (var k = 0; k < inner.length; k++) {
-                try { inner[k].style.setProperty("display", "none", "important"); } catch(_) {}
-              }
-            }
-          }
-        }
-      }
-    });
-    mo.observe(doc.body, {childList: true, subtree: true});
-  } catch(_) {}
-
-  // ── Error events: stale-tab Streamlit errors → reload or banner
-  function isStErr(m) {
-    return /Bad message format|Bad 'setIn' index|Could not find fragment id|SessionInfo|ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk|NetworkError|Failed to fetch/i.test(m);
-  }
-  win.addEventListener("error", function(e){
-    var m = String((e && e.message) || (e && e.error && e.error.message) || "");
-    if (isStErr(m)) {
-      try { e.preventDefault(); } catch(_) {}
-      showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-      if (win._dccPendingReload) { try { clearTimeout(win._dccPendingReload); } catch(_) {} }
-      win._dccPendingReload = setTimeout(function(){ win.location.reload(); }, 30000);
-    }
-  }, true);
-  win.addEventListener("unhandledrejection", function(e){
-    var m = "";
-    try { m = String((e.reason && (e.reason.message || e.reason)) || ""); } catch(_) {}
-    if (isStErr(m)) {
-      try { e.preventDefault(); } catch(_) {}
-      showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-      if (win._dccPendingReload) { try { clearTimeout(win._dccPendingReload); } catch(_) {} }
-      win._dccPendingReload = setTimeout(function(){ win.location.reload(); }, 30000);
-    }
-  }, true);
-
-  // ── Visibility resume: tab refocused, check INSTANCE_ID
-  doc.addEventListener("visibilitychange", function(){
-    if (doc.visibilityState === "visible") {
-      var el = doc.getElementById("dcc-instance-id");
-      var cur = el && el.dataset && el.dataset.id;
-      if (cur && cur !== MY_ID) {
-        try { win.localStorage.setItem(LS_KEY, cur); } catch(_) {}
-        showBanner();
-      }
-    }
-  });
-
-  // ── Offline event
-  win.addEventListener("offline", function(){
-    showBanner("📡 Connection lost — click Reload now once back online.");
-  });
-
-  // ── localStorage seed
-  try {
-    var lsKnown = win.localStorage.getItem(LS_KEY);
-    if (!lsKnown || lsKnown !== MY_ID) {
-      win.localStorage.setItem(LS_KEY, MY_ID);
-    }
-  } catch(_) {}
-})();
-"""
-_dcc_watcher_js = _dcc_watcher_js_template.replace("__INSTANCE_ID__", _wjson.dumps(INSTANCE_ID))
-_dcc_watcher_js_literal = _wjson.dumps(_dcc_watcher_js)
+# All timers/observers/listeners are registered on parentWin via parentWin.setInterval,
+# parentWin.MutationObserver, parentWin.addEventListener, etc. This makes them survive
+# iframe rebuilds (which Streamlit does on every rerun) — the iframe's closure stays
+# alive as long as parentWin holds references to our registered callbacks.
 _components.html(
     f"""
     <script>
@@ -502,17 +284,13 @@ _components.html(
       var parentDoc, parentWin;
       try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
 
-      // Always re-anchor banner + idEl every iframe mount.
+      // Re-anchor banner + idEl every iframe mount (idempotent).
       var b = parentDoc.getElementById('dcc-update-banner');
-      if (b && b.parentElement !== parentDoc.body) {{
-        try {{ parentDoc.body.appendChild(b); }} catch(_) {{}}
-      }}
+      if (b && b.parentElement !== parentDoc.body) {{ try {{ parentDoc.body.appendChild(b); }} catch(_) {{}} }}
       var idEl = parentDoc.getElementById('dcc-instance-id');
-      if (idEl && idEl.parentElement !== parentDoc.body) {{
-        try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}}
-      }}
+      if (idEl && idEl.parentElement !== parentDoc.body) {{ try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}} }}
 
-      // Re-wire banner buttons.
+      // Re-wire banner buttons (Streamlit may re-render the banner shell).
       var rb = parentDoc.getElementById('dcc-refresh-btn');
       if (rb && !rb._dccWired) {{
         rb._dccWired = true;
@@ -524,17 +302,182 @@ _components.html(
         db.addEventListener('click', function() {{
           var x = parentDoc.getElementById('dcc-update-banner');
           if (x) x.style.setProperty('display', 'none', 'important');
-          // Cancel any pending auto-reload — user wants to keep working.
           if (parentWin._dccPendingReload) {{ try {{ clearTimeout(parentWin._dccPendingReload); }} catch(_) {{}} parentWin._dccPendingReload = null; }}
         }});
       }}
 
-      // Bootstrap the persistent watcher into the parent doc — only once.
-      if (parentWin._dccWatcherV6) return;
-      var s = parentDoc.createElement('script');
-      s.id = 'dcc-watcher-script';
-      s.textContent = {_dcc_watcher_js_literal};
-      parentDoc.head.appendChild(s);
+      // Bootstrap the persistent watcher only once. Timers live on parentWin so
+      // they survive iframe rebuilds.
+      if (parentWin._dccWatcherV7) return;
+      parentWin._dccWatcherV7 = true;
+
+      var MY_ID = "{INSTANCE_ID}";
+      var LS_KEY = "dcc_known_instance_id";
+      var lastActivity = Date.now();
+      var stuckCheckStart = null;
+
+      ["click","keydown","mousemove","scroll","input","touchstart"].forEach(function(ev) {{
+        parentDoc.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
+      }});
+
+      function showBanner(msg) {{
+        var bn = parentDoc.getElementById("dcc-update-banner");
+        if (!bn) return;
+        if (bn.parentElement !== parentDoc.body) {{ try {{ parentDoc.body.appendChild(bn); }} catch(_) {{}} }}
+        if (msg) {{ var sp = bn.querySelector("span"); if (sp) sp.textContent = msg; }}
+        bn.setAttribute("style",
+          "position:fixed !important;top:0 !important;left:0 !important;right:0 !important;" +
+          "background:#fef3c7 !important;border-bottom:2px solid #f59e0b !important;" +
+          "color:#78350f !important;padding:12px 20px !important;" +
+          "font-family:system-ui,-apple-system,sans-serif !important;font-size:14px !important;" +
+          "font-weight:500 !important;z-index:2147483647 !important;" +
+          "display:flex !important;justify-content:space-between !important;align-items:center !important;" +
+          "box-shadow:0 2px 8px rgba(0,0,0,0.15) !important;visibility:visible !important;opacity:1 !important;"
+        );
+      }}
+      parentWin._dccShowBanner = showBanner;
+
+      // Inject skeleton-kill CSS into parent doc (idempotent).
+      if (!parentDoc.getElementById("dcc-kill-skeleton-css")) {{
+        var st = parentDoc.createElement("style");
+        st.id = "dcc-kill-skeleton-css";
+        st.textContent =
+          '[data-testid="stSkeleton"], .stSkeleton {{ display:none !important; visibility:hidden !important; }}\n' +
+          '[class*="ReconnectDialog" i], [class*="reconnect-dialog" i] {{ display:none !important; }}\n' +
+          'div[data-testid="stStatusWidget"][data-status="error"] {{ display:none !important; }}';
+        parentDoc.head.appendChild(st);
+      }}
+
+      // 15s INSTANCE_ID poll (lives on parentWin — survives iframe rebuild).
+      parentWin.setInterval(function() {{
+        var bn = parentDoc.getElementById("dcc-update-banner");
+        if (bn && bn.parentElement !== parentDoc.body) {{ try {{ parentDoc.body.appendChild(bn); }} catch(_) {{}} }}
+        var el = parentDoc.getElementById("dcc-instance-id");
+        var cur = el && el.dataset && el.dataset.id;
+        if (cur && cur !== MY_ID) {{
+          try {{ parentWin.localStorage.setItem(LS_KEY, cur); }} catch(_) {{}}
+          var idleMs = Date.now() - lastActivity;
+          if (idleMs > 600000) {{ parentWin.location.reload(); }}
+          else {{ showBanner(); }}
+        }}
+      }}, 15000);
+
+      // 2s STUCK-SKELETON recovery: if app has been disconnected with no real content
+      // for 4+ seconds, force reload. Auth + tab survive via URL params.
+      parentWin.setInterval(function() {{
+        var stApp = parentDoc.querySelector('[data-testid="stApp"]');
+        if (!stApp) return;
+        var connState = stApp.getAttribute("data-test-connection-state") || "";
+        var hasContent = !!parentDoc.querySelector('[data-testid="stMarkdown"], [data-testid="stHorizontalBlock"], [data-testid="stTabs"], [data-testid="stForm"]');
+        var skeletonCount = parentDoc.querySelectorAll('[data-testid="stSkeleton"], .stSkeleton').length;
+        var isStuck = (connState === "DISCONNECTED") || (!hasContent && skeletonCount > 0);
+        if (isStuck) {{
+          if (stuckCheckStart === null) stuckCheckStart = Date.now();
+          var stuckMs = Date.now() - stuckCheckStart;
+          if (stuckMs > 4000) {{ parentWin.location.reload(); }}
+        }} else {{
+          stuckCheckStart = null;
+        }}
+      }}, 2000);
+
+      // WebSocket hook: deploy detection + 30s auto-reload (cancellable via Dismiss).
+      try {{
+        var OrigWS = parentWin.WebSocket;
+        if (OrigWS && !parentWin._dccWSHooked) {{
+          parentWin._dccWSHooked = true;
+          var W = function(url, p) {{
+            var ws = (p !== undefined) ? new OrigWS(url, p) : new OrigWS(url);
+            try {{
+              if (typeof url === "string" && /\/_stcore\/stream/.test(url)) {{
+                var openedOnce = false;
+                ws.addEventListener("open", function() {{ openedOnce = true; }});
+                ws.addEventListener("close", function(ev) {{
+                  if (openedOnce && ev && ev.code !== 1000 && ev.code !== 1001) {{
+                    showBanner("📦 App was updated — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
+                    if (parentWin._dccPendingReload) {{ try {{ clearTimeout(parentWin._dccPendingReload); }} catch(_) {{}} }}
+                    parentWin._dccPendingReload = setTimeout(function() {{ parentWin.location.reload(); }}, 30000);
+                  }}
+                }});
+              }}
+            }} catch(_) {{}}
+            return ws;
+          }};
+          W.prototype = OrigWS.prototype;
+          W.CONNECTING = OrigWS.CONNECTING;
+          W.OPEN = OrigWS.OPEN;
+          W.CLOSING = OrigWS.CLOSING;
+          W.CLOSED = OrigWS.CLOSED;
+          parentWin.WebSocket = W;
+        }}
+      }} catch(_) {{}}
+
+      // MutationObserver: silently hide skeletons added after page load.
+      try {{
+        var mo = new parentWin.MutationObserver(function(muts) {{
+          for (var i = 0; i < muts.length; i++) {{
+            var added = muts[i].addedNodes || [];
+            for (var j = 0; j < added.length; j++) {{
+              var n = added[j];
+              if (n && n.nodeType === 1) {{
+                var t = n.getAttribute && n.getAttribute("data-testid");
+                if (t === "stSkeleton") {{ try {{ n.style.setProperty("display", "none", "important"); }} catch(_) {{}} }}
+                if (n.querySelectorAll) {{
+                  var inner = n.querySelectorAll('[data-testid="stSkeleton"], .stSkeleton');
+                  for (var k = 0; k < inner.length; k++) {{
+                    try {{ inner[k].style.setProperty("display", "none", "important"); }} catch(_) {{}}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }});
+        mo.observe(parentDoc.body, {{childList: true, subtree: true}});
+      }} catch(_) {{}}
+
+      // Stale-tab Streamlit errors → 30s auto-reload (cancellable).
+      var stRegex = /Bad message format|Bad .setIn. index|Could not find fragment id|SessionInfo|ChunkLoadError|Loading chunk \\d\\+ failed|Loading CSS chunk|NetworkError|Failed to fetch/i;
+      parentWin.addEventListener("error", function(e) {{
+        var m = String((e && e.message) || (e && e.error && e.error.message) || "");
+        if (stRegex.test(m)) {{
+          try {{ e.preventDefault(); }} catch(_) {{}}
+          showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
+          if (parentWin._dccPendingReload) {{ try {{ clearTimeout(parentWin._dccPendingReload); }} catch(_) {{}} }}
+          parentWin._dccPendingReload = setTimeout(function() {{ parentWin.location.reload(); }}, 30000);
+        }}
+      }}, true);
+      parentWin.addEventListener("unhandledrejection", function(e) {{
+        var m = "";
+        try {{ m = String((e.reason && (e.reason.message || e.reason)) || ""); }} catch(_) {{}}
+        if (stRegex.test(m)) {{
+          try {{ e.preventDefault(); }} catch(_) {{}}
+          showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
+          if (parentWin._dccPendingReload) {{ try {{ clearTimeout(parentWin._dccPendingReload); }} catch(_) {{}} }}
+          parentWin._dccPendingReload = setTimeout(function() {{ parentWin.location.reload(); }}, 30000);
+        }}
+      }}, true);
+
+      // Visibility resume: re-check INSTANCE_ID.
+      parentDoc.addEventListener("visibilitychange", function() {{
+        if (parentDoc.visibilityState === "visible") {{
+          var el = parentDoc.getElementById("dcc-instance-id");
+          var cur = el && el.dataset && el.dataset.id;
+          if (cur && cur !== MY_ID) {{
+            try {{ parentWin.localStorage.setItem(LS_KEY, cur); }} catch(_) {{}}
+            showBanner();
+          }}
+        }}
+      }});
+
+      // Offline event.
+      parentWin.addEventListener("offline", function() {{
+        showBanner("📡 Connection lost — click Reload now once back online.");
+      }});
+
+      // localStorage seed.
+      try {{
+        var lsKnown = parentWin.localStorage.getItem(LS_KEY);
+        if (!lsKnown || lsKnown !== MY_ID) {{ parentWin.localStorage.setItem(LS_KEY, MY_ID); }}
+      }} catch(_) {{}}
     }})();
     </script>
     """,
@@ -901,7 +844,8 @@ st.markdown(f"""
 header[data-testid="stHeader"] {{ background-color: {TB_APP_BG} !important; }}
 header[data-testid="stHeader"]::before {{ background-color: {TB_APP_BG} !important; }}
 div[data-testid="stToolbar"] {{ background-color: transparent !important; }}
-.main .block-container {{ max-width: 1400px !important; padding-top: 1rem; padding-left: 1.5rem; padding-right: 1.5rem; }}
+.main .block-container,
+[data-testid="stMainBlockContainer"] {{ max-width: 1400px !important; padding-top: 16px !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }}
 
 /* =========================================
    WIDGET & INPUT STANDARDIZATION (Fixes the White Box Glitch)

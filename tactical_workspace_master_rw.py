@@ -246,7 +246,15 @@ st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layou
 # ============================================================================
 import uuid as _uuid
 import streamlit.components.v1 as _components
-INSTANCE_ID = str(_uuid.uuid4())
+import os as _os
+# Prefer Railway-scoped deploy ID so all workers share the same INSTANCE_ID
+# per deploy. Without this, each worker has its own uuid → false-positive
+# 'app updated' banner whenever a new tab lands on a different worker.
+INSTANCE_ID = (
+    _os.environ.get('RAILWAY_DEPLOYMENT_ID')
+    or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+    or str(_uuid.uuid4())
+)
 
 # Render the hidden instance-id + banner shell into the parent doc via st.markdown
 # (these are static HTML with no scripts — Streamlit will render them fine).
@@ -401,7 +409,9 @@ _components.html(
                 ws.addEventListener('close', function(ev) {{
                   // ANY close after the WS was once open = problem worth surfacing.
                   // Even code 1000 during deploy means the user's session is gone.
-                  if (openedOnce) {{
+                  if (openedOnce && ev && ev.code !== 1000 && ev.code !== 1001) {{
+                    // 1000 = normal close (rerun, navigation). 1001 = going away.
+                    // Only banner on abnormal codes (1006/1011/etc — server gone).
                     var idleMs = Date.now() - lastActivity;
                     if (idleMs > 600000) {{
                       setTimeout(function() {{ parentWin.location.reload(); }}, 1200);
@@ -410,9 +420,9 @@ _components.html(
                     }}
                   }}
                 }});
-                ws.addEventListener('error', function() {{
-                  if (openedOnce) showBanner('📦 Connection blip detected — click Refresh now to continue.');
-                }});
+                // 'error' fires during normal reconnect retries — banner only on
+                // hard close, not transient errors.
+                ws.addEventListener('error', function() {{ /* silent */ }});
               }}
             }} catch(_) {{}}
             return ws;
@@ -455,7 +465,10 @@ _components.html(
               }}
             }}
           }}
-          if (sawSkeleton) showBanner('📦 App is reconnecting — click Refresh now to continue.');
+          // Don't fire banner from observer — Streamlit shows brief skeletons during
+          // legitimate reruns (post-sign-in, fragment updates). The CSS rule
+          // already hides them; a banner here would create false positives.
+          if (sawSkeleton) {{ /* silent — CSS hides them */ }}
         }});
         mo.observe(parentDoc.body, {{childList: true, subtree: true}});
       }} catch(_) {{}}

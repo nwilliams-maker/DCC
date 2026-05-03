@@ -6390,9 +6390,12 @@ st.markdown(
           left: auto !important;
           bottom: auto !important;
           z-index: 999999 !important;
-          width: auto !important;
+          width: max-content !important;
+          max-width: max-content !important;
+          min-width: 0 !important;
           margin: 0 !important;
           padding: 0 !important;
+          display: inline-block !important;
       }}
       div.st-key-_email_pill_btn button {{
           padding: 3px 10px !important;

@@ -278,7 +278,7 @@ st.markdown(
 # strips <script> tags, but a script with src= on an external URL passes through.
 # We append ?v=INSTANCE_ID for cache-busting per deploy.
 st.markdown(
-    f'<script src="./app/static/dcc_watcher.js?v={INSTANCE_ID}"></script>',
+    f'<script src="/app/static/dcc_watcher.js?v={INSTANCE_ID}" defer></script>',
     unsafe_allow_html=True,
 )
 # ============================================================================

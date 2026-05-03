@@ -256,6 +256,31 @@ INSTANCE_ID = (
     or str(_uuid.uuid4())
 )
 
+# /healthz endpoint — visit with ?healthz=1 to get a tiny status payload.
+# Useful for external uptime monitors (Railway, UptimeRobot, etc.) and for
+# verifying which deploy is currently serving traffic without DOM scraping.
+# Returns INSTANCE_ID + Railway commit SHA (when set). Bypasses login since
+# it's just a build-state readback, not user data.
+try:
+    if st.query_params.get("healthz") == "1":
+        import datetime as _dt
+        _commit = _os.environ.get('RAILWAY_GIT_COMMIT_SHA', '')
+        _short = _commit[:8] if _commit else ''
+        st.markdown(
+            f"""<div style='font-family:monospace;font-size:13px;color:#0f172a;padding:20px;'>
+            <strong>DCC healthz</strong><br>
+            ok=true<br>
+            instance_id={INSTANCE_ID}<br>
+            commit={_commit or '(unset)'}<br>
+            commit_short={_short or '(unset)'}<br>
+            checked_at={_dt.datetime.utcnow().isoformat()}Z
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+except Exception:
+    pass
+
 # Render the hidden instance-id + banner shell into the parent doc via st.markdown
 # (these are static HTML with no scripts — Streamlit will render them fine).
 st.markdown(

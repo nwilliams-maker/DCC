@@ -595,7 +595,7 @@ def _render_login_form():
           /* Trim Streamlit's main container top padding so the login starts higher */
           [data-testid="stMainBlockContainer"],
           .main .block-container {
-            padding-top: 60px !important;
+            padding-top: 16px !important;
           }
           .dcc-login-wrap {
             text-align: center;

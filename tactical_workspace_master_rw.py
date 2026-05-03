@@ -1,3 +1,4 @@
+
 import streamlit as st
 import requests
 import base64
@@ -245,47 +246,73 @@ st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layou
 # mid-typing, and the latest code reaches them on their schedule.
 # ============================================================================
 import uuid as _uuid
+import streamlit.components.v1 as _components
 INSTANCE_ID = str(_uuid.uuid4())
 
+# Render the hidden instance-id + banner shell into the parent doc via st.markdown
+# (these are static HTML with no scripts — Streamlit will render them fine).
 st.markdown(
     f"""
     <div id="dcc-instance-id" data-id="{INSTANCE_ID}" style="display:none;"></div>
     <div id="dcc-update-banner" style="display:none;position:fixed;top:0;left:0;right:0;background:#fef3c7;border-bottom:1px solid #f59e0b;color:#78350f;padding:10px 16px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;z-index:99999;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,.08);">
       <span>📦 App was updated. Refresh when you\'re ready.</span>
       <span>
-        <button onclick="window.location.reload()" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Refresh now</button>
-        <button onclick="document.getElementById(\'dcc-update-banner\').style.display=\'none\'" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
+        <button onclick="window.parent.location.reload()" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Refresh now</button>
+        <button onclick="window.parent.document.getElementById(\'dcc-update-banner\').style.display=\'none\'" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
       </span>
     </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Active JS lives in a components.v1.html iframe (Streamlit allows scripts there).
+# It reaches into the parent document to read the instance id and toggle the banner.
+_components.html(
+    f"""
     <script>
     (function() {{
-      if (window._dccDeployWatcher) return;
-      window._dccDeployWatcher = true;
-      const myId = "{INSTANCE_ID}";
-      let lastActivity = Date.now();
+      var parentDoc, parentWin;
+      try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
+      if (parentWin._dccDeployWatcher) return;
+      parentWin._dccDeployWatcher = true;
+
+      // Move banner element to top-level body so Streamlit container clipping
+      // doesn\'t hide it. We reach across the iframe into parent doc to do this.
+      var banner = parentDoc.getElementById('dcc-update-banner');
+      if (banner && banner.parentElement !== parentDoc.body) {{
+        try {{ parentDoc.body.appendChild(banner); }} catch(_) {{}}
+      }}
+      // Same for the instance-id marker — anchor to body.
+      var idEl = parentDoc.getElementById('dcc-instance-id');
+      if (idEl && idEl.parentElement !== parentDoc.body) {{
+        try {{ parentDoc.body.appendChild(idEl); }} catch(_) {{}}
+      }}
+
+      var myId = "{INSTANCE_ID}";
+      var lastActivity = Date.now();
       ['click','keydown','mousemove','scroll','input','touchstart'].forEach(function(ev) {{
-        document.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
+        parentDoc.addEventListener(ev, function() {{ lastActivity = Date.now(); }}, {{capture:true, passive:true}});
       }});
       function showBanner() {{
-        var b = document.getElementById('dcc-update-banner');
+        var b = parentDoc.getElementById('dcc-update-banner');
         if (b) b.style.display = 'flex';
       }}
       function maybeReload() {{
         var idleMs = Date.now() - lastActivity;
-        if (idleMs > 600000) {{ window.location.reload(); }} else {{ showBanner(); }}
+        if (idleMs > 600000) {{ parentWin.location.reload(); }} else {{ showBanner(); }}
       }}
       setInterval(function() {{
-        var el = document.getElementById('dcc-instance-id');
+        var el = parentDoc.getElementById('dcc-instance-id');
         var cur = el && el.dataset && el.dataset.id;
         if (cur && cur !== myId) maybeReload();
       }}, 30000);
-      window.addEventListener('error', function(e) {{
+      parentWin.addEventListener('error', function(e) {{
         var msg = String((e && e.message) || '');
         if (/Bad message format|Bad \'setIn\' index|Could not find fragment id|SessionInfo/i.test(msg)) {{
           var idleMs = Date.now() - lastActivity;
           if (idleMs > 5000) {{
             try {{ e.preventDefault(); }} catch(_) {{}}
-            window.location.reload();
+            parentWin.location.reload();
           }} else {{
             showBanner();
           }}
@@ -294,7 +321,7 @@ st.markdown(
     }})();
     </script>
     """,
-    unsafe_allow_html=True,
+    height=1,
 )
 
 # ============================================================================
@@ -7171,7 +7198,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style="text-align: center; color: #94a3b8; font-size: 12px; padding: 20px;">
-        Tactical Workspace Master • 2026 Terraboost Media • <b>v2.4.0</b><br>
+        Tactical Workspace Master • 2026 Digital Logistics Interface • <b>v2.4.0</b><br>
         <i>All digital and static route data is synced in real-time.</i>
     </div>
     """,

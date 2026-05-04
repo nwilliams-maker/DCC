@@ -6489,7 +6489,62 @@ if st.query_params.get("debug") == "1":
             except Exception as _e:
                 st.error(f"{type(_e).__name__}: {_e}")
         st.caption("Add `?debug=1` to the URL to see this panel. Click Probe to inspect Onfleet's response shape — tells us which field holds the task count and whether phone matches our IC database.")
-
+        # ── /tasks probe — diagnoses where the art file lives & how customer
+        # type is encoded. Fetches the same /tasks/all feed the app normally
+        # ingests (state=0 = unassigned, last 14 days), then dumps the first
+        # task as JSON, the FULL list of `customFields` names/keys/values,
+        # plus a flag for whether common art-file fields appear populated.
+        st.markdown("---")
+        if st.button("Probe /tasks (raw — diagnose art file + national)", key="_dbg_tasks_probe"):
+            try:
+                _from = int((time.time() - 14 * 86400) * 1000)
+                _r = requests.get(
+                    f"https://onfleet.com/api/v2/tasks/all?state=0&from={_from}",
+                    headers=headers, timeout=15
+                )
+                st.write(f"**HTTP**: {_r.status_code}")
+                if _r.status_code != 200:
+                    st.write("**Response body**:", _r.text[:500])
+                else:
+                    _body = _r.json()
+                    _tasks = _body.get('tasks', []) if isinstance(_body, dict) else []
+                    st.write(f"**Task count**: {len(_tasks)}")
+                    if not _tasks:
+                        st.write("(no tasks returned — try a wider time window)")
+                    else:
+                        _t0 = _tasks[0]
+                        st.write("**First task — top-level keys**:", sorted(_t0.keys()))
+                        st.write("**`notes`**:", repr(_t0.get('notes'))[:300])
+                        st.write("**`taskDetails`**:", repr(_t0.get('taskDetails'))[:300])
+                        _cf = _t0.get('customFields') or _t0.get('container', {}).get('customFields') or []
+                        st.write(f"**customFields count**: {len(_cf)}")
+                        if _cf:
+                            st.write("**customFields (name / key / value)**:")
+                            for _f in _cf:
+                                st.write(f"  - name='{_f.get('name','')}', key='{_f.get('key','')}' -> {repr(_f.get('value',''))[:200]}")
+                        _national_t = None
+                        for _t in _tasks:
+                            _cf2 = _t.get('customFields') or _t.get('container', {}).get('customFields') or []
+                            for _f in _cf2:
+                                if 'national' in str(_f.get('value', '')).lower():
+                                    _national_t = _t
+                                    break
+                            if _national_t:
+                                break
+                        st.markdown("---")
+                        if _national_t:
+                            st.write("**Found a likely-National task**: id =", _national_t.get('id') or _national_t.get('shortId'))
+                            st.write("**`notes`**:", repr(_national_t.get('notes'))[:300])
+                            st.write("**`taskDetails`**:", repr(_national_t.get('taskDetails'))[:300])
+                            _cf_n = _national_t.get('customFields') or _national_t.get('container', {}).get('customFields') or []
+                            st.write(f"**customFields count**: {len(_cf_n)}")
+                            for _f in _cf_n:
+                                st.write(f"  - name='{_f.get('name','')}', key='{_f.get('key','')}' -> {repr(_f.get('value',''))[:200]}")
+                        else:
+                            st.write("**No national task found in current pool** — every task's customFields lacked the word 'national'.")
+            except Exception as _e:
+                st.error(f"{type(_e).__name__}: {_e}")
+        st.caption("Click to see what fields OnFleet actually returns on tasks. Tells us where the art file lives and whether National-vs-Local detection has anything to match against.")
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---

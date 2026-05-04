@@ -216,18 +216,29 @@ def _is_install(task_type: str) -> bool:
     return str(task_type or "").strip().lower() == "kiosk install"
 
 
-def _derive_customer_type(client_company: str, task_type: str) -> str:
-    """Heuristic for the National vs Local suffix shown in the Client/Campaign
-    column.
+def _derive_customer_type(customer_type: str, client_company: str, task_type: str) -> str:
+    """Returns the National/Local suffix shown in the Client/Campaign column.
+    Reads the OnFleet `customerType` custom field as the source of truth — that
+    field is one of {National, Regional, Local, Default} when populated.
+    Falls back to a string-match heuristic on `client_company` for tasks
+    ingested before the field was captured (or where it's blank).
 
-      - "default" anywhere in the campaign → empty (suffix dropped — these rows
-        live in their own Defaults bucket and the National/Local label is
-        meaningless for them).
-      - "national" anywhere → "National"
-      - everything else → "Local"
+    Bucketing per dispatcher spec:
+      - 'National'  → 'National'        (National Summary card)
+      - 'Regional'  → 'Local'           (groups with Locals on the slip)
+      - 'Local'     → 'Local'
+      - 'Default'   → ''                (no suffix; lives in Defaults bucket)
+      - blank       → fall back to substring match on client_company
+    """
+    ct = (customer_type or "").strip().lower()
+    if ct == "national":
+        return "National"
+    if ct == "default":
+        return ""
+    if ct in ("local", "regional"):
+        return "Local"
 
-    The JS only checks for === 'national' vs everything else, so casing is
-    irrelevant for the bucketing decision."""
+    # Fallback for tasks ingested before customerType was captured.
     s = (client_company or "").lower()
     if "default" in s:
         return ""
@@ -393,7 +404,7 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             # Campaign (Terraboost-first — its name field is the canonical campaign label)
             "campaign": campaign_val,
             "clientCompany": campaign_val,
-            "customerType": _derive_customer_type(raw_campaign_for_type, task_type),
+            "customerType": _derive_customer_type(t.get("customer_type", ""), client_company, task_type),
             "isInstall": _is_install(task_type),
             # ArtFile — Print Ready Art Files Collection name
             "artFile": _tb_art_for(_tb, str(t.get("art_file", "") or "")),

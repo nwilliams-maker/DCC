@@ -5254,6 +5254,32 @@ def run_pod_tab(pod_name):
         with st.expander(f"🐛 Bucket debug — {pod_name}", expanded=False):
             _fp_now = st.session_state.get(f"_auto_sync_fp_{pod_name}", "(unset)")
             st.caption(f"Last fingerprint: `{_fp_now[:12]}...`  |  sent_db rows: {len(sent_db)}  |  pod_clusters: {len(cls)}")
+            # Extra ghost diagnostics — figure out where the bundled-route ghosts are landing
+            st.markdown("**Ghosts (raw from sheet)** for this pod:")
+            for _g in ghost_db.get(pod_name, []):
+                _g_status = str(_g.get('status', '')).lower()
+                _g_wo = _g.get('wo', '?')
+                _g_hash = (_g.get('hash') or '')[:8]
+                _g_tids = _g.get('task_ids', [])
+                _g_tasks = _g.get('tasks', '?')
+                st.text(f"  {_g_hash} | {_g_status:10} | wo={_g_wo:35} | tasks={_g_tasks} | tids={len(_g_tids)}")
+            st.markdown("**sent_ghosts** (after status routing) for this pod:")
+            for _g in sent_ghosts:
+                _g_wo = _g.get('wo', '?')
+                _g_hash = (_g.get('hash') or '')[:8]
+                _g_tasks = _g.get('tasks', '?')
+                st.text(f"  {_g_hash} | wo={_g_wo:35} | tasks={_g_tasks}")
+            st.markdown("**`_bundle_map`** for this pod:")
+            _bm_pod = st.session_state.get('_bundle_map', {}).get(pod_name, [])
+            if not _bm_pod:
+                st.text("  (empty — no bundles recorded in this session)")
+            for _i, _entry in enumerate(_bm_pod):
+                _e_list = sorted(list(_entry))
+                st.text(f"  bundle #{_i}: {len(_e_list)} task IDs → {_e_list[:3]}{'...' if len(_e_list) > 3 else ''}")
+            st.markdown(f"**Live cluster sample for `{pod_name}`** (matching the two sent Alvarado entries):")
+            for _bc in sent:
+                _btids_dbg = sorted([str(_t['id']).strip() for _t in _bc.get('data', [])])
+                st.text(f"  {_bc.get('contractor_name','?')} | {len(_btids_dbg)} tasks | first 3: {_btids_dbg[:3]}")
             _bucket_map = [("ready", ready), ("review", review), ("sent", sent), ("accepted", accepted),
                            ("declined", declined), ("finalized", finalized), ("field_nation", field_nation),
                            ("digital_ready", digital_ready)]

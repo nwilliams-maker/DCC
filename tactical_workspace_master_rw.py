@@ -1919,6 +1919,13 @@ def _ghost_to_packing_cluster(g):
         # First non-empty campaign on this stop, if any — used for client_company.
         _camps = sd.get('campaigns') or []
         _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
+        # Pull the new per-stop packing-slip fields. Old (pre-2026-05-04) sheet
+        # rows won't have them — they fall back to '' which the slip handles
+        # gracefully (customer-type detection falls back to substring match;
+        # boost & art file simply render blank).
+        _customer_type    = str(sd.get('customerType', '') or '').strip()
+        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
+        _art_file         = str(sd.get('artFile', '') or '').strip()
         # State falls out of the address ("..., CITY, ST, ZIP" → "ST"). Best-effort.
         _parts = [p.strip() for p in addr.split(',')]
         _state = (_parts[2] if len(_parts) > 2 else '').strip().upper()[:2]
@@ -1947,8 +1954,9 @@ def _ghost_to_packing_cluster(g):
                     'task_type': label,
                     'client_company': _camp_name,
                     'is_digital': label == 'Service',
-                    'boosted_standard': '',
-                    'art_file': '',
+                    'boosted_standard': _boosted_standard,
+                    'art_file': _art_file,
+                    'customer_type': _customer_type,
                 })
         # If a stop has no breakdown counts (older sheet rows), still emit one
         # generic row so the address shows up on the slip.
@@ -1964,8 +1972,9 @@ def _ghost_to_packing_cluster(g):
                 'task_type': '',
                 'client_company': _camp_name,
                 'is_digital': False,
-                'boosted_standard': '',
-                'art_file': '',
+                'boosted_standard': _boosted_standard,
+                'art_file': _art_file,
+                'customer_type': _customer_type,
             })
 
     return {
@@ -4394,7 +4403,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                             (t.get("client_company",""), t.get("escalated",False), str(t.get("boosted_standard","")).lower()):
                             {"name": t.get("client_company",""), "esc": t.get("escalated",False), "bs": str(t.get("boosted_standard","")).lower()}
                             for t in cluster["data"] if t.get("full") == addr and t.get("client_company")
-                        }.values())
+                        }.values()),
+                        # Per-stop fields needed for the packing slip when the route
+                        # later becomes a ghost. First non-empty value wins when
+                        # multiple tasks at the same address differ (which is rare
+                        # but happens — e.g. two campaigns at one venue).
+                        "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
+                        "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
+                        "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
@@ -5992,6 +6008,7 @@ def run_pod_tab(pod_name):
     </div>
     {_gvenues_html}
 </div>""", unsafe_allow_html=True)
+                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_sent_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -6184,6 +6201,7 @@ def run_pod_tab(pod_name):
                             _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             g_ic_name_fin = g.get('contractor_name', 'Unknown')
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
+                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_fin_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):

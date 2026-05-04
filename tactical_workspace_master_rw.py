@@ -2374,15 +2374,16 @@ def get_gmaps(home, waypoints):
     Returns the same (miles, total_hours, "Xh Ym", waypoint_order) tuple shape
     so call sites need no changes. Internally uses Mapbox Optimization API V1.
 
-    Mapbox V1 has a hard cap of 12 coordinates per request — a problem for
-    bundled routes that consistently run >11 stops. To support those, we chunk
-    the waypoints into batches of ≤11 stops (12 - 1 to leave room for home as
-    the source/destination anchor), optimize each batch independently, and
-    sum the totals. Order is preserved across batches; the optimizer still
-    runs within each batch so per-chunk routing remains efficient.
+    Mapbox V1 has a hard cap of 12 coordinates per request — and BOTH the
+    source AND destination home pins count toward that cap. To support
+    bundled routes that consistently run >10 stops, we chunk the waypoints
+    into batches of ≤10 stops (12 total coords - 2 home pins), optimize each
+    batch independently, and sum the totals. Order is preserved across
+    batches; the optimizer still runs within each batch so per-chunk routing
+    remains efficient.
 
     Per-request cost: $0 within Mapbox's 100k/month free tier, $2/1000 after.
-    A 30-stop bundled route makes 3 chunked calls (11 + 11 + 8), all cached
+    A 30-stop bundled route makes 3 chunked calls (10 + 10 + 10), all cached
     together under the original (home, waypoints) key for 24 hours.
     """
     _wp_tuple = tuple(waypoints) if waypoints else ()
@@ -2453,11 +2454,12 @@ def get_gmaps(home, waypoints):
             _log_err("get_gmaps", e)
         return None
 
-    # Mapbox V1 cap: 12 coords per request. Home eats 2 slots (source +
-    # destination), leaving 11 stops in the middle. Bigger bundles get split
-    # into multiple chunks; chunk boundaries are walked in input order so the
-    # combined waypoint_order is contiguous across chunks.
-    CHUNK = 11
+    # Mapbox V1 cap: 12 coords per request, period. The request body is
+    # [home, wp1, ..., wpN, home] — both home pins count toward the cap, so
+    # the maximum N is 12 - 2 = 10. Earlier off-by-one had this at 11, which
+    # produced 13-coord requests that Mapbox rejected with "Too many
+    # coordinates" — silently failing every chunk for any bundle ≥12 stops.
+    CHUNK = 10
     total_mi = 0.0
     total_drive_hrs = 0.0  # service hours added once at the end after all chunks
     waypoint_order = []

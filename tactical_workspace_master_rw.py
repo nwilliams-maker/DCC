@@ -2618,6 +2618,7 @@ def process_digital_pool(master_bar=None):
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
+        customer_type = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -2658,6 +2659,9 @@ def process_digital_pool(master_bar=None):
                 location_in_venue = f_val
             if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                 campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+            # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+            if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                customer_type = f_val
 
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
@@ -2700,6 +2704,7 @@ def process_digital_pool(master_bar=None):
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
+            "customer_type": customer_type,
         })
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
@@ -2936,6 +2941,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
+            customer_type = ""
             # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
             # (free-text). See extract_art_file() up top for the heuristic.
             art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -2973,6 +2979,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     location_in_venue = f_val
                 if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                     campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+                # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+                if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                    customer_type = f_val
 
             # 🌟 Campaign Name always wins over Client Company for FN Customer Name
             client_company = campaign_name or client_company
@@ -3030,6 +3039,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
                     "art_file": art_file,
+                    "customer_type": customer_type,
                 })
                 
         clusters = []
@@ -4611,7 +4621,7 @@ def smart_sync_pod(pod_name):
         custom_task_type = ""
         custom_boosted = ""
         tt_val = native_details
-        venue_name = ""; venue_id = ""; kiosk_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
+        venue_name = ""; venue_id = ""; kiosk_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""; customer_type = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -4640,6 +4650,9 @@ def smart_sync_pod(pod_name):
                 location_in_venue = f_val
             if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                 campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+            # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+            if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                customer_type = f_val
 
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
@@ -4687,6 +4700,7 @@ def smart_sync_pod(pod_name):
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
+            "customer_type": customer_type,
             "is_new": True,  # 🌟 Flag for UI badge
         })
 

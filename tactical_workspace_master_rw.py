@@ -1984,6 +1984,167 @@ def _ghost_to_packing_cluster(g):
     }
 
 
+def _fn_ghost_to_cluster(g):
+    """Reconstruct a live-cluster-shaped dict from an FN sheet ghost.
+
+    Why this exists: when "Assign to Field Nation" pushes OnFleet tasks to
+    state=1 under the FN placeholder worker, DCC's main pull (state=0 only)
+    can no longer see them — the FN tab would render empty. To recover, we
+    read FN-status rows from the Google Sheet (already happening in
+    fetch_sent_records_from_sheet now that 'field_nation' is in the ghost-
+    capture list) and rebuild them into cluster-shaped dicts here. The FN
+    tab's existing rendering code (which calls render_dispatch + expects
+    cluster shape: data[], city, state, stops, center, …) then Just Works.
+
+    The cluster_hash invariant matters: caller code recomputes the hash via
+    md5(sorted(task_ids)) on cluster['data']. To make that match the hash
+    already on the FN sheet row (so markFNAssigned can find it server-side
+    and so route_state_{hash} session-state keys line up), the synthetic
+    rows MUST carry the original OnFleet task IDs from g['task_ids'] —
+    nothing else. Order is irrelevant since the hash sorts internally; what
+    matters is that every real ID appears exactly once in cluster['data'].
+
+    Returns None if the ghost has no task IDs (degenerate sheet row).
+    """
+    real_ids = [str(t).strip() for t in (g.get('task_ids') or []) if str(t).strip()]
+    if not real_ids:
+        return None
+
+    # Pop real IDs onto each synthetic row as we walk stop_data. Order
+    # doesn't matter for the hash — the cluster_hash recompute path sorts.
+    id_queue = list(real_ids)
+    synthetic = []
+    addrs_seen = []
+
+    for sd in (g.get('stop_data') or []):
+        addr = sd.get('addr', '') or ''
+        if not addr:
+            continue
+        addrs_seen.append(addr)
+        venue = sd.get('venue', '') or ''
+        _kiosk_id     = str(sd.get('kioskId', '') or '').strip()
+        _venue_id     = str(sd.get('venueId', '') or '').strip()
+        _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
+        _camps = sd.get('campaigns') or []
+        _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
+        _customer_type    = str(sd.get('customerType', '') or '').strip()
+        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
+        _art_file         = str(sd.get('artFile', '') or '').strip()
+        _parts = [p.strip() for p in addr.split(',')]
+        _state = (_parts[2] if len(_parts) > 2 else (g.get('state') or '')).strip().upper()[:2]
+        _zip   = (_parts[3] if len(_parts) > 3 else '').strip()
+
+        # Fan out per task-type count; consume one real ID per row.
+        for label, key in (
+            ('Kiosk Install',  'inst'),
+            ('Kiosk Removal',  'remov'),
+            ('New Ad',         'n_ad'),
+            ('Continuity',     'c_ad'),
+            ('Service',        'd_ad'),
+        ):
+            try:
+                n = int(sd.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            for _ in range(n):
+                if not id_queue:
+                    break
+                synthetic.append({
+                    'id':              id_queue.pop(0),
+                    'full':            addr,
+                    'state':           _state,
+                    'zip':             _zip,
+                    'venue_name':      venue,
+                    'venue_id':        _venue_id,
+                    'kiosk_id':        _kiosk_id,
+                    'location_in_venue': _loc_in_venue,
+                    'task_type':       label,
+                    'client_company':  _camp_name,
+                    'is_digital':      label == 'Service',
+                    'boosted_standard': _boosted_standard,
+                    'art_file':        _art_file,
+                    'customer_type':   _customer_type,
+                    'escalated':       False,
+                })
+
+    # Tail: any real IDs left after stop_data exhaustion get distributed onto
+    # the first known address as generic rows. This happens when stop_data
+    # under-counts (older sheet rows without per-type breakdowns) — better
+    # than dropping IDs, which would break the cluster_hash invariant.
+    fallback_addr = addrs_seen[0] if addrs_seen else ''
+    if not fallback_addr:
+        # Truly empty stop_data — pull a stop from locs (pipe-delimited string
+        # whose first/last entries are the IC home pin, middle entries are stops).
+        _raw_locs = [s.strip() for s in str(g.get('locs', '')).split('|') if s.strip()]
+        _stops_only = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
+        fallback_addr = _stops_only[0] if _stops_only else (g.get('city', '') or '')
+    while id_queue:
+        synthetic.append({
+            'id':              id_queue.pop(0),
+            'full':            fallback_addr,
+            'state':           str(g.get('state', '') or '').strip().upper()[:2],
+            'zip':             '',
+            'venue_name':      '',
+            'venue_id':        '',
+            'kiosk_id':        '',
+            'location_in_venue': '',
+            'task_type':       '',
+            'client_company':  '',
+            'is_digital':      False,
+            'boosted_standard': '',
+            'art_file':        '',
+            'customer_type':   '',
+            'escalated':       False,
+        })
+
+    inst_count  = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk install')
+    remov_count = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk removal')
+
+    # Center: best-effort. stop_data doesn't include lat/lng, so try to
+    # geocode the first address. _mapbox_geocode is process-wide cached
+    # (kiosks don't move), so the per-render cost is negligible after first
+    # call. If geocoding fails (no MAPBOX_TOKEN, network blip, etc.) the
+    # center stays at (0, 0); the map iteration in run_pod_tab guards on
+    # _is_fn_ghost_pseudo to skip those markers rather than dropping a pin
+    # in the Atlantic.
+    center = (0.0, 0.0)
+    _has_real_center = False
+    if addrs_seen:
+        try:
+            _coords = _mapbox_geocode(addrs_seen[0])
+            if _coords:
+                # Mapbox returns (lng, lat); folium expects (lat, lng).
+                center = (_coords[1], _coords[0])
+                _has_real_center = True
+        except Exception:
+            pass
+
+    return {
+        'data':            synthetic,
+        'city':            g.get('city', 'Unknown'),
+        'state':           g.get('state', 'UNKNOWN'),
+        'stops':           g.get('stops') or len(set(t['full'] for t in synthetic if t.get('full'))),
+        'center':          center,
+        'inst_count':      inst_count,
+        'remov_count':     remov_count,
+        'esc_count':       0,
+        'is_removal':      False,
+        'is_digital':      False,
+        'boosted_tag':     '',
+        'status':          'Ready',
+        'contractor_name': g.get('contractor_name', 'Field Nation'),
+        'wo':              g.get('wo', ''),
+        'comp':            g.get('pay', 0),
+        'due':             g.get('due', 'N/A'),
+        'route_ts':        g.get('route_ts', ''),
+        # Marker for downstream code that wants to distinguish a reconstructed
+        # FN ghost from a normal live cluster — currently only the map-marker
+        # iteration uses this (skips when _has_real_center is False).
+        '_is_fn_ghost_pseudo': True,
+        '_has_real_center':    _has_real_center,
+    }
+
+
 
 # --- UTILITIES ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -2157,7 +2318,12 @@ def fetch_sent_records_from_sheet():
                                     })
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
-                            if status_label in ['accepted', 'finalized', 'sent']:
+                            # May 4 2026 — added 'field_nation' so FN-sheet rows also produce
+                            # ghost entries. Required because once "Assign to Field Nation" pushes
+                            # OnFleet tasks to state=1 under the FN placeholder worker, the main
+                            # OnFleet pull (state=0 only) can't see them anymore. Without this,
+                            # the FN tab is empty for any route that's actually been assigned to FN.
+                            if status_label in ['accepted', 'finalized', 'sent', 'field_nation']:
                                 locs_str = str(p.get('locs', ''))
                                 state_guess, city_guess = "UNKNOWN", "Unknown"
                                 stops_list = [s.strip() for s in locs_str.split('|') if s.strip()]
@@ -5212,7 +5378,10 @@ def run_pod_tab(pod_name):
                     break
 
     # 🌟 THE FIX: Omni-Ghost Sorter
-    pod_ghosts, finalized_ghosts, sent_ghosts = [], [], []
+    # May 4 2026 — fn_ghosts added so FN-status sheet rows have a separate bucket.
+    # These get reconstructed into pseudo-clusters and merged into `field_nation`
+    # below, since live OnFleet pull can no longer see FN-assigned tasks (state=1).
+    pod_ghosts, finalized_ghosts, sent_ghosts, fn_ghosts = [], [], [], []
     seen_ghosts = set() # 🛡️ THE FIX: Streamlit Crash Shield
     
     for g in ghost_db.get(pod_name, []):
@@ -5227,6 +5396,7 @@ def run_pod_tab(pod_name):
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
         elif g_stat == "sent": sent_ghosts.append(g)
+        elif g_stat == "field_nation": fn_ghosts.append(g)
         else: pod_ghosts.append(g)
 
     # 1. 📂 DEFINE BUCKETS
@@ -5304,6 +5474,27 @@ def run_pod_tab(pod_name):
             # Fallback to calculated status
             if c.get('status') == 'Ready': ready.append(c) #
             else: review.append(c) #
+
+    # 🌐 FN-GHOST RECONSTRUCTION — the actual fix for the empty-FN-tab bug.
+    # FN-status sheet rows whose tasks have moved to OnFleet state=1 won't
+    # appear in `cls` (the main pull is state=0 only) and so the live loop
+    # above never sees them. Rebuild them into pseudo-clusters and append
+    # them to `field_nation`. We dedupe against live_hashes — if the live
+    # cluster still has the tasks (FN move happened but OnFleet hasn't
+    # caught up yet, or the user just reverted), the live entry above wins.
+    for _fng in fn_ghosts:
+        _fng_hash = _fng.get('hash')
+        if not _fng_hash or _fng_hash in live_hashes:
+            continue
+        _pseudo = _fn_ghost_to_cluster(_fng)
+        if _pseudo is None:
+            continue
+        field_nation.append(_pseudo)
+        # Make sure render_dispatch sees route_state == 'field_nation' so the
+        # FN-action block (Download FN Upload, Post link, Accepted button)
+        # fires for this pseudo-cluster. Don't clobber a deliberate override.
+        if not st.session_state.get(f"route_state_{_fng_hash}"):
+            st.session_state[f"route_state_{_fng_hash}"] = "field_nation"
 
     # --- 🐛 DEBUG: bucket routing visibility (collapsed by default, no behavior change) ---
     # Shows what each cluster's bucket decision was based on. Drop the URL-param check or
@@ -5560,7 +5751,13 @@ def run_pod_tab(pod_name):
     # Digital is excluded too — it has its own dedicated map below.
     for c in ready:        folium.CircleMarker(c['center'], radius=8, color=TB_GREEN,   fill=True, opacity=0.8).add_to(m)
     for c in review:       folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
-    for c in field_nation: folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
+    # FN-ghost pseudo-clusters whose Mapbox geocode failed have center=(0,0).
+    # Skipping them keeps the marker out of the Atlantic when the only location
+    # info we have is a saved address that didn't resolve.
+    for c in field_nation:
+        if c.get('_is_fn_ghost_pseudo') and not c.get('_has_real_center'):
+            continue
+        folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
     for c in sent:         folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
     # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
     # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
@@ -6972,7 +7169,7 @@ with tabs[6]:
     st.session_state['archived_wos'] = _archived_wos
     digital_ghosts_list = ghost_db.get("Global_Digital", [])
     
-    pod_ghosts, finalized_ghosts, sent_ghosts = [], [], []
+    pod_ghosts, finalized_ghosts, sent_ghosts, fn_ghosts = [], [], [], []
     seen_ghosts = set() # 🛡️ THE FIX: Streamlit Crash Shield
     
     for g in digital_ghosts_list:
@@ -6987,6 +7184,7 @@ with tabs[6]:
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
         elif g_stat == "sent": sent_ghosts.append(g)
+        elif g_stat == "field_nation": fn_ghosts.append(g)
         else: pod_ghosts.append(g)
     
     # --- 🚦 TRAFFIC COP: BUCKET SORTING (Pulls WO from Sheet) ---
@@ -7040,6 +7238,21 @@ with tabs[6]:
             if c.get('status') == 'Ready': d_ready.append(c) 
             else: d_flagged.append(c)
                 
+    # 🌐 FN-GHOST RECONSTRUCTION (Digital pool) — mirrors the per-pod path.
+    # Digital routes rarely go to FN, but when they do (e.g. a service ticket
+    # batch) we want the same recovery behavior so they stay visible after the
+    # OnFleet tasks transition to state=1.
+    for _fng in fn_ghosts:
+        _fng_hash = _fng.get('hash')
+        if not _fng_hash or _fng_hash in live_hashes:
+            continue
+        _pseudo = _fn_ghost_to_cluster(_fng)
+        if _pseudo is None:
+            continue
+        d_fn.append(_pseudo)
+        if not st.session_state.get(f"route_state_{_fng_hash}"):
+            st.session_state[f"route_state_{_fng_hash}"] = "field_nation"
+
     # Supercard Counts
     pool_ready = len(d_ready)
     pool_flagged = len(d_flagged)

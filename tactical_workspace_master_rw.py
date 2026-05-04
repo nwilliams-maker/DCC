@@ -3395,45 +3395,87 @@ def group_and_sort_by_proximity(bucket):
     return final_list
 # 🌟 NEW HELPER: Groups Awaiting routes by Date Sent, unifying Live and Ghost routes
 def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
+    """Combine live (in-progress) clusters with ghost (sheet-only) routes for
+    display in Sent / Accepted / Finalized tabs. Resolves three cases:
+
+      1. Live and ghost agree (same hash) → show LIVE only.
+      2. Ghost's task IDs are a subset of ONE live cluster (post-bundle that
+         survived in session state) → show LIVE only.
+      3. Ghost's task IDs are SPREAD across multiple live clusters (the sheet
+         has a bundled row, but session state lost _bundle_map so live
+         re-clustered into pieces) → show GHOST only, suppress those live
+         pieces. This keeps the sent UI showing the bundle even when session
+         state can't replay it. The live pieces will repopulate as a single
+         live cluster again the next time the dispatcher re-bundles, or once
+         the durable bundle history feature lands.
+    """
     unified = []
-    
-    # Build a "covered task IDs" superset across all live routes. After bundling,
-    # the bundled live cluster contains the union of task IDs from every component
-    # WO — but each component still has its own ghost row in the sheet under its
-    # original (pre-bundle) hash. Plain hash-match misses those component ghosts.
-    # Comparing by task-ID containment instead catches them: any ghost whose
-    # task IDs are fully covered by some live cluster gets filtered out.
-    live_task_ids = set()
+
+    # Build per-live-cluster task-ID sets so we can spot bundled ghosts whose
+    # IDs are scattered across them.
+    live_clusters_with_tids = []
     for c in live_routes:
-        for t in c.get('data', []):
-            tid = str(t.get('id', '')).strip()
-            if tid:
-                live_task_ids.add(tid)
-    
-    # 1. Process Live Routes
+        tids = {str(t.get('id', '')).strip() for t in c.get('data', []) if t.get('id')}
+        live_clusters_with_tids.append((c, tids))
+    live_task_ids = set().union(*(s for _, s in live_clusters_with_tids)) if live_clusters_with_tids else set()
+
+    # First pass: scan ghosts to identify the "bundled-but-fragmented-live"
+    # case. For each ghost whose task IDs are fully covered by live but
+    # scattered across 2+ live clusters, mark those live clusters as
+    # SUPPRESSED (the ghost will be shown in their place).
+    suppressed_live_ids = set()  # by id() of the cluster dict — uniquely identifies it
+    fragmented_ghosts = set()    # by ghost hash — these get force-shown even if covered
+    for g in ghost_routes:
+        g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+        if not g_tids:
+            continue
+        if g.get('hash') in live_hashes:
+            continue  # case 1, single live cluster matches exactly — handled below
+        # Find which live clusters contain any of this ghost's tasks.
+        matching_live = [c for c, tids in live_clusters_with_tids if tids & set(g_tids)]
+        if len(matching_live) >= 2:
+            # Case 3 — bundled ghost whose pieces are scattered across live.
+            # Verify FULL coverage, otherwise something stranger is going on
+            # and we'd rather show everything than wrongly suppress.
+            covered_ids = set().union(*(set(str(t.get('id','')).strip() for t in c.get('data', [])) for c in matching_live))
+            if all(tid in covered_ids for tid in g_tids):
+                for c in matching_live:
+                    suppressed_live_ids.add(id(c))
+                fragmented_ghosts.add(g.get('hash'))
+
+    # 1. Process Live Routes (skip suppressed)
     for c in live_routes:
+        if id(c) in suppressed_live_ids:
+            continue
         c_copy = c.copy()
         c_copy['is_ghost'] = False
         ts = c_copy.get('route_ts', '')
         c_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
         unified.append(c_copy)
-        
-    # 2. Process Ghost Routes (Skipping active duplicates).
-    #    A ghost is "covered by a live route" if either:
-    #      - its hash matches a live route's hash exactly (single-WO case), OR
-    #      - every one of its task IDs appears in some live route (bundle case).
+
+    # 2. Process Ghost Routes
+    #    Skip if matched 1:1 by a live route. Skip if covered by a SINGLE
+    #    live cluster (case 2). Always include if it's a fragmented bundle
+    #    (case 3).
     for g in ghost_routes:
-        if g.get('hash') in live_hashes:
-            continue
-        g_tids = [str(t).strip() for t in g.get('task_ids', []) if str(t).strip()]
-        if g_tids and all(tid in live_task_ids for tid in g_tids):
-            continue  # ghost's tasks are already represented by a (likely-bundled) live cluster
+        if g.get('hash') in fragmented_ghosts:
+            # Force-show this ghost; its live pieces are suppressed.
+            pass
+        else:
+            if g.get('hash') in live_hashes:
+                continue
+            g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+            if g_tids and all(tid in live_task_ids for tid in g_tids):
+                # All covered — but is it covered by a single live cluster?
+                # If so it's case 2, hide. (Already implied by not being in
+                # fragmented_ghosts, but check defensively.)
+                continue
         g_copy = g.copy()
         g_copy['is_ghost'] = True
         ts = g_copy.get('route_ts', '')
         g_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
         unified.append(g_copy)
-        
+
     # 3. Sort descending (Newest dates at the very top)
     unified.sort(key=lambda x: x['sort_date'], reverse=True)
     return unified

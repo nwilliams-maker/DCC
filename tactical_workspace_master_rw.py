@@ -2370,11 +2370,20 @@ def _gmaps_route_cache():
 
 
 def get_gmaps(home, waypoints):
-    """Drop-in replacement using Mapbox Optimization API V1.
-    Mapbox V1 has a hard cap of 12 coordinates per request. To support bundled
-    routes with more stops, we chunk the waypoints into batches of ≤11 stops
-    (12 - 1 to leave room for home as the anchor on each call), optimize each
-    batch independently, and sum the totals. Order is preserved across batches.
+    """Drop-in replacement for the previous Google Directions optimize:true call.
+    Returns the same (miles, total_hours, "Xh Ym", waypoint_order) tuple shape
+    so call sites need no changes. Internally uses Mapbox Optimization API V1.
+
+    Mapbox V1 has a hard cap of 12 coordinates per request — a problem for
+    bundled routes that consistently run >11 stops. To support those, we chunk
+    the waypoints into batches of ≤11 stops (12 - 1 to leave room for home as
+    the source/destination anchor), optimize each batch independently, and
+    sum the totals. Order is preserved across batches; the optimizer still
+    runs within each batch so per-chunk routing remains efficient.
+
+    Per-request cost: $0 within Mapbox's 100k/month free tier, $2/1000 after.
+    A 30-stop bundled route makes 3 chunked calls (11 + 11 + 8), all cached
+    together under the original (home, waypoints) key for 24 hours.
     """
     _wp_tuple = tuple(waypoints) if waypoints else ()
     _key = (home, _wp_tuple)
@@ -2390,6 +2399,7 @@ def get_gmaps(home, waypoints):
     if not waypoints:
         return 0, 0, "0h 0m", []
 
+    # Geocode home + each waypoint to (lng, lat). Each is cached forever.
     home_ll = _mapbox_geocode(home)
     if not home_ll:
         return 0, 0, "0h 0m", []
@@ -2404,6 +2414,8 @@ def get_gmaps(home, waypoints):
     # positions for the combined waypoint_order result.
     def _optimize_chunk(chunk_indices):
         chunk_lls = [wp_lls[i] for i in chunk_indices]
+        # Submit as [home, wp1, wp2, ..., wpN, home] then ask Mapbox to optimize
+        # the middle waypoints (source=first, destination=last fixes both ends).
         coord_list = [home_ll] + chunk_lls + [home_ll]
         coords_str = ";".join(f"{lng},{lat}" for lng, lat in coord_list)
         url = (
@@ -2417,6 +2429,9 @@ def get_gmaps(home, waypoints):
                 trip = res['trips'][0]
                 _mi = trip['distance'] * 0.000621371
                 _hrs = trip['duration'] / 3600
+                # Mapbox returns each input waypoint with a `waypoint_index` field —
+                # the position it ended up in the optimized trip. Indexes 0 and last
+                # are the fixed home pinned via source=first / destination=last.
                 wps = res.get('waypoints', [])
                 try:
                     middle = wps[1:-1]
@@ -2424,7 +2439,7 @@ def get_gmaps(home, waypoints):
                         enumerate(middle),
                         key=lambda p: p[1].get('waypoint_index', p[0])
                     )
-                    # Translate local indices back to global indices.
+                    # Translate Mapbox's local indices back to global indices.
                     chunk_order = [chunk_indices[local_idx] for local_idx, _ in ordered_pairs]
                 except Exception:
                     chunk_order = list(chunk_indices)
@@ -2438,37 +2453,67 @@ def get_gmaps(home, waypoints):
             _log_err("get_gmaps", e)
         return None
 
-    # Mapbox V1 cap: 12 coords total per request. Home eats 2 slots
-    # (source + destination), so each chunk can hold up to 10 stops if we
-    # want strict safety, or 11 with destination=last reusing the home coord.
-    # We use 11 — the API accepts source=first/destination=last with the same
-    # coord on both ends, leaving 11 stops in the middle.
+    # Mapbox V1 cap: 12 coords per request. Home eats 2 slots (source +
+    # destination), leaving 11 stops in the middle. Bigger bundles get split
+    # into multiple chunks; chunk boundaries are walked in input order so the
+    # combined waypoint_order is contiguous across chunks.
     CHUNK = 11
     total_mi = 0.0
-    total_hrs = 0.0  # drive only — service hours added once at the end
+    total_drive_hrs = 0.0  # service hours added once at the end after all chunks
     waypoint_order = []
     all_indices = list(range(len(waypoints)))
 
     for i in range(0, len(all_indices), CHUNK):
         chunk = all_indices[i:i + CHUNK]
         result = _optimize_chunk(chunk)
+        # Any chunk failure aborts the whole call — we'd rather show "—" than
+        # a partially-summed drive time that's wrong by minutes-to-hours.
         if result is None:
-            return 0, 0, "0h 0m", []  # any chunk failure = whole call fails
+            return 0, 0, "0h 0m", []
         _mi, _hrs, _order = result
         total_mi += _mi
-        total_hrs += _hrs
+        total_drive_hrs += _hrs
         waypoint_order.extend(_order)
 
     service_hrs = len(waypoints) * (10 / 60)
-    grand_hrs = total_hrs + service_hrs
+    total_hrs = total_drive_hrs + service_hrs
     _result = (
         round(total_mi, 1),
-        grand_hrs,
-        f"{int(grand_hrs)}h {int((grand_hrs * 60) % 60)}m",
+        total_hrs,
+        f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m",
         waypoint_order,
     )
-    _cache[_key] = (_result, _now)
+    _cache[_key] = (_result, _now)  # cache success only
     return _result
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_worker_task_counts():
+    """Fetch current assigned task count per worker from Onfleet, keyed by phone. Cached 2 min."""
+    try:
+        res = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
+        if res.status_code != 200:
+            _log_err("fetch_worker_task_counts", f"HTTP {res.status_code}")
+            return {}
+        workers = res.json()
+        counts = {}
+        for w in workers:
+            phone = re.sub(r'\D', '', str(w.get('phone', '')))[-10:]
+            task_count = len(w.get('tasks', []))
+            if phone:
+                counts[phone] = task_count
+        return counts
+    except Exception as e:
+        _log_err("fetch_worker_task_counts", e)
+        return {}
+
+@st.cache_data(ttl=600)
+def load_ic_database(sheet_url):
+    try:
+        export_url = f"{sheet_url.split('/edit')[0]}/export?format=csv&gid=0"
+        return pd.read_csv(export_url)
+    except Exception as e:
+        _log_err("load_ic_database", e)
+        return None
 
 def process_digital_pool(master_bar=None):
     prog_bar = master_bar if master_bar else st.progress(0)

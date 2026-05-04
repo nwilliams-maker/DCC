@@ -13,7 +13,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
 import re
-import sys
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash
@@ -2619,7 +2618,6 @@ def process_digital_pool(master_bar=None):
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
-
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -6492,77 +6490,6 @@ if st.query_params.get("debug") == "1":
                 st.error(f"{type(_e).__name__}: {_e}")
         st.caption("Add `?debug=1` to the URL to see this panel. Click Probe to inspect Onfleet's response shape — tells us which field holds the task count and whether phone matches our IC database.")
 
-        # ── /tasks probe — diagnoses where the art file lives & how customer
-        # type is encoded. Fetches the same /tasks/all feed the app normally
-        # ingests (state=0 = unassigned, last 14 days), then dumps the first
-        # task as JSON, the FULL list of `customFields` names/keys/values,
-        # plus a flag for whether common art-file fields appear populated.
-        # The dispatcher pastes this back to me and I fix the field names.
-        st.markdown("---")
-        if st.button("Probe /tasks (raw — diagnose art file + national)", key="_dbg_tasks_probe"):
-            try:
-                # 14-day lookback mirrors the static-pool ingest at the top of this file.
-                _from = int((time.time() - 14 * 86400) * 1000)
-                _r = requests.get(
-                    f"https://onfleet.com/api/v2/tasks/all?state=0&from={_from}",
-                    headers=headers, timeout=15
-                )
-                st.write(f"**HTTP**: {_r.status_code}")
-                if _r.status_code != 200:
-                    st.write("**Response body**:", _r.text[:500])
-                else:
-                    _body = _r.json()
-                    _tasks = _body.get('tasks', []) if isinstance(_body, dict) else []
-                    st.write(f"**Task count**: {len(_tasks)}")
-                    if not _tasks:
-                        st.write("(no tasks returned — try a wider time window)")
-                    else:
-                        # 1️⃣ Dump TOP-LEVEL keys so we know if it's `notes`, `taskDetails`, etc.
-                        _t0 = _tasks[0]
-                        st.write("**First task — top-level keys**:", sorted(_t0.keys()))
-
-                        # 2️⃣ Show common candidate fields verbatim
-                        st.write("**`notes`**:", repr(_t0.get('notes'))[:300])
-                        st.write("**`taskDetails`**:", repr(_t0.get('taskDetails'))[:300])
-
-                        # 3️⃣ Dump the customFields array — name + key + value for each
-                        _cf = _t0.get('customFields') or _t0.get('container', {}).get('customFields') or []
-                        st.write(f"**customFields count**: {len(_cf)}")
-                        if _cf:
-                            st.write("**customFields (name / key / value)**:")
-                            for _f in _cf:
-                                st.write(
-                                    f"  • `name='{_f.get('name','')}', key='{_f.get('key','')}'` → {repr(_f.get('value',''))[:200]}"
-                                )
-
-                        # 4️⃣ Try to find a NATIONAL task (not just the first one — first might
-                        # be a Local). Look for one whose customFields contain "national" anywhere.
-                        _national_t = None
-                        for _t in _tasks:
-                            _cf2 = _t.get('customFields') or _t.get('container', {}).get('customFields') or []
-                            for _f in _cf2:
-                                if 'national' in str(_f.get('value', '')).lower():
-                                    _national_t = _t
-                                    break
-                            if _national_t:
-                                break
-                        st.markdown("---")
-                        if _national_t:
-                            st.write("**Found a likely-National task**: id =", _national_t.get('id') or _national_t.get('shortId'))
-                            st.write("**`notes`**:", repr(_national_t.get('notes'))[:300])
-                            st.write("**`taskDetails`**:", repr(_national_t.get('taskDetails'))[:300])
-                            _cf_n = _national_t.get('customFields') or _national_t.get('container', {}).get('customFields') or []
-                            st.write(f"**customFields count**: {len(_cf_n)}")
-                            for _f in _cf_n:
-                                st.write(
-                                    f"  • `name='{_f.get('name','')}', key='{_f.get('key','')}'` → {repr(_f.get('value',''))[:200]}"
-                                )
-                        else:
-                            st.write("**No national task found in current pool** — every task's customFields lacked the word 'national'. That alone explains why National Summary is empty: nothing in the data signals 'national' to the slip's bucketing logic.")
-            except Exception as _e:
-                st.error(f"{type(_e).__name__}: {_e}")
-        st.caption("Click to see what fields OnFleet actually returns on tasks. Tells us where the art file lives (notes vs taskDetails vs custom field) and whether National-vs-Local detection has anything to match against.")
-
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
@@ -7075,4 +7002,386 @@ with tabs[6]:
                     for i, c in enumerate(sorted_d_flagged):
                         if c['state'] != current_state:
                             current_state = c['state']
-                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-to
+                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                        _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
+                        _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            render_dispatch(i+9000, c, "Global_Digital")
+                            
+            with t_fn:
+                if not d_fn: st.info("No tasks in Field Nation.")
+                else:
+                    sorted_d_fn = group_and_sort_by_proximity(d_fn)
+
+                    # 📦 Combined FN CSV — Digital pool. Same flow as the per-pod FN tab.
+                    _fn_exported = st.session_state.setdefault('_fn_exported', {})
+                    _fn_route_lookup = {}
+                    _fn_options = []
+                    for _fc in sorted_d_fn:
+                        _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
+                        if not _fc_tids:
+                            continue
+                        _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
+                        _fn_route_lookup[_fc_hash] = _fc
+                        _fn_options.append(_fc_hash)
+                    _fn_select_key = "fn_combined_select_Global_Digital"
+                    _fn_label_for = lambda h: (
+                        f"{'✓ ' if h in _fn_exported else ''}{_fn_route_lookup[h].get('city','?')}, {_fn_route_lookup[h].get('state','?')} "
+                        f"— {_fn_route_lookup[h].get('stops',0)} stops · {len(_fn_route_lookup[h].get('data',[]))} tasks"
+                        + (f" · exported {_fn_exported[h]}" if h in _fn_exported else "")
+                    )
+                    st.markdown(
+                        "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
+                        "padding:8px 12px;margin:6px 0;'>"
+                        "<div style='font-size:9px;font-weight:900;color:#854d0e;text-transform:uppercase;letter-spacing:0.08em;'>"
+                        "📦 Combined FN CSV</div>"
+                        "<div style='font-size:11px;color:#475569;'>Select multiple FN routes, download a single CSV with every stop. ✓ marks routes already exported.</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.multiselect(
+                        "Select FN routes for combined CSV",
+                        options=_fn_options,
+                        format_func=_fn_label_for,
+                        key=_fn_select_key,
+                        label_visibility="collapsed",
+                        placeholder="Select FN routes to include in the combined CSV...",
+                    )
+                    _fn_selected = st.session_state.get(_fn_select_key, []) or []
+                    if True:
+                        if _fn_selected:
+                            _fn_to_export = []
+                            for _h in _fn_selected:
+                                _cluster = _fn_route_lookup.get(_h)
+                                if _cluster:
+                                    _ann = dict(_cluster)
+                                    _ann['_cluster_hash'] = _h
+                                    _fn_to_export.append(_ann)
+                            try:
+                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = generate_combined_fn_upload(_fn_to_export)
+                            except Exception as _fe:
+                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
+                                _log_err("fn_combined_digital", _fe)
+                            if _fn_combined_buf is None:
+                                st.button(f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)", disabled=True, use_container_width=True, key="fn_dl_disabled_digital")
+                            else:
+                                if st.download_button(
+                                    label=f"📥 Download Combined CSV ({len(_fn_selected)} routes · {_fn_combined_stops} stops)",
+                                    data=_fn_combined_buf,
+                                    file_name=f"FN_Combined_DIGITAL_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
+                                    mime="text/csv",
+                                    key="fn_dl_combined_digital",
+                                    type="primary",
+                                    use_container_width=True,
+                                ):
+                                    _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                                    for _h in _fn_included_hashes:
+                                        _fn_exported[_h] = _ts
+                                    st.session_state['_fn_exported'] = _fn_exported
+                                    st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
+                        else:
+                            st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key="fn_dl_empty_digital")
+
+                    # 📤 POSTED TO FIELD NATION — Digital tab. Same flow / state key as the
+                    # per-pod FN tab so the Sent set is shared across pods (one Associate
+                    # owns the whole FN view).
+                    _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+                    _fn_post_left_d, _fn_post_right_d = st.columns(2)
+                    with _fn_post_left_d:
+                        st.link_button(
+                            "🌐 Post to Field Nation",
+                            url="https://app.fieldnation.com/projects",
+                            use_container_width=True,
+                        )
+                    with _fn_post_right_d:
+                        if _fn_selected:
+                            _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+                            if st.button(
+                                f"📤 Posted! ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                                key="fn_post_btn_digital",
+                                use_container_width=True,
+                                type="secondary",
+                                disabled=(len(_newly_posting) == 0),
+                            ):
+                                _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                                for _h in _fn_selected:
+                                    _fn_posted_dict[_h] = _ts
+                                st.session_state['_fn_posted'] = _fn_posted_dict
+                                # 📤 Persist via GAS so Sent group survives reload (see pod FN handler).
+                                try:
+                                    _hashes_csv = ",".join(_fn_selected)
+                                    threading.Thread(
+                                        target=lambda: requests.post(
+                                            GAS_WEB_APP_URL,
+                                            json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                            timeout=15,
+                                        ),
+                                        daemon=True,
+                                    ).start()
+                                except Exception as _fpe:
+                                    _log_err("markFNPosted/digital", _fpe)
+                                st.toast(f"📤 Marked {len(_newly_posting)} digital route(s) as Posted to Field Nation.")
+                                st.rerun()
+                        else:
+                            st.button(
+                                "📤 Posted! (none selected)",
+                                key="fn_post_btn_empty_digital",
+                                use_container_width=True,
+                                disabled=True,
+                            )
+                    st.divider()
+
+                    # Partition into Pending Post + Sent (Posted to Field Nation).
+                    _fn_pending_list, _fn_sent_list = [], []
+                    for _c in sorted_d_fn:
+                        _ch = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in _c.get('data', [])])).encode()).hexdigest()
+                        (_fn_sent_list if _ch in _fn_posted_dict else _fn_pending_list).append(_c)
+                    _fn_ordered = _fn_pending_list + _fn_sent_list
+
+                    if _fn_pending_list:
+                        st.markdown(
+                            "<div style='background:#fffbeb; border-left:3px solid #f59e0b; "
+                            "padding:6px 12px; margin:6px 0 4px 0; border-radius:6px;'>"
+                            f"<span style='font-size:11px; font-weight:900; color:#92400e; "
+                            "text-transform:uppercase; letter-spacing:0.08em;'>📋 Pending Post — "
+                            f"{len(_fn_pending_list)} route(s)</span></div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    current_state = None
+                    _entered_sent_zone = False
+                    for i, c in enumerate(_fn_ordered):
+                        if (not _entered_sent_zone) and i == len(_fn_pending_list) and _fn_sent_list:
+                            st.markdown(
+                                "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
+                                "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
+                                f"<span style='font-size:11px; font-weight:900; color:#065f46; "
+                                "text-transform:uppercase; letter-spacing:0.08em;'>📤 Posted! · "
+                                f"{len(_fn_sent_list)} route(s)</span></div>",
+                                unsafe_allow_html=True,
+                            )
+                            current_state = None
+                            _entered_sent_zone = True
+                        if c['state'] != current_state:
+                            current_state = c['state']
+                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                        _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
+                        _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                        _dfn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+                        _dfn_exp_check = "✓ " if _dfn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
+                        with st.expander(_dfn_exp_check + f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            render_dispatch(i+9500, c, "Global_Digital")
+
+        with col_right:
+            st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
+            t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
+            
+            with t_sent:
+                unified_sent = unify_and_sort_by_date(d_sent, sent_ghosts, live_hashes)
+                if not unified_sent: st.info("No pending routes sent.")
+                
+                current_date = None
+                for i, item in enumerate(unified_sent):
+                    date_str = item['sort_date']
+                    if date_str != current_date:
+                        current_date = date_str
+                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
+                    
+                    if not item['is_ghost']:
+                        c = item
+                        task_ids = [str(t['id']).strip() for t in c['data']]
+                        cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                        ic_name = c.get('contractor_name', 'Unknown')
+                        comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                        tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                        wo_display = c.get('wo', ic_name)
+                        
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]{_bundle_pill(c)}"):
+                                u_locs, _dslv = [], []
+                                for tk in c['data']:
+                                    if tk['full'] not in u_locs:
+                                        u_locs.append(tk['full'])
+                                        _v = tk.get('venue_name', '')
+                                        _dslv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
+                                _ds_venues = venue_section(make_venue_details(c['data']))
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
+                                # 🖨️ Temporary — packing slip button on Sent routes for testing.
+                                # Mirrors the per-pod tab placement; pod name inferred from cluster.
+                                # 🖨️ Admin-only: same as per-pod Sent. Global Overview is admin/manager
+                                # only anyway, but we keep the strict admin check to match the per-pod gate.
+                                if _user_tier() == 'admin':
+                                    render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                                    st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                    else:
+                        g = item
+                        g_ic_name = g.get('contractor_name', 'Unknown')
+                        ghost_hash = g.get('hash', f"ghost_d_sent_{i}")
+                        wo_display = g.get('wo', g_ic_name)
+                        comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                        stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                        
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
+                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                                if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                                else: task_locs = raw_locs
+                                u_locs = list(dict.fromkeys(task_locs))
+                                _dsg_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dsg_venues}</div>""", unsafe_allow_html=True)
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                                    st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+            
+            with t_acc:
+                unified_acc = unify_and_sort_by_date(d_acc, pod_ghosts, live_hashes)
+                if not unified_acc: st.info("Waiting for portal acceptances...")
+                
+                current_date = None
+                for i, item in enumerate(unified_acc):
+                    date_str = item['sort_date']
+                    if date_str != current_date:
+                        current_date = date_str
+                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
+                    
+                    if not item['is_ghost']:
+                        c = item
+                        task_ids = [str(t['id']).strip() for t in c['data']]
+                        cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                        ic_name = c.get('contractor_name', 'Unknown')
+                        comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                        tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                        
+                        _dins_cnt = sum(1 for tk in c['data'] if 'ins' in str(tk.get('task_type','')).lower() or 'rem' in str(tk.get('task_type','')).lower())
+                        _dins_pill = f" | 🔧 {_dins_cnt} Ins/Rem" if _dins_cnt > 0 else ""
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            _dacc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
+                            with st.expander(_dacc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
+                                u_locs, _dalv = [], []
+                                for tk in c['data']:
+                                    if tk['full'] not in u_locs:
+                                        u_locs.append(tk['full'])
+                                        _v = tk.get('venue_name','')
+                                        _dalv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
+                                _dal_venues = venue_section(make_venue_details(c['data']))
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dal_venues}</div>""", unsafe_allow_html=True)
+                                render_finalization_checklist(cluster_hash, "Global_Digital", "d_chk", is_fn=(ic_name == "Field Nation"))
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                    st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                    else:
+                        g = item
+                        g_ic_name = g.get('contractor_name', 'Unknown')
+                        ghost_hash = g.get('hash', f"ghost_digi_{i}")
+                        comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                        stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                        
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            _gins_cnt = g.get('digi_ins', 0) or 0
+                        _gins_pill = f" | 🔧 {_gins_cnt} Ins/Rem" if _gins_cnt > 0 else ""
+                        _dgacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
+                        with st.expander(_dgacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}"):
+                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                                if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                                else: task_locs = raw_locs
+                                u_locs = list(dict.fromkeys(task_locs))
+                                _dag_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dag_venues}</div>""", unsafe_allow_html=True)
+                                render_finalization_checklist(ghost_hash, "Global_Digital", "g_chk_d", is_fn=(g_ic_name == "Field Nation"))
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+
+            with t_dec:
+                unified_dec = unify_and_sort_by_date(d_dec, [], live_hashes)
+                if not unified_dec: st.info("No declined routes.")
+                
+                current_date = None
+                for i, item in enumerate(unified_dec):
+                    date_str = item['sort_date']
+                    if date_str != current_date:
+                        current_date = date_str
+                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
+                    
+                    c = item
+                    task_ids = [str(t['id']).strip() for t in c['data']]
+                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                    ic_name = c.get('contractor_name', 'Unknown')
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        comp_ddec = c.get('comp', 0); due_ddec = c.get('due', 'N/A')
+                        stops_ddec, tasks_ddec = c['stops'], len(c['data'])
+                        with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_ddec} | Due: {due_ddec}{_bundle_pill(c)}"):
+                            _ddec_venues = venue_section(make_venue_details(c['data']))
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_ddec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_ddec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_ddec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_ddec}</div></div></div>{_ddec_venues}</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                                st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                    
+            with t_fin:
+                unified_fin = unify_and_sort_by_date(d_fin, finalized_ghosts, live_hashes)
+                if not unified_fin: st.info("No finalized digital routes.") 
+                
+                current_date = None
+                for i, item in enumerate(unified_fin):
+                    date_str = item['sort_date']
+                    if date_str != current_date:
+                        current_date = date_str
+                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
+                    
+                    if not item['is_ghost']:
+                        c = item
+                        task_ids = [str(t['id']).strip() for t in c['data']]
+                        cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                        ic_name = c.get('contractor_name', 'Unknown')
+                        comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                        tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                        
+                        _dfins_cnt = sum(1 for tk in c['data'] if 'ins' in str(tk.get('task_type','')).lower() or 'rem' in str(tk.get('task_type','')).lower())
+                        _dfins_pill = f" | 🔧 {_dfins_cnt} Ins/Rem" if _dfins_cnt > 0 else ""
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
+                                u_locs, _dflv = [], []
+                                for tk in c['data']:
+                                    if tk['full'] not in u_locs:
+                                        u_locs.append(tk['full'])
+                                        _v = tk.get('venue_name','')
+                                        _dflv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
+                                _dfl_venues = venue_section(make_venue_details(c['data']))
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dfl_venues}</div>""", unsafe_allow_html=True)
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+
+# --- FOOTER ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style="text-align: center; color: #94a3b8; font-size: 12px; padding: 20px;">
+        Tactical Workspace Master • 2026 Digital Logistics Interface • <b>v2.4.0</b><br>
+        <i>All digital and static route data is synced in real-time.</i>
+    </div>
+    """,
+    unsafe_allow_html=True
+)

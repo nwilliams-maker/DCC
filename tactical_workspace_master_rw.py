@@ -2473,14 +2473,10 @@ def _cached_fetch_sent_records_from_sheet():
                 _evts.sort(key=_sort_key)
             except Exception as _se:
                 _log_err(f"history_db sort tid={_tid}", _se)
-        # 📤 Park the FN-posted timestamp dict on ghost_routes so cache hits
-        # still carry it. Earlier this merged directly into st.session_state
-        # here, but @st.cache_data short-circuits the function body on a hit —
-        # which meant after the 5-minute cache warmed, every reload bypassed
-        # the merge and the FN tab forgot which routes had been Posted.
-        # Caller-side merge fixes that: see the fetch_sent_records_from_sheet
-        # call sites where `_fn_posted` is read off ghost_routes and merged
-        # into session_state on every call (cached or not).
+        # 📤 Park the FN-posted dict on ghost_routes so cache hits still carry it.
+        # Earlier this merged directly into st.session_state here, but @st.cache_data
+        # short-circuits the function body on a hit — so the merge never ran and
+        # FN-Posted state evaporated on every reload after the first cache miss.
         try:
             ghost_routes['_fn_posted'] = fn_posted_dict
         except Exception as _fpe:
@@ -2492,21 +2488,10 @@ def _cached_fetch_sent_records_from_sheet():
 
 
 def fetch_sent_records_from_sheet():
-    """Public entry point. Calls the cached fetcher then runs the per-call
-    side-effects (currently: hydrate _fn_posted into session_state).
-
-    Background: @st.cache_data short-circuits the function body on a cache
-    hit, which means side-effects inside the cached function don't run on
-    hits — only on misses. The FN-Posted hydration is a side-effect on
-    session_state, so it was being silently skipped on every cache hit
-    after the first. Symptom: dispatcher hits Posted, GAS row updates,
-    DCC reload pulls cached tuple, FN tab forgets which routes were Posted.
-
-    Fix: cached function parks fn_posted_dict on ghost_routes['_fn_posted'].
-    This wrapper merges that dict into session_state on every call. Merge
-    uses setdefault so an in-flight click whose GAS write hasn't been read
-    back yet stays put.
-    """
+    """Public wrapper. Calls the cached fetcher, then runs per-call side-effects
+    (currently: hydrate _fn_posted into session_state). Required because
+    @st.cache_data skips the function body on cache hits, so any side-effect
+    inside the cached function only runs on misses."""
     sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_sheet()
     try:
         _fp_from_sheet = (ghost_routes or {}).get('_fn_posted', {}) or {}
@@ -2520,8 +2505,8 @@ def fetch_sent_records_from_sheet():
     return sent_dict, ghost_routes, archived_wos, history_db
 
 
-# Forward .clear() so existing `fetch_sent_records_from_sheet.clear()` call
-# sites still invalidate the underlying cache without having to be edited.
+# Forward .clear() so existing fetch_sent_records_from_sheet.clear() call sites
+# still invalidate the underlying cache without having to be edited.
 fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_sheet.clear
 
 # ─── Routing engine: Mapbox Optimization API + persistent shared cache ───
@@ -3967,6 +3952,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
+        # Sentinel ("➕ Type a contractor name…") is not in ic_opts — noop
+        # here so the lookup below doesn't KeyError. Pay/rate stay at
+        # whatever the previous IC computed, which is the right default
+        # since custom contractors don't have a known home to base a fresh
+        # distance/hours estimate on.
+        if selected_label and selected_label.startswith("➕"):
+            st.session_state[last_sel_key] = selected_label
+            return
         if selected_label and selected_label != st.session_state.get(last_sel_key):
             ic_new = ic_opts[selected_label]
             _, h, _, _ = get_gmaps(ic_new.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
@@ -4038,9 +4031,47 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         </div>""", unsafe_allow_html=True)
 
         if ic_opts:
-            selected_label = st.selectbox("Contractor", list(ic_opts.keys()), key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
-            ic = ic_opts[selected_label]
-            ic_location_tmp = ic.get('location', ic_location_tmp)
+            # Sentinel that lets dispatchers type any contractor name (someone
+            # outside the 100mi auto-IC list, or an ad-hoc contractor not in
+            # the IC database). Streamlit 1.39 doesn't have selectbox.accept_new_options
+            # (added 1.49), so we fake it with an explicit option + a paired
+            # text_input that only renders when the sentinel is selected.
+            _CUSTOM_IC_SENTINEL = "➕ Type a contractor name…"
+            _ic_keys = list(ic_opts.keys()) + [_CUSTOM_IC_SENTINEL]
+            selected_label = st.selectbox(
+                "Contractor",
+                _ic_keys,
+                key=sel_key,
+                on_change=update_for_new_contractor,
+                label_visibility="collapsed",
+            )
+            if selected_label == _CUSTOM_IC_SENTINEL:
+                _custom_key = f"custom_ic_name_{pod_name}_{cluster_hash}"
+                _typed = st.text_input(
+                    "Custom contractor name",
+                    key=_custom_key,
+                    placeholder="e.g. Jane Doe",
+                    label_visibility="collapsed",
+                ).strip()
+                if _typed:
+                    # Synthesize an ic dict that satisfies every downstream
+                    # .get() in the dispatch save path. Distance is 0 since
+                    # we have no IC home to measure from — high-rate /
+                    # flagged-route unlocks still apply, just not distance.
+                    ic = {
+                        "name":     _typed,
+                        "location": ic_location_tmp,
+                        "d":        0,
+                        "email":    "",
+                        "phone":    "",
+                    }
+                else:
+                    # Sentinel picked but no name typed yet — keep the form
+                    # in a benign state so the rest of the card still renders.
+                    ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
+            else:
+                ic = ic_opts[selected_label]
+                ic_location_tmp = ic.get('location', ic_location_tmp)
         else:
             ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
             st.info("No ICs within 100mi.")

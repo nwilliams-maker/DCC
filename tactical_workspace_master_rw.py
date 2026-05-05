@@ -2473,10 +2473,14 @@ def _cached_fetch_sent_records_from_sheet():
                 _evts.sort(key=_sort_key)
             except Exception as _se:
                 _log_err(f"history_db sort tid={_tid}", _se)
-        # 📤 Park the FN-posted dict on ghost_routes so cache hits still carry it.
-        # Earlier this merged directly into st.session_state here, but @st.cache_data
-        # short-circuits the function body on a hit — so the merge never ran and
-        # FN-Posted state evaporated on every reload after the first cache miss.
+        # 📤 Park the FN-posted timestamp dict on ghost_routes so cache hits
+        # still carry it. Earlier this merged directly into st.session_state
+        # here, but @st.cache_data short-circuits the function body on a hit —
+        # which meant after the 5-minute cache warmed, every reload bypassed
+        # the merge and the FN tab forgot which routes had been Posted.
+        # Caller-side merge fixes that: see the fetch_sent_records_from_sheet
+        # call sites where `_fn_posted` is read off ghost_routes and merged
+        # into session_state on every call (cached or not).
         try:
             ghost_routes['_fn_posted'] = fn_posted_dict
         except Exception as _fpe:
@@ -2488,10 +2492,21 @@ def _cached_fetch_sent_records_from_sheet():
 
 
 def fetch_sent_records_from_sheet():
-    """Public wrapper. Calls the cached fetcher, then runs per-call side-effects
-    (currently: hydrate _fn_posted into session_state). Required because
-    @st.cache_data skips the function body on cache hits, so any side-effect
-    inside the cached function only runs on misses."""
+    """Public entry point. Calls the cached fetcher then runs the per-call
+    side-effects (currently: hydrate _fn_posted into session_state).
+
+    Background: @st.cache_data short-circuits the function body on a cache
+    hit, which means side-effects inside the cached function don't run on
+    hits — only on misses. The FN-Posted hydration is a side-effect on
+    session_state, so it was being silently skipped on every cache hit
+    after the first. Symptom: dispatcher hits Posted, GAS row updates,
+    DCC reload pulls cached tuple, FN tab forgets which routes were Posted.
+
+    Fix: cached function parks fn_posted_dict on ghost_routes['_fn_posted'].
+    This wrapper merges that dict into session_state on every call. Merge
+    uses setdefault so an in-flight click whose GAS write hasn't been read
+    back yet stays put.
+    """
     sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_sheet()
     try:
         _fp_from_sheet = (ghost_routes or {}).get('_fn_posted', {}) or {}
@@ -2505,8 +2520,8 @@ def fetch_sent_records_from_sheet():
     return sent_dict, ghost_routes, archived_wos, history_db
 
 
-# Forward .clear() so existing fetch_sent_records_from_sheet.clear() call sites
-# still invalidate the underlying cache without having to be edited.
+# Forward .clear() so existing `fetch_sent_records_from_sheet.clear()` call
+# sites still invalidate the underlying cache without having to be edited.
 fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_sheet.clear
 
 # ─── Routing engine: Mapbox Optimization API + persistent shared cache ───

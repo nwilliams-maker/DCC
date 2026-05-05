@@ -2212,7 +2212,7 @@ def fetch_sync_status(since: int = 0):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_sent_records_from_sheet():
+def _cached_fetch_sent_records_from_sheet():
     """
     Returns: (sent_dict, ghost_routes, archived_wos)
 
@@ -2473,20 +2473,41 @@ def fetch_sent_records_from_sheet():
                 _evts.sort(key=_sort_key)
             except Exception as _se:
                 _log_err(f"history_db sort tid={_tid}", _se)
-        # Merge sheet-side FN-posted timestamps into session_state. Use merge
-        # (not replace) so a click that fired the GAS write but hasn't been
-        # read back yet doesn't get clobbered by a stale read.
+        # 📤 Park the FN-posted dict on ghost_routes so cache hits still carry it.
+        # Earlier this merged directly into st.session_state here, but @st.cache_data
+        # short-circuits the function body on a hit — so the merge never ran and
+        # FN-Posted state evaporated on every reload after the first cache miss.
         try:
-            _ss_fp = st.session_state.get('_fn_posted', {}) or {}
-            for _fp_h, _fp_ts in fn_posted_dict.items():
-                _ss_fp.setdefault(_fp_h, _fp_ts)
-            st.session_state['_fn_posted'] = _ss_fp
+            ghost_routes['_fn_posted'] = fn_posted_dict
         except Exception as _fpe:
-            _log_err("fn_posted_hydrate", _fpe)
+            _log_err("fn_posted_attach", _fpe)
         return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
         return {}, {}, set(), {}
+
+
+def fetch_sent_records_from_sheet():
+    """Public wrapper. Calls the cached fetcher, then runs per-call side-effects
+    (currently: hydrate _fn_posted into session_state). Required because
+    @st.cache_data skips the function body on cache hits, so any side-effect
+    inside the cached function only runs on misses."""
+    sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_sheet()
+    try:
+        _fp_from_sheet = (ghost_routes or {}).get('_fn_posted', {}) or {}
+        if _fp_from_sheet:
+            _ss_fp = st.session_state.get('_fn_posted', {}) or {}
+            for _h, _ts in _fp_from_sheet.items():
+                _ss_fp.setdefault(_h, _ts)
+            st.session_state['_fn_posted'] = _ss_fp
+    except Exception as _fpe:
+        _log_err("fn_posted_hydrate_wrapper", _fpe)
+    return sent_dict, ghost_routes, archived_wos, history_db
+
+
+# Forward .clear() so existing fetch_sent_records_from_sheet.clear() call sites
+# still invalidate the underlying cache without having to be edited.
+fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_sheet.clear
 
 # ─── Routing engine: Mapbox Optimization API + persistent shared cache ───
 # Two-stage cache:

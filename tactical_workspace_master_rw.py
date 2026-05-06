@@ -4067,6 +4067,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                                 break
                     return matches
 
+                # 🌟 IMPORTANT: searchbox_key MUST differ from sel_key. The
+                # pre-seed block above writes a STRING label to sel_key (so the
+                # fallback selectbox can use it as its default). st_searchbox
+                # stores its own dict at session_state[key] — if we passed
+                # sel_key here it would try `session_state[sel_key]["options_js"]`
+                # on a string and TypeError. Separate key = clean separation.
+                searchbox_key = f"searchbox_{pod_name}_{cluster_hash}"
+
                 # Restore previous selection across reruns. st_searchbox honors
                 # `default` only when its internal state is empty (not yet
                 # interacted with), so this hydrates correctly on first render
@@ -4075,7 +4083,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 selected_label = st_searchbox(
                     _ic_search,
                     placeholder="Search contractor — any name from the IC database",
-                    key=sel_key,
+                    key=searchbox_key,
                     default=_prev_pick if _prev_pick in ic_opts else None,
                 )
 

@@ -8,11 +8,6 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
-try:
-    from streamlit_searchbox import st_searchbox
-    _HAS_SEARCHBOX = True
-except ImportError:
-    _HAS_SEARCHBOX = False
 import folium
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -3889,14 +3884,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 stop_metrics[addr]['custom'][display_tt] = 0
             stop_metrics[addr]['custom'][display_tt] += 1
             
-   # --- 3. CONTRACTOR FILTERING ---
-    # ic_opts holds EVERY IC in the database, sorted by distance. The searchbox
-    # default-renders only `near_labels` (≤100mi), but typing reveals matches
-    # from the full DB. Vanilla selectbox fallback (no searchbox dep) shows
-    # near_labels only — same UX as before.
+    # --- 3. CONTRACTOR FILTERING (100 MILES) ---
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
     ic_opts = {}
-    near_labels = []
     v_ics = pd.DataFrame()
     # 🔵 Lazy-init worker task counts so the badge works on first page load too.
     # Previously _worker_counts was only populated at the END of process_pod /
@@ -3916,10 +3906,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             v_ics = v_ics.dropna(subset=[lat_col, lng_col])
             if not v_ics.empty:
                 v_ics['d'] = v_ics.apply(lambda x: haversine(cluster['center'][0], cluster['center'][1], x[lat_col], x[lng_col]), axis=1)
-                # 🌟 No 100mi filter — keep every IC, sort by distance. Default-view
-                # subset (near_labels) is split off below; full set (ic_opts) is what
-                # the searchbox queries against when the dispatcher types a name.
-                v_ics = v_ics.sort_values('d')
+                v_ics = v_ics[v_ics['d'] <= 100].sort_values('d')
                 for _, r in v_ics.iterrows():
                     cert_val = str(r.get('digital certified', '')).strip().upper()
                     cert_icon = " 🔌" if cert_val in ['YES', 'Y', 'TRUE', '1', '1.0'] else ""
@@ -3927,12 +3914,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     _ic_phone = re.sub(r'\D', '', str(r.get('phone', '')))[-10:]
                     _task_cnt = _worker_counts.get(_ic_phone, 0)
                     _cnt_tag = f" 🔵{_task_cnt}" if _task_cnt > 0 else " 🔵0"
-                    _d = r['d']
-                    _far = "⚠️ " if _d > 100 else ""
-                    label = f"{_far}{ic_name}{cert_icon}{_cnt_tag} ({round(_d, 1)} mi)"
+                    label = f"{ic_name}{cert_icon}{_cnt_tag} ({round(r['d'], 1)} mi)"
                     ic_opts[label] = r
-                    if _d <= 100:
-                        near_labels.append(label)
 
     # --- DYNAMIC PRICING SYNC ---
     # Streamlit silently ignores st.session_state[widget_key] = X writes once the
@@ -4048,81 +4031,50 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         </div>""", unsafe_allow_html=True)
 
         if ic_opts:
-            if _HAS_SEARCHBOX:
-                # Typeahead: empty query shows ≤100mi ICs sorted by distance
-                # (the dispatcher's daily case). Typing surfaces matches across
-                # the FULL IC database — useful for assigning to an IC outside
-                # the 100mi radius (out-of-state coverage, edge routes).
-                # st_searchbox calls _ic_search on every keystroke; cheap because
-                # ic_opts is already-built in-memory dict for this cluster.
-                def _ic_search(searchterm):
-                    q = (searchterm or "").strip().lower()
-                    if not q:
-                        return [(lab, lab) for lab in near_labels]
-                    matches = []
-                    for lab in ic_opts.keys():
-                        if q in lab.lower():
-                            matches.append((lab, lab))
-                            if len(matches) >= 25:
-                                break
-                    return matches
-
-                # 🌟 IMPORTANT: searchbox_key MUST differ from sel_key. The
-                # pre-seed block above writes a STRING label to sel_key (so the
-                # fallback selectbox can use it as its default). st_searchbox
-                # stores its own dict at session_state[key] — if we passed
-                # sel_key here it would try `session_state[sel_key]["options_js"]`
-                # on a string and TypeError. Separate key = clean separation.
-                searchbox_key = f"searchbox_{pod_name}_{cluster_hash}"
-
-                # Restore previous selection across reruns. st_searchbox honors
-                # `default` only when its internal state is empty (not yet
-                # interacted with), so this hydrates correctly on first render
-                # and after archive/save reruns.
-                _prev_pick = st.session_state.get(last_sel_key)
-                selected_label = st_searchbox(
-                    _ic_search,
-                    placeholder="Search contractor — any name from the IC database",
-                    key=searchbox_key,
-                    default=_prev_pick if _prev_pick in ic_opts else None,
-                )
-
-                # Searchbox returns None when the dispatcher hasn't picked
-                # anything yet. Fall back to the closest IC so the rest of the
-                # card renders sensibly.
-                if not selected_label:
-                    if _prev_pick and _prev_pick in ic_opts:
-                        selected_label = _prev_pick
-                    elif near_labels:
-                        selected_label = near_labels[0]
-                    elif ic_opts:
-                        selected_label = next(iter(ic_opts.keys()))
-
-                # Inline change-detect — st_searchbox doesn't have on_change,
-                # so we run the same pay-sync logic explicitly. Guarded by
-                # last_sel_key so it only fires on actual selection changes.
-                if selected_label and selected_label != st.session_state.get(last_sel_key):
-                    if selected_label in ic_opts:
-                        ic_new = ic_opts[selected_label]
-                        _, h, _, _ = get_gmaps(ic_new.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
-                        new_pay = float(round(h * 25.0, 2))
-                        if new_pay == 0:
-                            new_pay = round(20.0 * cluster.get('stops', 1), 2)
-                        st.session_state[_pay_master_key] = new_pay
-                        st.session_state[_rate_master_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
-                        st.session_state[_pay_ver_key] = _pay_ver + 1
-                        st.session_state[last_sel_key] = selected_label
+            # Sentinel that lets dispatchers type any contractor name (someone
+            # outside the 100mi auto-IC list, or an ad-hoc contractor not in
+            # the IC database). Streamlit 1.39 doesn't have selectbox.accept_new_options
+            # (added 1.49), so we fake it with an explicit option + a paired
+            # text_input that only renders when the sentinel is selected.
+            _CUSTOM_IC_SENTINEL = "➕ Type a contractor name…"
+            _ic_keys = list(ic_opts.keys()) + [_CUSTOM_IC_SENTINEL]
+            selected_label = st.selectbox(
+                "Contractor",
+                _ic_keys,
+                key=sel_key,
+                on_change=update_for_new_contractor,
+                label_visibility="collapsed",
+            )
+            if selected_label == _CUSTOM_IC_SENTINEL:
+                _custom_key = f"custom_ic_name_{pod_name}_{cluster_hash}"
+                _typed = st.text_input(
+                    "Custom contractor name",
+                    key=_custom_key,
+                    placeholder="e.g. Jane Doe",
+                    label_visibility="collapsed",
+                ).strip()
+                if _typed:
+                    # Synthesize an ic dict that satisfies every downstream
+                    # .get() in the dispatch save path. Distance is 0 since
+                    # we have no IC home to measure from — high-rate /
+                    # flagged-route unlocks still apply, just not distance.
+                    ic = {
+                        "name":     _typed,
+                        "location": ic_location_tmp,
+                        "d":        0,
+                        "email":    "",
+                        "phone":    "",
+                    }
+                else:
+                    # Sentinel picked but no name typed yet — keep the form
+                    # in a benign state so the rest of the card still renders.
+                    ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
             else:
-                # Fallback: streamlit_searchbox not installed. Use vanilla
-                # selectbox restricted to ≤100mi ICs (original behavior).
-                _fallback_keys = near_labels if near_labels else list(ic_opts.keys())
-                selected_label = st.selectbox("Contractor", _fallback_keys, key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
-
-            ic = ic_opts[selected_label] if selected_label in ic_opts else {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
-            ic_location_tmp = ic.get('location', ic_location_tmp)
+                ic = ic_opts[selected_label]
+                ic_location_tmp = ic.get('location', ic_location_tmp)
         else:
             ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
-            st.info("No ICs in database.")
+            st.info("No ICs within 100mi.")
 
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))

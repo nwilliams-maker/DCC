@@ -2153,6 +2153,36 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+
+def _ic_home_loc(ic, fallback=None):
+    """Resolve an IC row to its best-known home location for routing.
+
+    The IC sheet has both:
+      - lat / lng numeric columns (used for the dropdown distance — trusted)
+      - location text column (often a stale street address — UNTRUSTED)
+
+    Earlier code passed `ic.get('location')` straight to get_gmaps, which then
+    forward-geocoded the text. When the lat/lng said "Page, AZ" but the text
+    column said "Phoenix, AZ", the dropdown would show "4.4 mi" but the route
+    calc would use the Phoenix coords — producing a 333-mile / 7-hour route
+    for a one-stop trip (the original bug that surfaced this).
+
+    Always prefer lat/lng. _mapbox_geocode now short-circuits "lat,lng" strings
+    to the same (lng, lat) tuple it would produce for an address — so passing
+    the coord pair here gives correct routing without touching the API.
+    """
+    try:
+        _lat = float(ic.get('lat'))
+        _lng = float(ic.get('lng'))
+        if -90.0 <= _lat <= 90.0 and -180.0 <= _lng <= 180.0:
+            return f"{_lat},{_lng}"
+    except (TypeError, ValueError):
+        pass
+    _loc = ic.get('location') if hasattr(ic, 'get') else None
+    if _loc and str(_loc).strip():
+        return str(_loc).strip()
+    return fallback
+
 def normalize_state(st_str):
     if not st_str: return "UNKNOWN"
     clean = str(st_str).strip().upper()
@@ -2547,7 +2577,17 @@ def _mapbox_geocode_cache():
 
 def _mapbox_geocode(address):
     """Resolve an address to (lng, lat) via Mapbox Geocoding API. Returns
-    None on miss. Cached forever for the address — kiosks don't move."""
+    None on miss. Cached forever for the address — kiosks don't move.
+
+    Special case: if the input is a "<float>,<float>" coordinate pair (which
+    is how IC home locations and cluster centers get passed around), skip
+    the geocoding API entirely and return the pair directly. This dodges a
+    long-standing bug where the IC sheet's 'location' text column can be
+    out-of-date or land on the wrong city, while the lat/lng columns (used
+    for the dropdown distance) are trustworthy. Convention: input is
+    "lat,lng" (matches f-strings like f"{cluster['center'][0]},{cluster['center'][1]}"),
+    return is (lng, lat) to match Mapbox's coordinate order.
+    """
     if not MAPBOX_TOKEN or not address:
         return None
     addr_key = str(address).strip()
@@ -2556,6 +2596,20 @@ def _mapbox_geocode(address):
     cache = _mapbox_geocode_cache()
     if addr_key in cache:
         return cache[addr_key]
+    # Coordinate-pair short-circuit. Strict "lat,lng" form so we don't
+    # accidentally swallow a street address that happens to start with
+    # two numbers.
+    _coord_match = re.match(r'^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$', addr_key)
+    if _coord_match:
+        try:
+            _lat = float(_coord_match.group(1))
+            _lng = float(_coord_match.group(2))
+            if -90.0 <= _lat <= 90.0 and -180.0 <= _lng <= 180.0:
+                _result = (_lng, _lat)
+                cache[addr_key] = _result
+                return _result
+        except (ValueError, TypeError):
+            pass
     from urllib.parse import quote
     enc = quote(addr_key, safe='')
     url = (
@@ -3355,7 +3409,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     best_ic = valid_ics.sort_values('d').iloc[0]
                     has_ic = True
                     ic_dist = best_ic['d']
-                    closest_ic_loc = best_ic.get('location', closest_ic_loc)
+                    closest_ic_loc = _ic_home_loc(best_ic, closest_ic_loc)
 
             def check_viability(grp):
                 seen = set(); u_locs = []
@@ -3969,7 +4023,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         selected_label = st.session_state.get(sel_key)
         if selected_label and selected_label != st.session_state.get(last_sel_key):
             ic_new = ic_opts[selected_label]
-            _, h, _, _ = get_gmaps(ic_new.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             # 🌟 BUGFIX: Apply same $20/stop floor used in init logic. Without this, when
             # gmaps fails (network error, bad IC location, etc.) the comp/rate fields zero out
@@ -4004,7 +4058,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         elif default_label:
             # Calculate from the Contractor's Home
             ic_init = ic_opts[default_label]
-            _, h, _, _ = get_gmaps(ic_init.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_init, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             initial_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             st.session_state[sel_key] = default_label
             st.session_state[last_sel_key] = default_label
@@ -4040,7 +4094,10 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         if ic_opts:
             selected_label = st.selectbox("Contractor", list(ic_opts.keys()), key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
             ic = ic_opts[selected_label]
-            ic_location_tmp = ic.get('location', ic_location_tmp)
+            # 🌟 Resolve to trusted lat/lng (not the free-text 'location'
+            # column, which can drift from the IC's actual lat/lng — produced
+            # the "Cassie 4.4mi shows 333mi" bug).
+            ic_location_tmp = _ic_home_loc(ic, ic_location_tmp)
         else:
             ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
             st.info("No ICs within 100mi.")
@@ -4540,7 +4597,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # 🚀 STEP 2: PROCEED WITH DISPATCH
             _dispatch_result = {}
             with st.spinner("Generating link..."):
-                home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
+                home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
                 # Build ordered task IDs from Google Maps waypoint order
                 _addr_list = list(stop_metrics.keys())
                 _ordered_addrs = [_addr_list[i] for i in _wp_order] if _wp_order else _addr_list
@@ -4675,7 +4732,7 @@ text-decoration:none;">📨 Default Mail</a>
         
         if fn_checked and not is_fn:
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
-            home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
+            home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
             fn_payload = {
                 "cluster_hash": cluster_hash,
@@ -5889,7 +5946,7 @@ def run_pod_tab(pod_name):
                             if not v_ics.empty:
                                 v_ics['d'] = v_ics.apply(lambda x: haversine(c['center'][0], c['center'][1], x[lat_col], x[lng_col]), axis=1)
                                 closest_ic = v_ics.sort_values('d').iloc[0]
-                                _, hrs, _, _ = get_gmaps(closest_ic[loc_col], [t['full'] for t in c['data'][:25]])
+                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
                                 est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
                                 est_rate = est_pay / c['stops'] if c['stops'] > 0 else 0
                                 if closest_ic['d'] > 60: badges += " 📡"

@@ -4896,7 +4896,9 @@ text-decoration:none;">📨 Default Mail</a>
             with st.popover("🚨 Confirm Field Nation Revocation", use_container_width=True):
                 st.error("Remove this route from Field Nation tracking?")
                 # 🌟 THE FIX: Upgraded to a callback so it doesn't freeze the screen!
-                st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True, on_click=revoke_field_nation, kwargs={"cluster_hash": cluster_hash, "pod_name": pod_name})
+                if st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+                    revoke_field_nation(**{"cluster_hash": cluster_hash, "pod_name": pod_name})
+                    st.rerun()
             st.stop()
 
     BG_COLOR = "#FEF9C3"
@@ -5597,7 +5599,15 @@ def run_pod_tab(pod_name):
         if g_hash in seen_ghosts:
             continue
         seen_ghosts.add(g_hash)
-        
+
+        # 🌟 Bug fix: if the dispatcher just revoked/re-routed this route,
+        # suppress the sheet ghost until the async sheet archive lands.
+        # Without this skip, the route appears "stuck" in Sent/Accepted
+        # for ~5-15s after revoke because the live cluster is filtered by
+        # is_reverted but the ghost path bypassed that check.
+        if g_hash and st.session_state.get(f"reverted_{g_hash}", False):
+            continue
+
         g_stat = g.get("status", "")
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
@@ -6376,7 +6386,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6416,8 +6428,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-                            
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                    st.rerun()
         with t_acc:
             unified_acc = unify_and_sort_by_date(accepted, pod_ghosts, live_hashes)
             if not unified_acc: st.info("Waiting for portal acceptances...")
@@ -6473,7 +6486,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6504,8 +6519,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                    
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.rerun()
         with t_dec:
             unified_dec = unify_and_sort_by_date(declined, [], live_hashes)
             if not unified_dec: st.info("No declined routes.")
@@ -6535,8 +6551,9 @@ def run_pod_tab(pod_name):
                     if not _is_dispatch_associate():
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
-                    
+                            if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                                st.rerun()
         with t_fin:
             unified_fin = unify_and_sort_by_date(finalized, finalized_ghosts, live_hashes)
             if not unified_fin: st.info("No finalized routes.") 
@@ -6583,7 +6600,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6609,8 +6628,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.rerun()
 # --- LOGOUT URL HANDLER ---
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of
@@ -7385,7 +7405,15 @@ with tabs[6]:
         if g_hash in seen_ghosts:
             continue
         seen_ghosts.add(g_hash)
-        
+
+        # 🌟 Bug fix: if the dispatcher just revoked/re-routed this route,
+        # suppress the sheet ghost until the async sheet archive lands.
+        # Without this skip, the route appears "stuck" in Sent/Accepted
+        # for ~5-15s after revoke because the live cluster is filtered by
+        # is_reverted but the ghost path bypassed that check.
+        if g_hash and st.session_state.get(f"reverted_{g_hash}", False):
+            continue
+
         g_stat = g.get("status", "")
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
@@ -7813,7 +7841,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    if st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                        st.rerun()
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -7835,8 +7865,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-            
+                                    if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                        st.rerun()
             with t_acc:
                 unified_acc = unify_and_sort_by_date(d_acc, pod_ghosts, live_hashes)
                 if not unified_acc: st.info("Waiting for portal acceptances...")
@@ -7875,7 +7906,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                    if st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                        st.rerun()
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -7900,8 +7933,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
-
+                                    if st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                                        st.rerun()
             with t_dec:
                 unified_dec = unify_and_sort_by_date(d_dec, [], live_hashes)
                 if not unified_dec: st.info("No declined routes.")
@@ -7928,8 +7962,9 @@ with tabs[6]:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
-                    
+                                if st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                    st.rerun()
             with t_fin:
                 unified_fin = unify_and_sort_by_date(d_fin, finalized_ghosts, live_hashes)
                 if not unified_fin: st.info("No finalized digital routes.") 
@@ -7966,8 +8001,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-
+                                    if st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                        st.rerun()
 # --- FOOTER ---
 st.markdown("---")
 st.markdown(

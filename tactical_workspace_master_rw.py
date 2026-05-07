@@ -4819,8 +4819,18 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # The PDF lands in the browser's downloads bar; the dispatcher drags
                 # it into the Gmail compose tab as an attachment.
                 # Key includes final_route_id so the same dispatch can't trigger twice.
+                # We inject contractor_name + wo onto a shallow cluster copy because at
+                # dispatch time the live `cluster` dict hasn't been mutated by the render
+                # loop yet (those fields only get populated on the NEXT render after the
+                # sheet write lands). Without this, the slip header shows "Unassigned"
+                # and "Work Order" instead of the real worker + WO #.
                 try:
-                    render_packing_slip_autodownload(cluster, pod_name, key=f"dispatch_{cluster_hash}_{final_route_id}")
+                    _ps_cluster = {
+                        **cluster,
+                        "contractor_name": ic.get("name", "Unknown"),
+                        "wo": wo_val,
+                    }
+                    render_packing_slip_autodownload(_ps_cluster, pod_name, key=f"dispatch_{cluster_hash}_{final_route_id}")
                 except Exception as _ps_e:
                     _log_err("dispatch/packing_slip_autodownload", _ps_e)
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"

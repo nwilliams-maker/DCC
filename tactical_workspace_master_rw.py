@@ -2003,7 +2003,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
 from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
-from packing_slip import render_packing_slip_button
+from packing_slip import render_packing_slip_button, render_packing_slip_autodownload
 
 
 
@@ -4815,6 +4815,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
+                # 🌟 Option A — Auto-download the packing slip PDF before Gmail opens.
+                # The PDF lands in the browser's downloads bar; the dispatcher drags
+                # it into the Gmail compose tab as an attachment.
+                # Key includes final_route_id so the same dispatch can't trigger twice.
+                try:
+                    render_packing_slip_autodownload(cluster, pod_name, key=f"dispatch_{cluster_hash}_{final_route_id}")
+                except Exception as _ps_e:
+                    _log_err("dispatch/packing_slip_autodownload", _ps_e)
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
@@ -4833,6 +4841,14 @@ style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px soli
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
+                # 📎 Tell the dispatcher the packing slip is in their downloads bar
+                # and needs to be dragged into the Gmail compose window manually.
+                st.markdown(
+                    '''<div style="margin:6px 0 0 0;padding:8px 10px;background:#fef3c7;
+border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#92400e;
+text-align:center;font-weight:600;">📎 Packing slip downloaded — drag it into Gmail to attach.</div>''',
+                    unsafe_allow_html=True,
+                )
                 time.sleep(1)
                 _link_ph.empty()
                 st.rerun()

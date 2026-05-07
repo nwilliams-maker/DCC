@@ -335,6 +335,103 @@ _components.html(
     """,
     height=0,
 )
+
+# ============================================================================
+# 🔁 STALE-DEPLOY GUARD
+# ============================================================================
+# When Railway swaps containers, browsers with the old session in memory hit
+# a brief window where the new server is up but their session/asset hashes
+# are gone. Streamlit handles this with a yellow "App was updated — auto-
+# refreshing in 30s" banner, but in practice the dispatcher clicks something
+# during those 30s and gets a "Bad message format: SessionInfo" or "Connection
+# error: 404" modal. Both are the SAME bug — stale tab vs. fresh server.
+#
+# Mitigation: force a hard reload as soon as we see either signal, instead
+# of letting the dispatcher sit on a broken page. Reload-loop guard: if we
+# trigger more than 3 times in 60 seconds, stop reloading and surface the
+# original error — that means it's NOT a redeploy and reloading won't fix it.
+_components.html(
+    """
+    <script>
+    (function() {
+      try {
+        var w = window.parent;
+        if (w._dccStaleGuardLoaded) return;
+        w._dccStaleGuardLoaded = true;
+
+        function _shouldReload() {
+          // Reload-loop circuit breaker. Stored on parent window so it
+          // survives across this iframe's lifecycle but not across actual
+          // hard reloads (which clear sessionStorage anyway, but we also
+          // explicitly check timestamps).
+          try {
+            var raw = w.sessionStorage.getItem('_dcc_stale_reloads') || '[]';
+            var hits = JSON.parse(raw).filter(function(t) {
+              return (Date.now() - t) < 60000;
+            });
+            if (hits.length >= 3) return false;
+            hits.push(Date.now());
+            w.sessionStorage.setItem('_dcc_stale_reloads', JSON.stringify(hits));
+            return true;
+          } catch (e) { return true; }
+        }
+
+        function _hardReload(reason) {
+          if (!_shouldReload()) {
+            console.warn('[dcc-stale] reload loop suppressed:', reason);
+            return;
+          }
+          console.log('[dcc-stale] hard reload:', reason);
+          // location.reload(true) is deprecated but still works; the cache-
+          // bust query param is the belt to that suspender.
+          var u = new URL(w.location.href);
+          u.searchParams.set('_r', Date.now().toString());
+          w.location.replace(u.toString());
+        }
+
+        // (1) "App was updated" banner — auto-click Reload now.
+        // (2) Connection error / Bad message format dialogs — same treatment.
+        function _scan() {
+          try {
+            var doc = w.document;
+
+            // Banner: text contains "App was updated" or "auto-refreshing"
+            var banners = doc.querySelectorAll('[data-testid="stToast"], [class*="stAlert"], div[role="alert"]');
+            for (var i = 0; i < banners.length; i++) {
+              var t = (banners[i].textContent || '').toLowerCase();
+              if (t.indexOf('app was updated') >= 0 || t.indexOf('auto-refreshing') >= 0) {
+                _hardReload('updated banner');
+                return;
+              }
+            }
+
+            // Streamlit's error modals render in a portal; match by the
+            // distinctive header text instead of class names (which are
+            // hashed and change between Streamlit versions).
+            var headers = doc.querySelectorAll('h1, h2, h3, [class*="StyledModalHeader"]');
+            for (var j = 0; j < headers.length; j++) {
+              var ht = (headers[j].textContent || '').toLowerCase();
+              if (ht.indexOf('bad message format') >= 0 ||
+                  ht.indexOf('connection error') >= 0) {
+                _hardReload(headers[j].textContent.trim());
+                return;
+              }
+            }
+          } catch (e) {}
+        }
+
+        // Poll every 500ms — light, runs once per dispatcher tab. We can't
+        // use MutationObserver alone because Streamlit's portal modals are
+        // appended to body asynchronously and sometimes after our observer
+        // is set up.
+        setInterval(_scan, 500);
+        _scan();  // also run immediately
+      } catch (e) {}
+    })();
+    </script>
+    """,
+    height=0,
+)
 # ============================================================================
 # 🔐 LOGIN — per-user authentication
 # ============================================================================

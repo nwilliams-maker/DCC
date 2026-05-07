@@ -1544,11 +1544,27 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     all_task_ids = []
     if check_onfleet and cluster_data:
         try:
-            raw = cluster_data.get('taskIds', '') or cluster_data.get('data', [])
+            # Three input shapes we have to handle:
+            #   - 'taskIds'  (str CSV)         — built by background_sheet_move
+            #   - 'data'     (list of dicts)   — live cluster from main fetch
+            #   - 'task_ids' (list of strs)    — ghost rows from sheet (FN tab,
+            #                                    rebuilt Sent/Finalized cards)
+            # Without the third path, every ghost-revoke was a UI-only move that
+            # never told Onfleet to unassign — worker kept seeing the route.
+            raw = (
+                cluster_data.get('taskIds', '')
+                or cluster_data.get('data', [])
+                or cluster_data.get('task_ids', [])
+            )
             if isinstance(raw, str):
                 all_task_ids = [t.strip() for t in raw.split(',') if t.strip()]
             elif isinstance(raw, list):
-                all_task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
+                all_task_ids = []
+                for t in raw:
+                    if isinstance(t, dict) and t.get('id'):
+                        all_task_ids.append(str(t['id']).strip())
+                    elif isinstance(t, str) and t.strip():
+                        all_task_ids.append(t.strip())
         except Exception as e:
             _log_err("move_to_dispatch/task_ids-parse", e)
             all_task_ids = []

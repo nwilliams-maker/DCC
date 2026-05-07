@@ -566,6 +566,78 @@ def render_packing_slip_button(
     components.html(html, height=height, scrolling=False)
 
 
+def render_packing_slip_autodownload(
+    cluster: Dict[str, Any],
+    pod_name: str,
+    key: str,
+) -> None:
+    """Auto-download a packing slip PDF on iframe load (no button).
+
+    Used when the dispatcher clicks "Generate Link" — fires the same jsPDF
+    buildPackingSlipDoc -> savePdf flow as the manual button, but triggered
+    by DOMContentLoaded so the PDF lands in the browser's downloads bar
+    without the dispatcher clicking anything. Iframe is height=0 / hidden.
+    """
+    rows = _map_cluster_to_rows(cluster, pod_name or "")
+    wo_name = cluster.get("wo") or cluster.get("contractor_name") or "Work Order"
+
+    holder_id = "ps-auto-" + "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(key))
+
+    rows_json = json.dumps(rows)
+    wo_name_json = json.dumps(wo_name)
+    pod_name_json = json.dumps(pod_name or "")
+    holder_id_json = json.dumps(holder_id)
+
+    html = (
+        '<div id="' + holder_id + '" style="display:none;"></div>'
+        + '<script>(function(){\n'
+        + f'const ROWS = {rows_json};\n'
+        + f'const WO_NAME = {wo_name_json};\n'
+        + f'const POD_NAME = {pod_name_json};\n'
+        + f'const HOLDER_ID = {holder_id_json};\n'
+        + r"""
+  let _jspdfPromise = null;
+  function _loadJsPdf() {
+    if (_jspdfPromise) return _jspdfPromise;
+    _jspdfPromise = new Promise((resolve, reject) => {
+      if (window.jspdf && window.jspdf.jsPDF) { resolve(); return; }
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('jsPDF failed to load'));
+      document.head.appendChild(s);
+    });
+    return _jspdfPromise;
+  }
+"""
+        + _JS_HELPERS
+        + _packing_js()
+        + r"""
+  // Auto-fire on iframe load. Each iframe instance is fresh per Streamlit
+  // rerun, so this only runs once per render of the autodownload component.
+  async function _autoFire() {
+    try { await _loadJsPdf(); }
+    catch (e) { console.error('jsPDF load failed:', e); return; }
+    try {
+      const opts = POD_NAME ? { pod: POD_NAME } : {};
+      const doc = buildPackingSlipDoc(WO_NAME, ROWS, opts);
+      if (!doc) return;
+      const date = new Date().toISOString().split('T')[0];
+      const fname = String(WO_NAME).replace(/[^\w-]+/g, '_') + '_PackingSlip_' + date + '.pdf';
+      savePdf(doc, fname);
+    } catch (e) {
+      console.error('Auto-download packing slip failed:', e);
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _autoFire);
+  else _autoFire();
+})();</script>"""
+    )
+
+    # height=0 keeps the iframe invisible. The download fires regardless of size.
+    components.html(html, height=0, scrolling=False)
+
+
 # ---------------------------------------------------------------------------
 # Inline JS — appended at module-build time. See packing_slip_builder.py.
 # ---------------------------------------------------------------------------

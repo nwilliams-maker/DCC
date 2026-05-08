@@ -2039,6 +2039,7 @@ def _ghost_to_packing_cluster(g):
         _customer_type    = str(sd.get('customerType', '') or '').strip()
         _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
         _art_file         = str(sd.get('artFile', '') or '').strip()
+        _sio              = str(sd.get('sio', '') or '').strip()
         # State falls out of the address ("..., CITY, ST, ZIP" → "ST"). Best-effort.
         _parts = [p.strip() for p in addr.split(',')]
         _state = (_parts[2] if len(_parts) > 2 else '').strip().upper()[:2]
@@ -2070,6 +2071,7 @@ def _ghost_to_packing_cluster(g):
                     'boosted_standard': _boosted_standard,
                     'art_file': _art_file,
                     'customer_type': _customer_type,
+                    'sio': _sio,
                 })
         # If a stop has no breakdown counts (older sheet rows), still emit one
         # generic row so the address shows up on the slip.
@@ -2088,6 +2090,7 @@ def _ghost_to_packing_cluster(g):
                 'boosted_standard': _boosted_standard,
                 'art_file': _art_file,
                 'customer_type': _customer_type,
+                'sio': _sio,
             })
 
     return {
@@ -2143,6 +2146,7 @@ def _fn_ghost_to_cluster(g):
         _customer_type    = str(sd.get('customerType', '') or '').strip()
         _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
         _art_file         = str(sd.get('artFile', '') or '').strip()
+        _sio              = str(sd.get('sio', '') or '').strip()
         _parts = [p.strip() for p in addr.split(',')]
         _state = (_parts[2] if len(_parts) > 2 else (g.get('state') or '')).strip().upper()[:2]
         _zip   = (_parts[3] if len(_parts) > 3 else '').strip()
@@ -2994,6 +2998,7 @@ def process_digital_pool(master_bar=None):
         venue_name = ""
         venue_id = ""
         kiosk_id = ""
+        sio = ""
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
@@ -3030,6 +3035,12 @@ def process_digital_pool(master_bar=None):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # 🔢 SIO — Single-Item Order from OnFleet's `sio` custom field.
+            # Locals carry a real numeric SIO; Defaults carry literal "Default".
+            # Drives slip's SIO column + Locals grouping/sort. Captured at
+            # ingest so it flows through to ghost slips (via stopData).
+            if f_name == 'sio' or f_key == 'sio':
+                sio = f_val
             if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
                 kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
@@ -3080,6 +3091,7 @@ def process_digital_pool(master_bar=None):
             "venue_name": venue_name,
             "venue_id": venue_id,
             "kiosk_id": kiosk_id,
+            "sio": sio,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
@@ -3317,6 +3329,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             venue_name = ""
             venue_id = ""
             kiosk_id = ""
+            sio = ""
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
@@ -3350,6 +3363,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     venue_name = f_val
                 if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                     venue_id = f_val
+                # 🔢 SIO — see site-1 comment.
+                if f_name == 'sio' or f_key == 'sio':
+                    sio = f_val
                 if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
                     kiosk_id = f_val
                 if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
@@ -3415,6 +3431,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "venue_name": venue_name,
                     "venue_id": venue_id,
                     "kiosk_id": kiosk_id,
+                    "sio": sio,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
                     "art_file": art_file,
@@ -4783,6 +4800,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
                         "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
                         "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
+                        "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
@@ -5099,7 +5117,7 @@ def smart_sync_pod(pod_name):
         custom_task_type = ""
         custom_boosted = ""
         tt_val = native_details
-        venue_name = ""; venue_id = ""; kiosk_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""; customer_type = ""
+        venue_name = ""; venue_id = ""; kiosk_id = ""; sio = ""; client_company = ""; campaign_name = ""; location_in_venue = ""; customer_type = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -5120,6 +5138,12 @@ def smart_sync_pod(pod_name):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # 🔢 SIO — Single-Item Order from OnFleet's `sio` custom field.
+            # Locals carry a real numeric SIO; Defaults carry literal "Default".
+            # Drives slip's SIO column + Locals grouping/sort. Captured at
+            # ingest so it flows through to ghost slips (via stopData).
+            if f_name == 'sio' or f_key == 'sio':
+                sio = f_val
             if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
                 kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
@@ -5175,6 +5199,7 @@ def smart_sync_pod(pod_name):
             "venue_name": venue_name,
             "venue_id": venue_id,
             "kiosk_id": kiosk_id,
+            "sio": sio,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,

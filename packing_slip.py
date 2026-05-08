@@ -408,8 +408,11 @@ def _map_cluster_to_rows(cluster: Dict[str, Any], pod_name: str) -> List[Dict[st
             "isInstall": _is_install(task_type),
             # ArtFile — Print Ready Art Files Collection name
             "artFile": _tb_art_for(_tb, str(t.get("art_file", "") or "")),
-            # SIO (orderNumber) from the active campaign on this kiosk
-            "sio": _tb.get("sio", ""),
+            # SIO (orderNumber) — Terraboost's resolved active campaign wins,
+            # but fall back to OnFleet's `sio` custom field when Terraboost
+            # has no campaign for this kiosk. Locals carry a real numeric
+            # SIO ("25053613"); Defaults carry the literal string "Default".
+            "sio": (_tb.get("sio") or str(t.get("sio", "") or "")),
             "notes": "",
             "nationalCampName": "",
         })

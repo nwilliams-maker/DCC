@@ -18,6 +18,10 @@ import re
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash
 ONFLEET_KEY = os.environ.get("ONFLEET_KEY")
 GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_KEY")
+# Mapbox replaces Google Directions API for route distance + waypoint optimization.
+# Free tier: 100k Optimization API calls/month, $2/1000 after. Set this in Railway:
+#   MAPBOX_TOKEN=pk.eyJ1...   (the public token from your Mapbox account dashboard)
+MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN")
 
 # If Railway didn't have them, ONLY THEN do we try st.secrets (and we catch the error)
 if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
@@ -36,7 +40,7 @@ if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"
 # GAS_WEB_APP_URL: deployment URL acts as auth — rotate via redeploy and update the Railway env var.
-GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyz16LuLJUJfrtUWxhvK8lGJCVSqRcrqPNOwLEICJ47Oa-BrRnBvFSsy4q8XXo-Y2DTAA/exec"
+GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec"
 IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
 
 # --- TUNABLES (hoisted from inline magic numbers) ---
@@ -217,6 +221,217 @@ def _fetch_onfleet_open_tasks_cached():
 
 st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
 
+# ============================================================================
+# 🔄 DEPLOY-RECOVERY WATCHER — silent auto-recovery from Railway redeploys
+# ============================================================================
+# When DCC redeploys, browser tabs that were open before the deploy can hit
+# Streamlit "Bad message format" / "SessionInfo" / "fragment id" errors when
+# the user next interacts. This watcher prevents that from ever showing:
+#
+#   • A unique INSTANCE_ID is generated when the Python process starts.
+#     It's rendered into the DOM as a hidden data attribute.
+#   • Browser-side JS captures the instance ID on first load.
+#   • Every 30s it compares — if the server's instance ID changed (Python
+#     process restarted), it shows a small "App was updated" banner with a
+#     "Refresh now" button. No popup, no countdown, no forced reload.
+#   • If the user has been idle 10+ min when the change is detected, the
+#     reload happens silently in the background.
+#   • Streamlit's own error events (Bad message / setIn / fragment id) are
+#     caught by a global error listener — if the user is idle (>5s no input)
+#     the page reloads silently. Otherwise the banner appears instead of
+#     the red error toast.
+#
+# Net: dispatchers never see a Streamlit error popup, never get yanked
+# mid-typing, and the latest code reaches them on their schedule.
+# ============================================================================
+import uuid as _uuid
+import streamlit.components.v1 as _components
+import os as _os
+# Prefer Railway-scoped deploy ID so all workers share the same INSTANCE_ID
+# per deploy. Without this, each worker has its own uuid → false-positive
+# 'app updated' banner whenever a new tab lands on a different worker.
+INSTANCE_ID = (
+    _os.environ.get('RAILWAY_DEPLOYMENT_ID')
+    or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+    or str(_uuid.uuid4())
+)
+
+# /healthz endpoint — visit with ?healthz=1 to get a tiny status payload.
+# Useful for external uptime monitors (Railway, UptimeRobot, etc.) and for
+# verifying which deploy is currently serving traffic without DOM scraping.
+# Returns INSTANCE_ID + Railway commit SHA (when set). Bypasses login since
+# it's just a build-state readback, not user data.
+try:
+    if st.query_params.get("healthz") == "1":
+        import datetime as _dt
+        _commit = _os.environ.get('RAILWAY_GIT_COMMIT_SHA', '')
+        _short = _commit[:8] if _commit else ''
+        st.markdown(
+            f"""<div style='font-family:monospace;font-size:13px;color:#0f172a;padding:20px;'>
+            <strong>DCC healthz</strong><br>
+            ok=true<br>
+            instance_id={INSTANCE_ID}<br>
+            commit={_commit or '(unset)'}<br>
+            commit_short={_short or '(unset)'}<br>
+            checked_at={_dt.datetime.utcnow().isoformat()}Z
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+except Exception:
+    pass
+
+# Render the hidden instance-id + banner shell into the parent doc via st.markdown
+# (these are static HTML with no scripts — Streamlit will render them fine).
+st.markdown(
+    f"""
+    <div id="dcc-instance-id" data-id="{INSTANCE_ID}" style="display:none;"></div>
+    <div id="dcc-update-banner" style="display:none;position:fixed;top:0;left:0;right:0;background:#fef3c7;border-bottom:1px solid #f59e0b;color:#78350f;padding:10px 16px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;z-index:99999;justify-content:space-between;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,.08);">
+      <span>📦 App was updated. Reload when you\'re ready.</span>
+      <span>
+        <button id="dcc-refresh-btn" style="background:#f59e0b;color:white;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;">Reload now</button>
+        <button id="dcc-dismiss-btn" style="background:transparent;color:#78350f;border:0;cursor:pointer;font-weight:600;padding:6px;">Dismiss</button>
+      </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Watcher v9 — loaded from static/dcc_watcher.js via Streamlit's static file
+# server (enableStaticServing must be true in .streamlit/config.toml). The script
+# tag is rendered via st.markdown(unsafe_allow_html=True). Streamlit normally
+# strips <script> tags, but a script with src= on an external URL passes through.
+# We append ?v=INSTANCE_ID for cache-busting per deploy.
+# Browsers refuse to execute scripts inserted via innerHTML (which is what
+# st.markdown uses). To get an external script to actually run, we use a tiny
+# components.v1.html iframe that uses document.createElement() + appendChild()
+# in the parent doc — that DOES trigger script execution. The iframe itself is
+# only ~30 lines of bootstrap; all real logic is in the static dcc_watcher.js.
+_components.html(
+    f"""
+    <script>
+    (function() {{
+      try {{
+        var parentWin = window.parent;
+        if (parentWin._dccWatcherLoaded) return;
+        parentWin._dccWatcherLoaded = true;
+        // Fetch the watcher source and eval it in the parent window context.
+        // Dynamically-inserted <script src=> tags don't reliably execute in some
+        // browser/iframe combinations; fetch+eval bypasses that.
+        fetch('/app/static/dcc_watcher.js?v={INSTANCE_ID}', {{cache: 'no-cache'}})
+          .then(function(r) {{ return r.text(); }})
+          .then(function(code) {{
+            try {{
+              // Use indirect eval so the code runs in global scope of parent window.
+              parentWin.eval(code);
+            }} catch (e) {{
+              console.error('[dcc-watcher] eval failed:', e);
+            }}
+          }})
+          .catch(function(e) {{ console.error('[dcc-watcher] fetch failed:', e); }});
+      }} catch(e) {{}}
+    }})();
+    </script>
+    """,
+    height=0,
+)
+
+# ============================================================================
+# 🔁 STALE-DEPLOY GUARD
+# ============================================================================
+# When Railway swaps containers, browsers with the old session in memory hit
+# a brief window where the new server is up but their session/asset hashes
+# are gone. Streamlit handles this with a yellow "App was updated — auto-
+# refreshing in 30s" banner, but in practice the dispatcher clicks something
+# during those 30s and gets a "Bad message format: SessionInfo" or "Connection
+# error: 404" modal. Both are the SAME bug — stale tab vs. fresh server.
+#
+# Mitigation: force a hard reload as soon as we see either signal, instead
+# of letting the dispatcher sit on a broken page. Reload-loop guard: if we
+# trigger more than 3 times in 60 seconds, stop reloading and surface the
+# original error — that means it's NOT a redeploy and reloading won't fix it.
+_components.html(
+    """
+    <script>
+    (function() {
+      try {
+        var w = window.parent;
+        if (w._dccStaleGuardLoaded) return;
+        w._dccStaleGuardLoaded = true;
+
+        function _shouldReload() {
+          // Reload-loop circuit breaker. Stored on parent window so it
+          // survives across this iframe's lifecycle but not across actual
+          // hard reloads (which clear sessionStorage anyway, but we also
+          // explicitly check timestamps).
+          try {
+            var raw = w.sessionStorage.getItem('_dcc_stale_reloads') || '[]';
+            var hits = JSON.parse(raw).filter(function(t) {
+              return (Date.now() - t) < 60000;
+            });
+            if (hits.length >= 3) return false;
+            hits.push(Date.now());
+            w.sessionStorage.setItem('_dcc_stale_reloads', JSON.stringify(hits));
+            return true;
+          } catch (e) { return true; }
+        }
+
+        function _hardReload(reason) {
+          if (!_shouldReload()) {
+            console.warn('[dcc-stale] reload loop suppressed:', reason);
+            return;
+          }
+          console.log('[dcc-stale] hard reload:', reason);
+          // location.reload(true) is deprecated but still works; the cache-
+          // bust query param is the belt to that suspender.
+          var u = new URL(w.location.href);
+          u.searchParams.set('_r', Date.now().toString());
+          w.location.replace(u.toString());
+        }
+
+        // (1) "App was updated" banner — auto-click Reload now.
+        // (2) Connection error / Bad message format dialogs — same treatment.
+        function _scan() {
+          try {
+            var doc = w.document;
+
+            // Banner: text contains "App was updated" or "auto-refreshing"
+            var banners = doc.querySelectorAll('[data-testid="stToast"], [class*="stAlert"], div[role="alert"]');
+            for (var i = 0; i < banners.length; i++) {
+              var t = (banners[i].textContent || '').toLowerCase();
+              if (t.indexOf('app was updated') >= 0 || t.indexOf('auto-refreshing') >= 0) {
+                _hardReload('updated banner');
+                return;
+              }
+            }
+
+            // Streamlit's error modals render in a portal; match by the
+            // distinctive header text instead of class names (which are
+            // hashed and change between Streamlit versions).
+            var headers = doc.querySelectorAll('h1, h2, h3, [class*="StyledModalHeader"]');
+            for (var j = 0; j < headers.length; j++) {
+              var ht = (headers[j].textContent || '').toLowerCase();
+              if (ht.indexOf('bad message format') >= 0 ||
+                  ht.indexOf('connection error') >= 0) {
+                _hardReload(headers[j].textContent.trim());
+                return;
+              }
+            }
+          } catch (e) {}
+        }
+
+        // Poll every 500ms — light, runs once per dispatcher tab. We can't
+        // use MutationObserver alone because Streamlit's portal modals are
+        // appended to body asynchronously and sometimes after our observer
+        // is set up.
+        setInterval(_scan, 500);
+        _scan();  // also run immediately
+      } catch (e) {}
+    })();
+    </script>
+    """,
+    height=0,
+)
 # ============================================================================
 # 🔐 LOGIN — per-user authentication
 # ============================================================================
@@ -462,11 +677,42 @@ def _can_access_tab(tab_pod: str) -> bool:
 
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
+    # Login title block — pulled up into the upper third of the viewport.
+    # Streamlit's natural padding alone pushes it to mid-page; we trim that
+    # padding modestly (not all the way to the top — that looked cramped).
     st.markdown(
-        "<div style='text-align:center; padding-top:60px; width:100%;'>"
-        "<h1 style='color:#633094; margin: 0 auto 6px auto; font-weight:800; text-align:center;'>Terraboost Media</h1>"
-        "<p style='color:#64748b; margin:0 auto 32px auto; font-size:14px; letter-spacing:0.04em; text-transform:uppercase; font-weight:700; text-align:center;'>Dispatch Command Center · Sign in</p>"
-        "</div>",
+        """
+        <style>
+          /* Trim Streamlit's main container top padding so the login starts higher */
+          [data-testid="stMainBlockContainer"],
+          .main .block-container {
+            padding-top: 16px !important;
+          }
+          .dcc-login-wrap {
+            text-align: center;
+            width: 100%;
+            margin: 0 auto 12px auto;
+          }
+          .dcc-login-wrap h1 {
+            color: #633094;
+            margin: 0 0 6px 0;
+            font-weight: 800;
+            font-size: 32px;
+          }
+          .dcc-login-wrap p {
+            color: #64748b;
+            margin: 0 0 16px 0;
+            font-size: 14px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            font-weight: 700;
+          }
+        </style>
+        <div class="dcc-login-wrap">
+          <h1>Terraboost Media</h1>
+          <p>Dispatch Command Center · Sign in</p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
     _spacer_l, col, _spacer_r = st.columns([1, 2, 1])
@@ -478,7 +724,17 @@ def _render_login_form():
             if _submitted:
                 _rec = _check_password(_username, _password)
                 if _rec:
-                    st.session_state['_auth_user'] = {**_rec, 'username': str(_username).lower().strip()}
+                    _u_clean = str(_username).lower().strip()
+                    st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
+                    # ALWAYS set ?auth=TOKEN in URL so this tab survives deploys.
+                    # Independent of stay-signed-in (which controls localStorage).
+                    # Without this, a Railway redeploy boots active users back to
+                    # the login screen because Streamlit session_state is wiped
+                    # on server restart and there's no per-tab restore key.
+                    try:
+                        st.query_params['auth'] = _stay_token_for(_u_clean)
+                    except Exception:
+                        pass
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
@@ -534,10 +790,14 @@ st.markdown(f"""
 /* Streamlit injects a fixed-position header bar by default with a dark/black background.
    Recolor it to match the page so the logo doesn't sit on a black strip. Header still
    exists (Streamlit needs it for menu/toolbar), it's just visually invisible now. */
-header[data-testid="stHeader"] {{ background-color: {TB_APP_BG} !important; }}
+/* Kill Streamlit's sticky top header bar so the title/tabs sit right at the viewport top.
+   We don't use Streamlit's toolbar (deploy/share/share menu) so zero footprint is correct. */
+header[data-testid="stHeader"] {{ height: 0 !important; min-height: 0 !important; padding: 0 !important; background: transparent !important; }}
+header[data-testid="stHeader"] [data-testid="stToolbar"] {{ display: none !important; }}
 header[data-testid="stHeader"]::before {{ background-color: {TB_APP_BG} !important; }}
-div[data-testid="stToolbar"] {{ background-color: transparent !important; }}
-.main .block-container {{ max-width: 1400px !important; padding-top: 1rem; padding-left: 1.5rem; padding-right: 1.5rem; }}
+div[data-testid="stToolbar"] {{ display: none !important; }}
+.main .block-container,
+[data-testid="stMainBlockContainer"] {{ max-width: 1400px !important; padding-top: 8px !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }}
 
 /* =========================================
    WIDGET & INPUT STANDARDIZATION (Fixes the White Box Glitch)
@@ -1284,11 +1544,27 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     all_task_ids = []
     if check_onfleet and cluster_data:
         try:
-            raw = cluster_data.get('taskIds', '') or cluster_data.get('data', [])
+            # Three input shapes we have to handle:
+            #   - 'taskIds'  (str CSV)         — built by background_sheet_move
+            #   - 'data'     (list of dicts)   — live cluster from main fetch
+            #   - 'task_ids' (list of strs)    — ghost rows from sheet (FN tab,
+            #                                    rebuilt Sent/Finalized cards)
+            # Without the third path, every ghost-revoke was a UI-only move that
+            # never told Onfleet to unassign — worker kept seeing the route.
+            raw = (
+                cluster_data.get('taskIds', '')
+                or cluster_data.get('data', [])
+                or cluster_data.get('task_ids', [])
+            )
             if isinstance(raw, str):
                 all_task_ids = [t.strip() for t in raw.split(',') if t.strip()]
             elif isinstance(raw, list):
-                all_task_ids = [str(t['id']).strip() for t in raw if t.get('id')]
+                all_task_ids = []
+                for t in raw:
+                    if isinstance(t, dict) and t.get('id'):
+                        all_task_ids.append(str(t['id']).strip())
+                    elif isinstance(t, str) and t.strip():
+                        all_task_ids.append(t.strip())
         except Exception as e:
             _log_err("move_to_dispatch/task_ids-parse", e)
             all_task_ids = []
@@ -1392,9 +1668,9 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
-@st.fragment(run_every=15)
+@st.fragment(run_every=60)
 def auto_sync_checker(pod_name):
-    """Polls every 15s. Refreshes the sheet cache and triggers a rerun whenever
+    """Polls every 60s. Sync_version short-circuit means the heavy sheet fetch only runs when something ACTUALLY changed — between events, polls are tiny version probes. Uses GAS push-style change events to patch sent_db in-memory — no sheet fetch when accept/decline/archive happens. Falls back to full fetch only when the change buffer is empty or stale. Refreshes the sheet cache and triggers a rerun whenever
     any sheet content changed — not just Accepted/Declined status flips. Previously
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
     until a user interaction (zooming the map, clicking somewhere, etc.) forced
@@ -1412,9 +1688,84 @@ def auto_sync_checker(pod_name):
         return
 
     try:
-        # Force-refresh the cached sheet pull. The cached function has a 15s TTL but
-        # only re-runs when something actively calls it — and nothing else does between
-        # user interactions. By clearing here we guarantee the next call is fresh.
+        last_ver_key = '_sync_version_last'
+        last_ver = st.session_state.get(last_ver_key, None)
+        # 🚀 Push-style sync: GAS returns version + any change events recorded
+        # since our last seen version. We patch st.session_state.sent_db
+        # directly with those changes — no sheet fetch needed for a poll
+        # cycle that only saw accept/decline/archive events.
+        cur_ver, changes = fetch_sync_status(since=int(last_ver or 0))
+
+        # Endpoint missing / errored → bail out, leave existing state alone.
+        # The next poll retries.
+        if cur_ver == -1:
+            return
+
+        # First poll of this session — record baseline, no rerun.
+        if last_ver is None:
+            st.session_state[last_ver_key] = cur_ver
+            return
+
+        # Version unchanged → no mutations anywhere → nothing to do.
+        if cur_ver == last_ver:
+            return
+
+        # Version advanced. Try to apply the change events directly to sent_db.
+        # If `changes` is empty (e.g., we lost the buffer or fell behind by
+        # more than 50 events), do the slow path: clear the cache and fetch
+        # the sheet. Otherwise patch in-memory and skip the fetch entirely.
+        sent_db_local = dict(st.session_state.get('sent_db', {}) or {})
+        affected_this_pod = False
+        if changes:
+            for chg in changes:
+                tids_csv = str(chg.get('t', '') or '')
+                if not tids_csv:
+                    continue
+                action = str(chg.get('a', '') or '').strip()
+                decision = str(chg.get('d', '') or '').strip().lower()
+                # Map action+decision to a sent_db status string. The bucket
+                # logic in run_pod_tab keys on raw_status === 'accepted' /
+                # 'declined' / 'sent' / 'finalized' etc.
+                if action == 'processDecision':
+                    new_status = decision  # 'accepted' or 'declined'
+                elif action == 'finalizeRoute':
+                    new_status = 'finalized'
+                elif action == 'archiveRoute':
+                    new_status = 'archived'
+                elif action == 'markFNAssigned':
+                    new_status = 'accepted'
+                elif action == 'saveRoute':
+                    new_status = 'sent'
+                else:
+                    continue
+                for tid in tids_csv.split(','):
+                    tid = tid.strip()
+                    if not tid:
+                        continue
+                    if tid in pod_tid_set:
+                        affected_this_pod = True
+                    rec = dict(sent_db_local.get(tid, {}))
+                    rec['status'] = new_status
+                    if chg.get('r'):
+                        rec.setdefault('wo', str(chg.get('r')))
+                    sent_db_local[tid] = rec
+            st.session_state['sent_db'] = sent_db_local
+            st.session_state[last_ver_key] = cur_ver
+            # Clear reverted flags for any cluster whose tasks just got patched,
+            # so the traffic cop in run_pod_tab picks up the fresh status.
+            for _c in pod_clusters:
+                _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
+                if any(tid in sent_db_local for tid in _c_tids):
+                    _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
+                    st.session_state[f"reverted_{_c_hash}"] = False
+            if affected_this_pod:
+                st.rerun(scope="app")
+            # Other pods affected → don't rerun this session, just record state.
+            return
+
+        # Slow path fallback: change buffer empty (older GAS, lost properties,
+        # or we fell behind > 50 events). Do the original heavy fetch.
+        st.session_state[last_ver_key] = cur_ver
         fetch_sent_records_from_sheet.clear()
         fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
         st.session_state['_history_db'] = _history_db
@@ -1652,7 +2003,265 @@ def revoke_field_nation(cluster_hash, pod_name):
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
 from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
-# DISABLED (packing-list rollback): from packing_slip import render_packing_slip_button
+from packing_slip import render_packing_slip_button, render_packing_slip_autodownload
+
+
+
+
+def _ghost_to_packing_cluster(g):
+    """Build a packing-slip-ready cluster dict from a ghost (sheet-only) route.
+
+    Live clusters carry full Onfleet task dicts in cluster['data']; ghosts only
+    have aggregate stop_data (one entry per address with counts of each task
+    type). To render a packing slip on an Accepted ghost we fan those counts
+    out into individual synthetic task dicts so packing_slip.py's row mapper
+    sees a familiar shape. Campaign/venue come straight from stop_data;
+    art_file is left blank because the original Onfleet free-text isn't in
+    the saved row. Returns a dict packing_slip can consume directly.
+    """
+    synthetic_data = []
+    for sd in (g.get('stop_data') or []):
+        addr = sd.get('addr', '') or ''
+        venue = sd.get('venue', '') or ''
+        # New (post-2026-05) saveRoute writes kioskId/venueId/locationInVenue per
+        # stop. Older sheet rows don't have these — they fall back to '' and
+        # show empty in the packing slip's Kiosk / Loc columns.
+        _kiosk_id = str(sd.get('kioskId', '') or '').strip()
+        _venue_id = str(sd.get('venueId', '') or '').strip()
+        _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
+        # First non-empty campaign on this stop, if any — used for client_company.
+        _camps = sd.get('campaigns') or []
+        _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
+        # Pull the new per-stop packing-slip fields. Old (pre-2026-05-04) sheet
+        # rows won't have them — they fall back to '' which the slip handles
+        # gracefully (customer-type detection falls back to substring match;
+        # boost & art file simply render blank).
+        _customer_type    = str(sd.get('customerType', '') or '').strip()
+        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
+        _art_file         = str(sd.get('artFile', '') or '').strip()
+        _sio              = str(sd.get('sio', '') or '').strip()
+        # State falls out of the address ("..., CITY, ST, ZIP" → "ST"). Best-effort.
+        _parts = [p.strip() for p in addr.split(',')]
+        _state = (_parts[2] if len(_parts) > 2 else '').strip().upper()[:2]
+
+        # Fan-out: emit one row per task per type, count-times each.
+        for label, key in (
+            ('Kiosk Install',  'inst'),
+            ('Kiosk Removal',  'remov'),
+            ('New Ad',         'n_ad'),
+            ('Continuity',     'c_ad'),
+            ('Service',        'd_ad'),
+        ):
+            try:
+                n = int(sd.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            for _ in range(n):
+                synthetic_data.append({
+                    'id': f'ghost_{addr}_{label}_{_}',
+                    'full': addr,
+                    'state': _state,
+                    'venue_name': venue,
+                    'venue_id': _venue_id,
+                    'kiosk_id': _kiosk_id,
+                    'location_in_venue': _loc_in_venue,
+                    'task_type': label,
+                    'client_company': _camp_name,
+                    'is_digital': label == 'Service',
+                    'boosted_standard': _boosted_standard,
+                    'art_file': _art_file,
+                    'customer_type': _customer_type,
+                    'sio': _sio,
+                })
+        # If a stop has no breakdown counts (older sheet rows), still emit one
+        # generic row so the address shows up on the slip.
+        if not any(int(sd.get(k, 0) or 0) for k in ('inst','remov','n_ad','c_ad','d_ad')):
+            synthetic_data.append({
+                'id': f'ghost_{addr}_generic',
+                'full': addr,
+                'state': _state,
+                'venue_name': venue,
+                'venue_id': _venue_id,
+                'kiosk_id': _kiosk_id,
+                'location_in_venue': _loc_in_venue,
+                'task_type': '',
+                'client_company': _camp_name,
+                'is_digital': False,
+                'boosted_standard': _boosted_standard,
+                'art_file': _art_file,
+                'customer_type': _customer_type,
+                'sio': _sio,
+            })
+
+    return {
+        'wo': g.get('wo', '') or g.get('contractor_name', '') or '',
+        'contractor_name': g.get('contractor_name', '') or '',
+        'data': synthetic_data,
+    }
+
+
+def _fn_ghost_to_cluster(g):
+    """Reconstruct a live-cluster-shaped dict from an FN sheet ghost.
+
+    Why this exists: when "Assign to Field Nation" pushes OnFleet tasks to
+    state=1 under the FN placeholder worker, DCC's main pull (state=0 only)
+    can no longer see them — the FN tab would render empty. To recover, we
+    read FN-status rows from the Google Sheet (already happening in
+    fetch_sent_records_from_sheet now that 'field_nation' is in the ghost-
+    capture list) and rebuild them into cluster-shaped dicts here. The FN
+    tab's existing rendering code (which calls render_dispatch + expects
+    cluster shape: data[], city, state, stops, center, …) then Just Works.
+
+    The cluster_hash invariant matters: caller code recomputes the hash via
+    md5(sorted(task_ids)) on cluster['data']. To make that match the hash
+    already on the FN sheet row (so markFNAssigned can find it server-side
+    and so route_state_{hash} session-state keys line up), the synthetic
+    rows MUST carry the original OnFleet task IDs from g['task_ids'] —
+    nothing else. Order is irrelevant since the hash sorts internally; what
+    matters is that every real ID appears exactly once in cluster['data'].
+
+    Returns None if the ghost has no task IDs (degenerate sheet row).
+    """
+    real_ids = [str(t).strip() for t in (g.get('task_ids') or []) if str(t).strip()]
+    if not real_ids:
+        return None
+
+    # Pop real IDs onto each synthetic row as we walk stop_data. Order
+    # doesn't matter for the hash — the cluster_hash recompute path sorts.
+    id_queue = list(real_ids)
+    synthetic = []
+    addrs_seen = []
+
+    for sd in (g.get('stop_data') or []):
+        addr = sd.get('addr', '') or ''
+        if not addr:
+            continue
+        addrs_seen.append(addr)
+        venue = sd.get('venue', '') or ''
+        _kiosk_id     = str(sd.get('kioskId', '') or '').strip()
+        _venue_id     = str(sd.get('venueId', '') or '').strip()
+        _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
+        _camps = sd.get('campaigns') or []
+        _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
+        _customer_type    = str(sd.get('customerType', '') or '').strip()
+        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
+        _art_file         = str(sd.get('artFile', '') or '').strip()
+        _sio              = str(sd.get('sio', '') or '').strip()
+        _parts = [p.strip() for p in addr.split(',')]
+        _state = (_parts[2] if len(_parts) > 2 else (g.get('state') or '')).strip().upper()[:2]
+        _zip   = (_parts[3] if len(_parts) > 3 else '').strip()
+
+        # Fan out per task-type count; consume one real ID per row.
+        for label, key in (
+            ('Kiosk Install',  'inst'),
+            ('Kiosk Removal',  'remov'),
+            ('New Ad',         'n_ad'),
+            ('Continuity',     'c_ad'),
+            ('Service',        'd_ad'),
+        ):
+            try:
+                n = int(sd.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            for _ in range(n):
+                if not id_queue:
+                    break
+                synthetic.append({
+                    'id':              id_queue.pop(0),
+                    'full':            addr,
+                    'state':           _state,
+                    'zip':             _zip,
+                    'venue_name':      venue,
+                    'venue_id':        _venue_id,
+                    'kiosk_id':        _kiosk_id,
+                    'location_in_venue': _loc_in_venue,
+                    'task_type':       label,
+                    'client_company':  _camp_name,
+                    'is_digital':      label == 'Service',
+                    'boosted_standard': _boosted_standard,
+                    'art_file':        _art_file,
+                    'customer_type':   _customer_type,
+                    'escalated':       False,
+                })
+
+    # Tail: any real IDs left after stop_data exhaustion get distributed onto
+    # the first known address as generic rows. This happens when stop_data
+    # under-counts (older sheet rows without per-type breakdowns) — better
+    # than dropping IDs, which would break the cluster_hash invariant.
+    fallback_addr = addrs_seen[0] if addrs_seen else ''
+    if not fallback_addr:
+        # Truly empty stop_data — pull a stop from locs (pipe-delimited string
+        # whose first/last entries are the IC home pin, middle entries are stops).
+        _raw_locs = [s.strip() for s in str(g.get('locs', '')).split('|') if s.strip()]
+        _stops_only = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
+        fallback_addr = _stops_only[0] if _stops_only else (g.get('city', '') or '')
+    while id_queue:
+        synthetic.append({
+            'id':              id_queue.pop(0),
+            'full':            fallback_addr,
+            'state':           str(g.get('state', '') or '').strip().upper()[:2],
+            'zip':             '',
+            'venue_name':      '',
+            'venue_id':        '',
+            'kiosk_id':        '',
+            'location_in_venue': '',
+            'task_type':       '',
+            'client_company':  '',
+            'is_digital':      False,
+            'boosted_standard': '',
+            'art_file':        '',
+            'customer_type':   '',
+            'escalated':       False,
+        })
+
+    inst_count  = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk install')
+    remov_count = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk removal')
+
+    # Center: best-effort. stop_data doesn't include lat/lng, so try to
+    # geocode the first address. _mapbox_geocode is process-wide cached
+    # (kiosks don't move), so the per-render cost is negligible after first
+    # call. If geocoding fails (no MAPBOX_TOKEN, network blip, etc.) the
+    # center stays at (0, 0); the map iteration in run_pod_tab guards on
+    # _is_fn_ghost_pseudo to skip those markers rather than dropping a pin
+    # in the Atlantic.
+    center = (0.0, 0.0)
+    _has_real_center = False
+    if addrs_seen:
+        try:
+            _coords = _mapbox_geocode(addrs_seen[0])
+            if _coords:
+                # Mapbox returns (lng, lat); folium expects (lat, lng).
+                center = (_coords[1], _coords[0])
+                _has_real_center = True
+        except Exception:
+            pass
+
+    return {
+        'data':            synthetic,
+        'city':            g.get('city', 'Unknown'),
+        'state':           g.get('state', 'UNKNOWN'),
+        'stops':           g.get('stops') or len(set(t['full'] for t in synthetic if t.get('full'))),
+        'center':          center,
+        'inst_count':      inst_count,
+        'remov_count':     remov_count,
+        'esc_count':       0,
+        'is_removal':      False,
+        'is_digital':      False,
+        'boosted_tag':     '',
+        'status':          'Ready',
+        'contractor_name': g.get('contractor_name', 'Field Nation'),
+        'wo':              g.get('wo', ''),
+        'comp':            g.get('pay', 0),
+        'due':             g.get('due', 'N/A'),
+        'route_ts':        g.get('route_ts', ''),
+        # Marker for downstream code that wants to distinguish a reconstructed
+        # FN ghost from a normal live cluster — currently only the map-marker
+        # iteration uses this (skips when _has_real_center is False).
+        '_is_fn_ghost_pseudo': True,
+        '_has_real_center':    _has_real_center,
+    }
+
+
 
 # --- UTILITIES ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -1660,6 +2269,36 @@ def haversine(lat1, lon1, lat2, lon2):
     dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _ic_home_loc(ic, fallback=None):
+    """Resolve an IC row to its best-known home location for routing.
+
+    The IC sheet has both:
+      - lat / lng numeric columns (used for the dropdown distance — trusted)
+      - location text column (often a stale street address — UNTRUSTED)
+
+    Earlier code passed `ic.get('location')` straight to get_gmaps, which then
+    forward-geocoded the text. When the lat/lng said "Page, AZ" but the text
+    column said "Phoenix, AZ", the dropdown would show "4.4 mi" but the route
+    calc would use the Phoenix coords — producing a 333-mile / 7-hour route
+    for a one-stop trip (the original bug that surfaced this).
+
+    Always prefer lat/lng. _mapbox_geocode now short-circuits "lat,lng" strings
+    to the same (lng, lat) tuple it would produce for an address — so passing
+    the coord pair here gives correct routing without touching the API.
+    """
+    try:
+        _lat = float(ic.get('lat'))
+        _lng = float(ic.get('lng'))
+        if -90.0 <= _lat <= 90.0 and -180.0 <= _lng <= 180.0:
+            return f"{_lat},{_lng}"
+    except (TypeError, ValueError):
+        pass
+    _loc = ic.get('location') if hasattr(ic, 'get') else None
+    if _loc and str(_loc).strip():
+        return str(_loc).strip()
+    return fallback
 
 def normalize_state(st_str):
     if not st_str: return "UNKNOWN"
@@ -1687,8 +2326,40 @@ def extract_art_file(notes: str) -> str:
     return " • ".join(keep)
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def fetch_sent_records_from_sheet():
+def fetch_sync_status(since: int = 0):
+    """Cheap GAS poll — returns (version, changes) tuple.
+
+    With ``since=N``, GAS returns any change events recorded with v > N
+    (processDecision / archiveRoute / finalizeRoute / etc.) so we can patch
+    st.session_state.sent_db in-memory without re-fetching the entire sheet.
+    Each change event is a dict like::
+        {v, a, r, t, d, ts}
+        # version, action, routeId, taskIds (csv), decision, timestamp_ms
+
+    Returns ``(version, changes_list)``. On error returns ``(-1, [])`` so
+    auto_sync_checker can fall back gracefully if the GAS sync patch isn't
+    deployed yet.
+    """
+    try:
+        r = requests.get(
+            GAS_WEB_APP_URL,
+            params={"action": "getSyncVersion", "since": str(int(since or 0))},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return (-1, [])
+        j = r.json()
+        v = int(j.get("version", 0) or 0)
+        ch = j.get("changes", [])
+        if not isinstance(ch, list):
+            ch = []
+        return (v, ch)
+    except Exception:
+        return (-1, [])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_fetch_sent_records_from_sheet():
     """
     Returns: (sent_dict, ghost_routes, archived_wos)
 
@@ -1794,7 +2465,12 @@ def fetch_sent_records_from_sheet():
                                     })
                             
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
-                            if status_label in ['accepted', 'finalized', 'sent']:
+                            # May 4 2026 — added 'field_nation' so FN-sheet rows also produce
+                            # ghost entries. Required because once "Assign to Field Nation" pushes
+                            # OnFleet tasks to state=1 under the FN placeholder worker, the main
+                            # OnFleet pull (state=0 only) can't see them anymore. Without this,
+                            # the FN tab is empty for any route that's actually been assigned to FN.
+                            if status_label in ['accepted', 'finalized', 'sent', 'field_nation']:
                                 locs_str = str(p.get('locs', ''))
                                 state_guess, city_guess = "UNKNOWN", "Unknown"
                                 stops_list = [s.strip() for s in locs_str.split('|') if s.strip()]
@@ -1861,7 +2537,8 @@ def fetch_sent_records_from_sheet():
                                         "status": status_label,
                                         "hash": ghost_hash,
                                         "locs": p.get('locs', ''),
-                                        "stop_data": stop_data
+                                        "stop_data": stop_data,
+                                        "task_ids": [str(t).strip() for t in tids if str(t).strip()],
                                     })
                         except Exception: continue
             except Exception: continue
@@ -1943,65 +2620,256 @@ def fetch_sent_records_from_sheet():
                 _evts.sort(key=_sort_key)
             except Exception as _se:
                 _log_err(f"history_db sort tid={_tid}", _se)
-        # Merge sheet-side FN-posted timestamps into session_state. Use merge
-        # (not replace) so a click that fired the GAS write but hasn't been
-        # read back yet doesn't get clobbered by a stale read.
+        # 📤 Park the FN-posted timestamp dict on ghost_routes so cache hits
+        # still carry it. Earlier this merged directly into st.session_state
+        # here, but @st.cache_data short-circuits the function body on a hit —
+        # which meant after the 5-minute cache warmed, every reload bypassed
+        # the merge and the FN tab forgot which routes had been Posted.
+        # Caller-side merge fixes that: see the fetch_sent_records_from_sheet
+        # call sites where `_fn_posted` is read off ghost_routes and merged
+        # into session_state on every call (cached or not).
         try:
-            _ss_fp = st.session_state.get('_fn_posted', {}) or {}
-            for _fp_h, _fp_ts in fn_posted_dict.items():
-                _ss_fp.setdefault(_fp_h, _fp_ts)
-            st.session_state['_fn_posted'] = _ss_fp
+            ghost_routes['_fn_posted'] = fn_posted_dict
         except Exception as _fpe:
-            _log_err("fn_posted_hydrate", _fpe)
+            _log_err("fn_posted_attach", _fpe)
         return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
         return {}, {}, set(), {}
 
-# Manual session-state cache (replaces @st.cache_data) so we can cache ONLY successes.
-# Previously @st.cache_data(ttl=3600) was caching the (0, 0, "0h 0m", []) failure tuple
-# for an hour after any transient API hiccup — Drive Time / Round Trip would lock to
-# "—" until the TTL expired. The Bundle Routes preview made this very visible because
-# every preview produces a fresh cache key (different waypoint set) → fresh API call →
-# any one bad call locks that bundle preview into dashes.
-def get_gmaps(home, waypoints):
-    _wp_tuple = tuple(waypoints) if waypoints else ()
-    _cache_key = (home, _wp_tuple)
-    _cache = st.session_state.setdefault('_gmaps_cache', {})
-    _now = time.time()
-    _entry = _cache.get(_cache_key)
-    if _entry is not None and (_now - _entry[1] < 3600):
-        return _entry[0]
 
-    # Encode each waypoint so addresses containing '&', '=', '|' or other reserved
-    # characters don't corrupt the query string. Google's directions API accepts
-    # 'optimize:true|<wp1>|<wp2>...' as the value of the waypoints param — we URL-encode
-    # each piece individually then join with literal '|'.
+def fetch_sent_records_from_sheet():
+    """Public entry point. Calls the cached fetcher then runs the per-call
+    side-effects (currently: hydrate _fn_posted into session_state).
+
+    Background: @st.cache_data short-circuits the function body on a cache
+    hit, which means side-effects inside the cached function don't run on
+    hits — only on misses. The FN-Posted hydration is a side-effect on
+    session_state, so it was being silently skipped on every cache hit
+    after the first. Symptom: dispatcher hits Posted, GAS row updates,
+    DCC reload pulls cached tuple, FN tab forgets which routes were Posted.
+
+    Fix: cached function parks fn_posted_dict on ghost_routes['_fn_posted'].
+    This wrapper merges that dict into session_state on every call. Merge
+    uses setdefault so an in-flight click whose GAS write hasn't been read
+    back yet stays put.
+    """
+    sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_sheet()
+    try:
+        _fp_from_sheet = (ghost_routes or {}).get('_fn_posted', {}) or {}
+        if _fp_from_sheet:
+            _ss_fp = st.session_state.get('_fn_posted', {}) or {}
+            for _h, _ts in _fp_from_sheet.items():
+                _ss_fp.setdefault(_h, _ts)
+            st.session_state['_fn_posted'] = _ss_fp
+    except Exception as _fpe:
+        _log_err("fn_posted_hydrate_wrapper", _fpe)
+    return sent_dict, ghost_routes, archived_wos, history_db
+
+
+# Forward .clear() so existing `fetch_sent_records_from_sheet.clear()` call
+# sites still invalidate the underlying cache without having to be edited.
+fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_sheet.clear
+
+# ─── Routing engine: Mapbox Optimization API + persistent shared cache ───
+# Two-stage cache:
+#   1. Geocode (address → lng,lat) — ~unbounded distinct addresses, but routes
+#      revisit the same kiosks for months, so a few hundred warm cache entries
+#      cover everything. Free tier: 100k Mapbox Geocoding calls/month.
+#   2. Optimization (home + waypoints → distance, time, optimized order) —
+#      keyed on (home, ordered tuple of waypoints). Same route bundle viewed
+#      multiple times = single API call across ALL dispatchers for 24h.
+# Both caches are @st.cache_resource (process-wide dict) so they survive
+# Streamlit reruns and are shared across every connected session — was the
+# main cost driver: previous st.session_state cache only helped within one
+# tab and got wiped on every reconnect.
+
+@st.cache_resource(show_spinner=False)
+def _mapbox_geocode_cache():
+    """Process-wide dict: address (str) → (lng, lat) tuple. Lasts until
+    Railway redeploys. Geocoding is dirt cheap to retry on miss but free to
+    serve from cache, so this is overwhelmingly net-positive."""
+    return {}
+
+
+def _mapbox_geocode(address):
+    """Resolve an address to (lng, lat) via Mapbox Geocoding API. Returns
+    None on miss. Cached forever for the address — kiosks don't move.
+
+    Special case: if the input is a "<float>,<float>" coordinate pair (which
+    is how IC home locations and cluster centers get passed around), skip
+    the geocoding API entirely and return the pair directly. This dodges a
+    long-standing bug where the IC sheet's 'location' text column can be
+    out-of-date or land on the wrong city, while the lat/lng columns (used
+    for the dropdown distance) are trustworthy. Convention: input is
+    "lat,lng" (matches f-strings like f"{cluster['center'][0]},{cluster['center'][1]}"),
+    return is (lng, lat) to match Mapbox's coordinate order.
+    """
+    if not MAPBOX_TOKEN or not address:
+        return None
+    addr_key = str(address).strip()
+    if not addr_key:
+        return None
+    cache = _mapbox_geocode_cache()
+    if addr_key in cache:
+        return cache[addr_key]
+    # Coordinate-pair short-circuit. Strict "lat,lng" form so we don't
+    # accidentally swallow a street address that happens to start with
+    # two numbers.
+    _coord_match = re.match(r'^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$', addr_key)
+    if _coord_match:
+        try:
+            _lat = float(_coord_match.group(1))
+            _lng = float(_coord_match.group(2))
+            if -90.0 <= _lat <= 90.0 and -180.0 <= _lng <= 180.0:
+                _result = (_lng, _lat)
+                cache[addr_key] = _result
+                return _result
+        except (ValueError, TypeError):
+            pass
     from urllib.parse import quote
-    enc_wp = "optimize:true|" + "|".join(quote(w, safe='') for w in waypoints)
-    enc_home = quote(home, safe='')
+    enc = quote(addr_key, safe='')
     url = (
-        "https://maps.googleapis.com/maps/api/directions/json"
-        f"?origin={enc_home}&destination={enc_home}"
-        f"&waypoints={enc_wp}"
-        f"&departure_time=now&key={GOOGLE_MAPS_KEY}"
+        f"https://api.mapbox.com/geocoding/v5/mapbox.places/{enc}.json"
+        f"?limit=1&access_token={MAPBOX_TOKEN}"
     )
     try:
-        res = requests.get(url, timeout=15).json()
-        if res.get('status') == 'OK':
-            mi = sum(l['distance']['value'] for l in res['routes'][0]['legs']) * 0.000621371
-            drive_hrs = sum(l['duration']['value'] for l in res['routes'][0]['legs']) / 3600
-            service_hrs = len(waypoints) * (10/60)
-            total_hrs = drive_hrs + service_hrs
-            waypoint_order = res['routes'][0].get('waypoint_order', list(range(len(waypoints))))
-            _result = (round(mi, 1), total_hrs, f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m", waypoint_order)
-            _cache[_cache_key] = (_result, _now)  # only cache successes
-            return _result
-        else:
-            _log_err("get_gmaps", f"API status: {res.get('status')} / msg: {res.get('error_message','')[:200]}")
+        r = requests.get(url, timeout=10).json()
+        feats = r.get('features') or []
+        if feats and feats[0].get('center'):
+            lng, lat = feats[0]['center']
+            cache[addr_key] = (lng, lat)
+            return (lng, lat)
     except Exception as e:
-        _log_err("get_gmaps", e)
-    return 0, 0, "0h 0m", []
+        _log_err("_mapbox_geocode", e)
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def _gmaps_route_cache():
+    """Process-wide route cache: (home, waypoints_tuple) → (mi, hrs, str, order, ts).
+    Stores SUCCESSES ONLY — failures fall through and are retried on next call."""
+    return {}
+
+
+def get_gmaps(home, waypoints):
+    """Drop-in replacement for the previous Google Directions optimize:true call.
+    Returns the same (miles, total_hours, "Xh Ym", waypoint_order) tuple shape
+    so call sites need no changes. Internally uses Mapbox Optimization API V1.
+
+    Mapbox V1 has a hard cap of 12 coordinates per request — and BOTH the
+    source AND destination home pins count toward that cap. To support
+    bundled routes that consistently run >10 stops, we chunk the waypoints
+    into batches of ≤10 stops (12 total coords - 2 home pins), optimize each
+    batch independently, and sum the totals. Order is preserved across
+    batches; the optimizer still runs within each batch so per-chunk routing
+    remains efficient.
+
+    Per-request cost: $0 within Mapbox's 100k/month free tier, $2/1000 after.
+    A 30-stop bundled route makes 3 chunked calls (10 + 10 + 10), all cached
+    together under the original (home, waypoints) key for 24 hours.
+    """
+    _wp_tuple = tuple(waypoints) if waypoints else ()
+    _key = (home, _wp_tuple)
+    _now = time.time()
+    _cache = _gmaps_route_cache()
+    _entry = _cache.get(_key)
+    if _entry is not None and (_now - _entry[1] < 86400):
+        return _entry[0]
+
+    if not MAPBOX_TOKEN:
+        _log_err("get_gmaps", "MAPBOX_TOKEN not set in env — can't compute route")
+        return 0, 0, "0h 0m", []
+    if not waypoints:
+        return 0, 0, "0h 0m", []
+
+    # Geocode home + each waypoint to (lng, lat). Each is cached forever.
+    home_ll = _mapbox_geocode(home)
+    if not home_ll:
+        return 0, 0, "0h 0m", []
+    wp_lls = [_mapbox_geocode(w) for w in waypoints]
+    if any(c is None for c in wp_lls):
+        return 0, 0, "0h 0m", []
+
+    # Helper: optimize one ≤11-stop chunk against `home`. Returns
+    # (miles, drive_hours, ordered_global_indices) or None on Mapbox error.
+    # `chunk_indices` is the list of indices into the original `waypoints`
+    # list — used to translate Mapbox's local optimization back to global
+    # positions for the combined waypoint_order result.
+    def _optimize_chunk(chunk_indices):
+        chunk_lls = [wp_lls[i] for i in chunk_indices]
+        # Submit as [home, wp1, wp2, ..., wpN, home] then ask Mapbox to optimize
+        # the middle waypoints (source=first, destination=last fixes both ends).
+        coord_list = [home_ll] + chunk_lls + [home_ll]
+        coords_str = ";".join(f"{lng},{lat}" for lng, lat in coord_list)
+        url = (
+            f"https://api.mapbox.com/optimized-trips/v1/mapbox/driving-traffic/{coords_str}"
+            f"?source=first&destination=last&roundtrip=false"
+            f"&access_token={MAPBOX_TOKEN}"
+        )
+        try:
+            res = requests.get(url, timeout=15).json()
+            if res.get('code') == 'Ok' and res.get('trips'):
+                trip = res['trips'][0]
+                _mi = trip['distance'] * 0.000621371
+                _hrs = trip['duration'] / 3600
+                # Mapbox returns each input waypoint with a `waypoint_index` field —
+                # the position it ended up in the optimized trip. Indexes 0 and last
+                # are the fixed home pinned via source=first / destination=last.
+                wps = res.get('waypoints', [])
+                try:
+                    middle = wps[1:-1]
+                    ordered_pairs = sorted(
+                        enumerate(middle),
+                        key=lambda p: p[1].get('waypoint_index', p[0])
+                    )
+                    # Translate Mapbox's local indices back to global indices.
+                    chunk_order = [chunk_indices[local_idx] for local_idx, _ in ordered_pairs]
+                except Exception:
+                    chunk_order = list(chunk_indices)
+                return _mi, _hrs, chunk_order
+            else:
+                _log_err(
+                    "get_gmaps",
+                    f"Mapbox code: {res.get('code')} / msg: {res.get('message','')[:200]}",
+                )
+        except Exception as e:
+            _log_err("get_gmaps", e)
+        return None
+
+    # Mapbox V1 cap: 12 coords per request, period. The request body is
+    # [home, wp1, ..., wpN, home] — both home pins count toward the cap, so
+    # the maximum N is 12 - 2 = 10. Earlier off-by-one had this at 11, which
+    # produced 13-coord requests that Mapbox rejected with "Too many
+    # coordinates" — silently failing every chunk for any bundle ≥12 stops.
+    CHUNK = 10
+    total_mi = 0.0
+    total_drive_hrs = 0.0  # service hours added once at the end after all chunks
+    waypoint_order = []
+    all_indices = list(range(len(waypoints)))
+
+    for i in range(0, len(all_indices), CHUNK):
+        chunk = all_indices[i:i + CHUNK]
+        result = _optimize_chunk(chunk)
+        # Any chunk failure aborts the whole call — we'd rather show "—" than
+        # a partially-summed drive time that's wrong by minutes-to-hours.
+        if result is None:
+            return 0, 0, "0h 0m", []
+        _mi, _hrs, _order = result
+        total_mi += _mi
+        total_drive_hrs += _hrs
+        waypoint_order.extend(_order)
+
+    service_hrs = len(waypoints) * (10 / 60)
+    total_hrs = total_drive_hrs + service_hrs
+    _result = (
+        round(total_mi, 1),
+        total_hrs,
+        f"{int(total_hrs)}h {int((total_hrs * 60) % 60)}m",
+        waypoint_order,
+    )
+    _cache[_key] = (_result, _now)  # cache success only
+    return _result
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_worker_task_counts():
@@ -2129,9 +2997,12 @@ def process_digital_pool(master_bar=None):
         custom_boosted = ""
         venue_name = ""
         venue_id = ""
+        kiosk_id = ""
+        sio = ""
         client_company = ""
         campaign_name = ""
         location_in_venue = ""
+        customer_type = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -2164,12 +3035,23 @@ def process_digital_pool(master_bar=None):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # 🔢 SIO — Single-Item Order from OnFleet's `sio` custom field.
+            # Locals carry a real numeric SIO; Defaults carry literal "Default".
+            # Drives slip's SIO column + Locals grouping/sort. Captured at
+            # ingest so it flows through to ghost slips (via stopData).
+            if f_name == 'sio' or f_key == 'sio':
+                sio = f_val
+            if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
                 client_company = f_val
             if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
                 location_in_venue = f_val
             if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                 campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+            # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+            if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                customer_type = f_val
 
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
@@ -2208,9 +3090,12 @@ def process_digital_pool(master_bar=None):
             "boosted_standard": custom_boosted,
             "venue_name": venue_name,
             "venue_id": venue_id,
+            "kiosk_id": kiosk_id,
+            "sio": sio,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
+            "customer_type": customer_type,
         })
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
@@ -2443,9 +3328,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             tt_val = native_details # Fallback UI display
             venue_name = ""
             venue_id = ""
+            kiosk_id = ""
+            sio = ""
             client_company = ""
             campaign_name = ""
             location_in_venue = ""
+            customer_type = ""
             # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
             # (free-text). See extract_art_file() up top for the heuristic.
             art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -2475,12 +3363,20 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     venue_name = f_val
                 if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                     venue_id = f_val
+                # 🔢 SIO — see site-1 comment.
+                if f_name == 'sio' or f_key == 'sio':
+                    sio = f_val
+                if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                    kiosk_id = f_val
                 if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
                     client_company = f_val
                 if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
                     location_in_venue = f_val
                 if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                     campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+                # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+                if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                    customer_type = f_val
 
             # 🌟 Campaign Name always wins over Client Company for FN Customer Name
             client_company = campaign_name or client_company
@@ -2534,9 +3430,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "wo": t_wo,
                     "venue_name": venue_name,
                     "venue_id": venue_id,
+                    "kiosk_id": kiosk_id,
+                    "sio": sio,
                     "client_company": client_company,
                     "location_in_venue": location_in_venue,
                     "art_file": art_file,
+                    "customer_type": customer_type,
                 })
                 
         clusters = []
@@ -2640,7 +3539,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     best_ic = valid_ics.sort_values('d').iloc[0]
                     has_ic = True
                     ic_dist = best_ic['d']
-                    closest_ic_loc = best_ic.get('location', closest_ic_loc)
+                    closest_ic_loc = _ic_home_loc(best_ic, closest_ic_loc)
 
             def check_viability(grp):
                 seen = set(); u_locs = []
@@ -2891,30 +3790,91 @@ def group_and_sort_by_proximity(bucket):
     return final_list
 # 🌟 NEW HELPER: Groups Awaiting routes by Date Sent, unifying Live and Ghost routes
 def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
+    """Combine live (in-progress) clusters with ghost (sheet-only) routes for
+    display in Sent / Accepted / Finalized tabs. Resolves three cases:
+
+      1. Live and ghost agree (same hash) → show LIVE only.
+      2. Ghost's task IDs are a subset of ONE live cluster (post-bundle that
+         survived in session state) → show LIVE only.
+      3. Ghost's task IDs are SPREAD across multiple live clusters (the sheet
+         has a bundled row, but session state lost _bundle_map so live
+         re-clustered into pieces) → show GHOST only, suppress those live
+         pieces. This keeps the sent UI showing the bundle even when session
+         state can't replay it. The live pieces will repopulate as a single
+         live cluster again the next time the dispatcher re-bundles, or once
+         the durable bundle history feature lands.
+    """
     unified = []
-    
-    # 1. Process Live Routes
+
+    # Build per-live-cluster task-ID sets so we can spot bundled ghosts whose
+    # IDs are scattered across them.
+    live_clusters_with_tids = []
     for c in live_routes:
+        tids = {str(t.get('id', '')).strip() for t in c.get('data', []) if t.get('id')}
+        live_clusters_with_tids.append((c, tids))
+    live_task_ids = set().union(*(s for _, s in live_clusters_with_tids)) if live_clusters_with_tids else set()
+
+    # First pass: scan ghosts to identify the "bundled-but-fragmented-live"
+    # case. For each ghost whose task IDs are fully covered by live but
+    # scattered across 2+ live clusters, mark those live clusters as
+    # SUPPRESSED (the ghost will be shown in their place).
+    suppressed_live_ids = set()  # by id() of the cluster dict — uniquely identifies it
+    fragmented_ghosts = set()    # by ghost hash — these get force-shown even if covered
+    for g in ghost_routes:
+        g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+        if not g_tids:
+            continue
+        if g.get('hash') in live_hashes:
+            continue  # case 1, single live cluster matches exactly — handled below
+        # Find which live clusters contain any of this ghost's tasks.
+        matching_live = [c for c, tids in live_clusters_with_tids if tids & set(g_tids)]
+        if len(matching_live) >= 2:
+            # Case 3 — bundled ghost whose pieces are scattered across live.
+            # Verify FULL coverage, otherwise something stranger is going on
+            # and we'd rather show everything than wrongly suppress.
+            covered_ids = set().union(*(set(str(t.get('id','')).strip() for t in c.get('data', [])) for c in matching_live))
+            if all(tid in covered_ids for tid in g_tids):
+                for c in matching_live:
+                    suppressed_live_ids.add(id(c))
+                fragmented_ghosts.add(g.get('hash'))
+
+    # 1. Process Live Routes (skip suppressed)
+    for c in live_routes:
+        if id(c) in suppressed_live_ids:
+            continue
         c_copy = c.copy()
         c_copy['is_ghost'] = False
         ts = c_copy.get('route_ts', '')
         c_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
         unified.append(c_copy)
-        
-    # 2. Process Ghost Routes (Skipping active duplicates)
+
+    # 2. Process Ghost Routes
+    #    Skip if matched 1:1 by a live route. Skip if covered by a SINGLE
+    #    live cluster (case 2). Always include if it's a fragmented bundle
+    #    (case 3).
     for g in ghost_routes:
-        if g.get('hash') in live_hashes:
-            continue
+        if g.get('hash') in fragmented_ghosts:
+            # Force-show this ghost; its live pieces are suppressed.
+            pass
+        else:
+            if g.get('hash') in live_hashes:
+                continue
+            g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+            if g_tids and all(tid in live_task_ids for tid in g_tids):
+                # All covered — but is it covered by a single live cluster?
+                # If so it's case 2, hide. (Already implied by not being in
+                # fragmented_ghosts, but check defensively.)
+                continue
         g_copy = g.copy()
         g_copy['is_ghost'] = True
         ts = g_copy.get('route_ts', '')
         g_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
         unified.append(g_copy)
-        
+
     # 3. Sort descending (Newest dates at the very top)
     unified.sort(key=lambda x: x['sort_date'], reverse=True)
     return unified
-
+    
 # --- DISPATCH RENDERING ---
 @st.fragment
 def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
@@ -3193,7 +4153,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         selected_label = st.session_state.get(sel_key)
         if selected_label and selected_label != st.session_state.get(last_sel_key):
             ic_new = ic_opts[selected_label]
-            _, h, _, _ = get_gmaps(ic_new.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             # 🌟 BUGFIX: Apply same $20/stop floor used in init logic. Without this, when
             # gmaps fails (network error, bad IC location, etc.) the comp/rate fields zero out
@@ -3228,7 +4188,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         elif default_label:
             # Calculate from the Contractor's Home
             ic_init = ic_opts[default_label]
-            _, h, _, _ = get_gmaps(ic_init.get('location', f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_init, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             initial_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             st.session_state[sel_key] = default_label
             st.session_state[last_sel_key] = default_label
@@ -3264,7 +4224,10 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         if ic_opts:
             selected_label = st.selectbox("Contractor", list(ic_opts.keys()), key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
             ic = ic_opts[selected_label]
-            ic_location_tmp = ic.get('location', ic_location_tmp)
+            # 🌟 Resolve to trusted lat/lng (not the free-text 'location'
+            # column, which can drift from the IC's actual lat/lng — produced
+            # the "Cassie 4.4mi shows 333mi" bug).
+            ic_location_tmp = _ic_home_loc(ic, ic_location_tmp)
         else:
             ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
             st.info("No ICs within 100mi.")
@@ -3764,7 +4727,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # 🚀 STEP 2: PROCEED WITH DISPATCH
             _dispatch_result = {}
             with st.spinner("Generating link..."):
-                home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
+                home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
                 # Build ordered task IDs from Google Maps waypoint order
                 _addr_list = list(stop_metrics.keys())
                 _ordered_addrs = [_addr_list[i] for i in _wp_order] if _wp_order else _addr_list
@@ -3818,11 +4781,26 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "n_ad": metrics.get("n_ad", 0),
                         "c_ad": metrics.get("c_ad", 0),
                         "d_ad": metrics.get("d_ad", 0),
+                        # Per-stop OnFleet customField values — first non-empty value
+                        # wins when multiple tasks at the same address have differing
+                        # values (rare). These flow into the packing slip when the
+                        # route eventually becomes a ghost (sheet-only) row.
+                        "kioskId": next((str(t.get("kiosk_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("kiosk_id","")).strip()), ""),
+                        "venueId": next((str(t.get("venue_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("venue_id","")).strip()), ""),
+                        "locationInVenue": next((str(t.get("location_in_venue","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("location_in_venue","")).strip()), ""),
                         "campaigns": list({
                             (t.get("client_company",""), t.get("escalated",False), str(t.get("boosted_standard","")).lower()):
                             {"name": t.get("client_company",""), "esc": t.get("escalated",False), "bs": str(t.get("boosted_standard","")).lower()}
                             for t in cluster["data"] if t.get("full") == addr and t.get("client_company")
-                        }.values())
+                        }.values()),
+                        # Per-stop fields needed for the packing slip when the route
+                        # later becomes a ghost. First non-empty value wins when
+                        # multiple tasks at the same address differ (which is rare
+                        # but happens — e.g. two campaigns at one venue).
+                        "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
+                        "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
+                        "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
+                        "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
@@ -3855,6 +4833,24 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
+                # 🌟 Option A — Auto-download the packing slip PDF before Gmail opens.
+                # The PDF lands in the browser's downloads bar; the dispatcher drags
+                # it into the Gmail compose tab as an attachment.
+                # Key includes final_route_id so the same dispatch can't trigger twice.
+                # We inject contractor_name + wo onto a shallow cluster copy because at
+                # dispatch time the live `cluster` dict hasn't been mutated by the render
+                # loop yet (those fields only get populated on the NEXT render after the
+                # sheet write lands). Without this, the slip header shows "Unassigned"
+                # and "Work Order" instead of the real worker + WO #.
+                try:
+                    _ps_cluster = {
+                        **cluster,
+                        "contractor_name": ic.get("name", "Unknown"),
+                        "wo": wo_val,
+                    }
+                    render_packing_slip_autodownload(_ps_cluster, pod_name, key=f"dispatch_{cluster_hash}_{final_route_id}")
+                except Exception as _ps_e:
+                    _log_err("dispatch/packing_slip_autodownload", _ps_e)
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
@@ -3873,6 +4869,14 @@ style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px soli
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
+                # 📎 Tell the dispatcher the packing slip is in their downloads bar
+                # and needs to be dragged into the Gmail compose window manually.
+                st.markdown(
+                    '''<div style="margin:6px 0 0 0;padding:8px 10px;background:#fef3c7;
+border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#92400e;
+text-align:center;font-weight:600;">📎 Packing slip downloaded — drag it into Gmail to attach.</div>''',
+                    unsafe_allow_html=True,
+                )
                 time.sleep(1)
                 _link_ph.empty()
                 st.rerun()
@@ -3885,7 +4889,7 @@ text-decoration:none;">📨 Default Mail</a>
         
         if fn_checked and not is_fn:
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
-            home = ic.get('location', f"{cluster['center'][0]},{cluster['center'][1]}")
+            home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
             fn_payload = {
                 "cluster_hash": cluster_hash,
@@ -3936,7 +4940,9 @@ text-decoration:none;">📨 Default Mail</a>
             with st.popover("🚨 Confirm Field Nation Revocation", use_container_width=True):
                 st.error("Remove this route from Field Nation tracking?")
                 # 🌟 THE FIX: Upgraded to a callback so it doesn't freeze the screen!
-                st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True, on_click=revoke_field_nation, kwargs={"cluster_hash": cluster_hash, "pod_name": pod_name})
+                if st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+                    revoke_field_nation(**{"cluster_hash": cluster_hash, "pod_name": pod_name})
+                    st.rerun()
             st.stop()
 
     BG_COLOR = "#FEF9C3"
@@ -4111,7 +5117,7 @@ def smart_sync_pod(pod_name):
         custom_task_type = ""
         custom_boosted = ""
         tt_val = native_details
-        venue_name = ""; venue_id = ""; client_company = ""; campaign_name = ""; location_in_venue = ""
+        venue_name = ""; venue_id = ""; kiosk_id = ""; sio = ""; client_company = ""; campaign_name = ""; location_in_venue = ""; customer_type = ""
         # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
         # (free-text). See extract_art_file() up top for the heuristic.
         art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
@@ -4132,12 +5138,23 @@ def smart_sync_pod(pod_name):
                 venue_name = f_val
             if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
                 venue_id = f_val
+            # 🔢 SIO — Single-Item Order from OnFleet's `sio` custom field.
+            # Locals carry a real numeric SIO; Defaults carry literal "Default".
+            # Drives slip's SIO column + Locals grouping/sort. Captured at
+            # ingest so it flows through to ghost slips (via stopData).
+            if f_name == 'sio' or f_key == 'sio':
+                sio = f_val
+            if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                kiosk_id = f_val
             if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
                 client_company = f_val
             if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
                 location_in_venue = f_val
             if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
                 campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+            # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+            if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                customer_type = f_val
 
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
@@ -4181,9 +5198,12 @@ def smart_sync_pod(pod_name):
             "wo": t_wo,
             "venue_name": venue_name,
             "venue_id": venue_id,
+            "kiosk_id": kiosk_id,
+            "sio": sio,
             "client_company": client_company,
             "location_in_venue": location_in_venue,
             "art_file": art_file,
+            "customer_type": customer_type,
             "is_new": True,  # 🌟 Flag for UI badge
         })
 
@@ -4468,7 +5488,7 @@ def run_pod_tab(pod_name):
 
 
 
-    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 15s
+    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 60s
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -4617,7 +5637,10 @@ def run_pod_tab(pod_name):
                     break
 
     # 🌟 THE FIX: Omni-Ghost Sorter
-    pod_ghosts, finalized_ghosts, sent_ghosts = [], [], []
+    # May 4 2026 — fn_ghosts added so FN-status sheet rows have a separate bucket.
+    # These get reconstructed into pseudo-clusters and merged into `field_nation`
+    # below, since live OnFleet pull can no longer see FN-assigned tasks (state=1).
+    pod_ghosts, finalized_ghosts, sent_ghosts, fn_ghosts = [], [], [], []
     seen_ghosts = set() # 🛡️ THE FIX: Streamlit Crash Shield
     
     for g in ghost_db.get(pod_name, []):
@@ -4627,11 +5650,20 @@ def run_pod_tab(pod_name):
         if g_hash in seen_ghosts:
             continue
         seen_ghosts.add(g_hash)
-        
+
+        # 🌟 Bug fix: if the dispatcher just revoked/re-routed this route,
+        # suppress the sheet ghost until the async sheet archive lands.
+        # Without this skip, the route appears "stuck" in Sent/Accepted
+        # for ~5-15s after revoke because the live cluster is filtered by
+        # is_reverted but the ghost path bypassed that check.
+        if g_hash and st.session_state.get(f"reverted_{g_hash}", False):
+            continue
+
         g_stat = g.get("status", "")
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
         elif g_stat == "sent": sent_ghosts.append(g)
+        elif g_stat == "field_nation": fn_ghosts.append(g)
         else: pod_ghosts.append(g)
 
     # 1. 📂 DEFINE BUCKETS
@@ -4710,6 +5742,27 @@ def run_pod_tab(pod_name):
             if c.get('status') == 'Ready': ready.append(c) #
             else: review.append(c) #
 
+    # 🌐 FN-GHOST RECONSTRUCTION — the actual fix for the empty-FN-tab bug.
+    # FN-status sheet rows whose tasks have moved to OnFleet state=1 won't
+    # appear in `cls` (the main pull is state=0 only) and so the live loop
+    # above never sees them. Rebuild them into pseudo-clusters and append
+    # them to `field_nation`. We dedupe against live_hashes — if the live
+    # cluster still has the tasks (FN move happened but OnFleet hasn't
+    # caught up yet, or the user just reverted), the live entry above wins.
+    for _fng in fn_ghosts:
+        _fng_hash = _fng.get('hash')
+        if not _fng_hash or _fng_hash in live_hashes:
+            continue
+        _pseudo = _fn_ghost_to_cluster(_fng)
+        if _pseudo is None:
+            continue
+        field_nation.append(_pseudo)
+        # Make sure render_dispatch sees route_state == 'field_nation' so the
+        # FN-action block (Download FN Upload, Post link, Accepted button)
+        # fires for this pseudo-cluster. Don't clobber a deliberate override.
+        if not st.session_state.get(f"route_state_{_fng_hash}"):
+            st.session_state[f"route_state_{_fng_hash}"] = "field_nation"
+
     # --- 🐛 DEBUG: bucket routing visibility (collapsed by default, no behavior change) ---
     # Shows what each cluster's bucket decision was based on. Drop the URL-param check or
     # remove the whole block once we've confirmed auto-move works.
@@ -4717,6 +5770,32 @@ def run_pod_tab(pod_name):
         with st.expander(f"🐛 Bucket debug — {pod_name}", expanded=False):
             _fp_now = st.session_state.get(f"_auto_sync_fp_{pod_name}", "(unset)")
             st.caption(f"Last fingerprint: `{_fp_now[:12]}...`  |  sent_db rows: {len(sent_db)}  |  pod_clusters: {len(cls)}")
+            # Extra ghost diagnostics — figure out where the bundled-route ghosts are landing
+            st.markdown("**Ghosts (raw from sheet)** for this pod:")
+            for _g in ghost_db.get(pod_name, []):
+                _g_status = str(_g.get('status', '')).lower()
+                _g_wo = _g.get('wo', '?')
+                _g_hash = (_g.get('hash') or '')[:8]
+                _g_tids = _g.get('task_ids', [])
+                _g_tasks = _g.get('tasks', '?')
+                st.text(f"  {_g_hash} | {_g_status:10} | wo={_g_wo:35} | tasks={_g_tasks} | tids={len(_g_tids)}")
+            st.markdown("**sent_ghosts** (after status routing) for this pod:")
+            for _g in sent_ghosts:
+                _g_wo = _g.get('wo', '?')
+                _g_hash = (_g.get('hash') or '')[:8]
+                _g_tasks = _g.get('tasks', '?')
+                st.text(f"  {_g_hash} | wo={_g_wo:35} | tasks={_g_tasks}")
+            st.markdown("**`_bundle_map`** for this pod:")
+            _bm_pod = st.session_state.get('_bundle_map', {}).get(pod_name, [])
+            if not _bm_pod:
+                st.text("  (empty — no bundles recorded in this session)")
+            for _i, _entry in enumerate(_bm_pod):
+                _e_list = sorted(list(_entry))
+                st.text(f"  bundle #{_i}: {len(_e_list)} task IDs → {_e_list[:3]}{'...' if len(_e_list) > 3 else ''}")
+            st.markdown(f"**Live cluster sample for `{pod_name}`** (matching the two sent Alvarado entries):")
+            for _bc in sent:
+                _btids_dbg = sorted([str(_t['id']).strip() for _t in _bc.get('data', [])])
+                st.text(f"  {_bc.get('contractor_name','?')} | {len(_btids_dbg)} tasks | first 3: {_btids_dbg[:3]}")
             _bucket_map = [("ready", ready), ("review", review), ("sent", sent), ("accepted", accepted),
                            ("declined", declined), ("finalized", finalized), ("field_nation", field_nation),
                            ("digital_ready", digital_ready)]
@@ -4902,8 +5981,17 @@ def run_pod_tab(pod_name):
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-                    with st.expander(f"  Stops ({len(_addrs)})", expanded=False):
-                        st.markdown(_addr_lines)
+                    # Native HTML <details> — Streamlit disallows expanders
+                    # nested inside expanders, and this block is rendered inside
+                    # the Task Attrition expander above.
+                    _addr_html_li = "".join(f"<li style='font-family:monospace; font-size:11px; color:#475569;'>{_a}</li>" for _a in _addrs) or "<li style='color:#94a3b8;'>(no addresses)</li>"
+                    st.markdown(
+                        f"<details style='margin:4px 0 8px 0; padding-left:8px;'>"
+                        f"<summary style='cursor:pointer; font-size:11px; color:#475569; font-weight:600;'>Stops ({len(_addrs)})</summary>"
+                        f"<ul style='margin:6px 0 0 0; padding-left:20px;'>{_addr_html_li}</ul>"
+                        f"</details>",
+                        unsafe_allow_html=True,
+                    )
 
             _excluded_section("❌ Accepted (excluded)", accepted)
             _excluded_section("🏁 Finalized (excluded)", finalized)
@@ -4930,7 +6018,13 @@ def run_pod_tab(pod_name):
     # Digital is excluded too — it has its own dedicated map below.
     for c in ready:        folium.CircleMarker(c['center'], radius=8, color=TB_GREEN,   fill=True, opacity=0.8).add_to(m)
     for c in review:       folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
-    for c in field_nation: folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
+    # FN-ghost pseudo-clusters whose Mapbox geocode failed have center=(0,0).
+    # Skipping them keeps the marker out of the Atlantic when the only location
+    # info we have is a saved address that didn't resolve.
+    for c in field_nation:
+        if c.get('_is_fn_ghost_pseudo') and not c.get('_has_real_center'):
+            continue
+        folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
     for c in sent:         folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
     # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
     # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
@@ -5026,7 +6120,7 @@ def run_pod_tab(pod_name):
                             if not v_ics.empty:
                                 v_ics['d'] = v_ics.apply(lambda x: haversine(c['center'][0], c['center'][1], x[lat_col], x[lng_col]), axis=1)
                                 closest_ic = v_ics.sort_values('d').iloc[0]
-                                _, hrs, _, _ = get_gmaps(closest_ic[loc_col], [t['full'] for t in c['data'][:25]])
+                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
                                 est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
                                 est_rate = est_pay / c['stops'] if c['stops'] > 0 else 0
                                 if closest_ic['d'] > 60: badges += " 📡"
@@ -5334,12 +6428,18 @@ def run_pod_tab(pod_name):
                             # 🖨️ Temporary — packing slip button on Sent routes for testing
                             # before any routes have been accepted. Same call as in Accepted;
                             # safe to leave here permanently or remove once Accepted has data.
-                            # DISABLED (packing-list rollback): render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
+                            # 🖨️ Admin-only: packing slip on Sent routes (temporary, for warehouse
+                            # pre-staging before the IC accepts). Hidden from Dispatchers and
+                            # Associates so it doesn't clutter their queue.
+                            if _user_tier() == 'admin':
+                                render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -5374,12 +6474,14 @@ def run_pod_tab(pod_name):
     </div>
     {_gvenues_html}
 </div>""", unsafe_allow_html=True)
+                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_sent_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-                            
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                    st.rerun()
         with t_acc:
             unified_acc = unify_and_sort_by_date(accepted, pod_ghosts, live_hashes)
             if not unified_acc: st.info("Waiting for portal acceptances...")
@@ -5427,7 +6529,7 @@ def run_pod_tab(pod_name):
                             # 3 summary cards + LOCALS + Route Details). Mirrors the same
                             # button on the index_45.html portal so dispatch + warehouse use
                             # the same artifact. Renders client-side via jsPDF in an iframe.
-                            # DISABLED (packing-list rollback): render_packing_slip_button(c, pod_name, key=cluster_hash)
+                            render_packing_slip_button(c, pod_name, key=cluster_hash)
                             render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -5435,7 +6537,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -5455,6 +6559,10 @@ def run_pod_tab(pod_name):
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
+                            # 🖨️ Packing slip — ghost accepted routes use synthesized
+                            # cluster data (sheet stop_data → fan-out task rows). Same
+                            # button as live accepted; warehouse gets the same artifact.
+                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_acc_{ghost_hash}")
                             render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -5462,8 +6570,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                    
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.rerun()
         with t_dec:
             unified_dec = unify_and_sort_by_date(declined, [], live_hashes)
             if not unified_dec: st.info("No declined routes.")
@@ -5493,8 +6602,9 @@ def run_pod_tab(pod_name):
                     if not _is_dispatch_associate():
                         with st.popover("↩️"):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
-                    
+                            if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                                st.rerun()
         with t_fin:
             unified_fin = unify_and_sort_by_date(finalized, finalized_ghosts, live_hashes)
             if not unified_fin: st.info("No finalized routes.") 
@@ -5541,7 +6651,9 @@ def run_pod_tab(pod_name):
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.rerun()
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -5562,17 +6674,19 @@ def run_pod_tab(pod_name):
                             _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             g_ic_name_fin = g.get('contractor_name', 'Unknown')
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
+                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_fin_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.rerun()
 # --- LOGOUT URL HANDLER ---
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of
 # using an unstyleable st.button). Catch it here, before the login gate.
-import streamlit.components.v1 as _components
+# (Note: _components is imported once at the top of the file, line ~248.)
 try:
     if st.query_params.get("logout") == "1":
         st.session_state.pop('_auth_user', None)
@@ -5644,21 +6758,41 @@ if 'dispatcher_email' not in st.session_state:
         except Exception: pass
     else:
         # No URL param — ask the browser if it has a saved email.
+        # Idempotency guard: set a flag on the PARENT window so the redirect
+        # only fires once per page load. Without this, Python's st.query_params
+        # cleanup race-loops against the JS re-injecting on every rerun.
         _components.html(
             """
             <script>
                 try {
-                    var e = localStorage.getItem('dcc_dispatcher_email');
-                    var here = window.parent.location;
-                    if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
-                        var sep = here.search ? '&' : '?';
-                        here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
+                    var topwin = window.parent;
+                    if (!topwin._dcc_email_restore_attempted) {
+                        topwin._dcc_email_restore_attempted = true;
+                        var e = localStorage.getItem('dcc_dispatcher_email');
+                        var here = topwin.location;
+                        if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
+                            var sep = here.search ? '&' : '?';
+                            here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
+                        }
                     }
                 } catch (err) {}
             </script>
             """,
             height=0,
         )
+
+# --- EMAIL SETTINGS URL HANDLER ---
+# Click on the email pill anchor in the header navigates with ?email_settings=1.
+# We catch it AFTER auth-restore (above) so the user is still signed in, then
+# strip the param + flip the dialog flag + rerun. The dialog renders on next pass.
+try:
+    if st.query_params.get("email_settings") == "1":
+        st.session_state['_show_email_settings'] = True
+        try: del st.query_params["email_settings"]
+        except Exception: pass
+        st.rerun()
+except Exception:
+    pass
 
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
@@ -5734,47 +6868,38 @@ _de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
 _de_pill_label = _de_saved if _de_saved else "Set email"
 _de_pill_color = "#0f172a" if _de_saved else "#dc2626"
 
-# Header markdown — pinned info + Sign out. Email pill is rendered as a real
-# Streamlit button below (NOT inside this markdown) so its click triggers a
-# normal Streamlit rerun without a page reload. Earlier JS-bridge approach
-# was leaking setInterval timers on every rerun — broke the app post-init.
+# Header markdown — pinned info + email pill + Sign out, all in one fixed-position
+# block. Email pill is a styled <a> with onclick that triggers a hidden Streamlit
+# button (rendered below). NO href, so clicking does NOT navigate or reload.
+# Sign out remains an anchor since it intentionally drops session state.
+_pill_base = ("display: inline-block; padding: 3px 10px; background: #ffffff;"
+              " border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none;"
+              " font-size: 11px; font-weight: 700; line-height: 1.4; cursor: pointer;")
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
         <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
-        <a href="?logout=1" target="_self" style="display: inline-block; padding: 3px 10px; background: #ffffff;
-                border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; text-decoration: none;
-                font-size: 11px; font-weight: 700;">Sign out</a>
+        <span style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
+          <a href="javascript:void(0)" id="dcc-email-pill" data-action="email-settings"
+             style="{_pill_base} color: {_de_pill_color};"
+             title="Email used for route confirmations">✉️ {_de_pill_label}</a>
+          <a href="?logout=1" target="_self" style="{_pill_base} color: #475569;">Sign out</a>
+        </span>
     </div>
     <style>
-      /* Pin the email-settings Streamlit button to the top-right, just under the
-         "Signed in as" block. Targets via st.container's data-testid + the
-         element-key (Streamlit exposes the key as a class on the wrapper). */
-      div.st-key-_email_pill_btn {{
-          position: fixed !important;
-          top: 60px !important;
-          right: 130px !important;
-          z-index: 999999 !important;
-          width: auto !important;
-      }}
-      div.st-key-_email_pill_btn button {{
-          padding: 3px 10px !important;
-          font-size: 11px !important;
-          font-weight: 700 !important;
-          color: {_de_pill_color} !important;
-          background: #ffffff !important;
-          border: 1px solid #cbd5e1 !important;
-          border-radius: 6px !important;
-          min-height: 0 !important;
-          line-height: 1.4 !important;
-      }}
+      /* Hide the real Streamlit button — it exists only to receive programmatic clicks
+         from the visible anchor above. */
+      div.st-key-_email_pill_hidden {{ display: none !important; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
-if st.button(f"✉️ {_de_pill_label}", key="_email_pill_btn", help="Email used for route confirmations"):
+
+# Hidden Streamlit button — clicked programmatically by the anchor's onclick handler.
+# When clicked, sets the dialog flag and reruns (NO page reload).
+if st.button("✉️ Set email (hidden)", key="_email_pill_hidden"):
     st.session_state['_show_email_settings'] = True
     st.rerun()
 
@@ -5958,7 +7083,62 @@ if st.query_params.get("debug") == "1":
             except Exception as _e:
                 st.error(f"{type(_e).__name__}: {_e}")
         st.caption("Add `?debug=1` to the URL to see this panel. Click Probe to inspect Onfleet's response shape — tells us which field holds the task count and whether phone matches our IC database.")
-
+        # ── /tasks probe — diagnoses where the art file lives & how customer
+        # type is encoded. Fetches the same /tasks/all feed the app normally
+        # ingests (state=0 = unassigned, last 14 days), then dumps the first
+        # task as JSON, the FULL list of `customFields` names/keys/values,
+        # plus a flag for whether common art-file fields appear populated.
+        st.markdown("---")
+        if st.button("Probe /tasks (raw — diagnose art file + national)", key="_dbg_tasks_probe"):
+            try:
+                _from = int((time.time() - 14 * 86400) * 1000)
+                _r = requests.get(
+                    f"https://onfleet.com/api/v2/tasks/all?state=0&from={_from}",
+                    headers=headers, timeout=15
+                )
+                st.write(f"**HTTP**: {_r.status_code}")
+                if _r.status_code != 200:
+                    st.write("**Response body**:", _r.text[:500])
+                else:
+                    _body = _r.json()
+                    _tasks = _body.get('tasks', []) if isinstance(_body, dict) else []
+                    st.write(f"**Task count**: {len(_tasks)}")
+                    if not _tasks:
+                        st.write("(no tasks returned — try a wider time window)")
+                    else:
+                        _t0 = _tasks[0]
+                        st.write("**First task — top-level keys**:", sorted(_t0.keys()))
+                        st.write("**`notes`**:", repr(_t0.get('notes'))[:300])
+                        st.write("**`taskDetails`**:", repr(_t0.get('taskDetails'))[:300])
+                        _cf = _t0.get('customFields') or _t0.get('container', {}).get('customFields') or []
+                        st.write(f"**customFields count**: {len(_cf)}")
+                        if _cf:
+                            st.write("**customFields (name / key / value)**:")
+                            for _f in _cf:
+                                st.write(f"  - name='{_f.get('name','')}', key='{_f.get('key','')}' -> {repr(_f.get('value',''))[:200]}")
+                        _national_t = None
+                        for _t in _tasks:
+                            _cf2 = _t.get('customFields') or _t.get('container', {}).get('customFields') or []
+                            for _f in _cf2:
+                                if 'national' in str(_f.get('value', '')).lower():
+                                    _national_t = _t
+                                    break
+                            if _national_t:
+                                break
+                        st.markdown("---")
+                        if _national_t:
+                            st.write("**Found a likely-National task**: id =", _national_t.get('id') or _national_t.get('shortId'))
+                            st.write("**`notes`**:", repr(_national_t.get('notes'))[:300])
+                            st.write("**`taskDetails`**:", repr(_national_t.get('taskDetails'))[:300])
+                            _cf_n = _national_t.get('customFields') or _national_t.get('container', {}).get('customFields') or []
+                            st.write(f"**customFields count**: {len(_cf_n)}")
+                            for _f in _cf_n:
+                                st.write(f"  - name='{_f.get('name','')}', key='{_f.get('key','')}' -> {repr(_f.get('value',''))[:200]}")
+                        else:
+                            st.write("**No national task found in current pool** — every task's customFields lacked the word 'national'.")
+            except Exception as _e:
+                st.error(f"{type(_e).__name__}: {_e}")
+        st.caption("Click to see what fields OnFleet actually returns on tasks. Tells us where the art file lives and whether National-vs-Local detection has anything to match against.")
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
@@ -5975,6 +7155,84 @@ if (_locked_pod.upper() not in ('ADMIN', 'MANAGER', 'ALL')
     st.stop()
 
 tabs = st.tabs(["Global", "Blue Pod", "Green Pod", "Orange Pod", "Purple Pod", "Red Pod", "Digital"])
+
+# ── TAB PERSISTENCE: keep the user on whatever tab they were on across deploys.
+# Streamlit's st.tabs() is stateless and resets to tab[0] on every fresh server
+# start (which is what a Railway redeploy looks like — session_state wiped, but
+# the URL ?auth= survives so the user stays signed in). We layer URL-param
+# persistence on top: every click on a tab writes ?tab=<name> via history.replaceState
+# (no navigation), and on first paint we click whichever tab matches ?tab=.
+_persist_target = st.query_params.get("tab", "")
+_components.html(
+    f"""
+    <script>
+    (function() {{
+      var parentDoc, parentWin;
+      try {{ parentWin = window.parent; parentDoc = parentWin.document; }} catch(e) {{ return; }}
+      var TARGET = {repr(str(_persist_target))};
+      var LS_LAST_TAB = "dcc_last_tab";
+
+      // Fallback: if URL has no ?tab= param, check localStorage for the last
+      // tab the user clicked. This catches the case where they hard-reload
+      // (Ctrl+R) before clicking any tab on a fresh sign-in.
+      if (!TARGET) {{
+        try {{
+          var lsTab = parentWin.localStorage.getItem(LS_LAST_TAB);
+          if (lsTab) {{
+            TARGET = lsTab;
+            // Also write it to the URL so subsequent navigation matches.
+            try {{
+              var u0 = new URL(parentWin.location.href);
+              u0.searchParams.set('tab', lsTab);
+              parentWin.history.replaceState({{}}, '', u0.toString());
+            }} catch(_) {{}}
+          }}
+        }} catch(_) {{}}
+      }}
+
+      // Restore the last-active tab on page load.
+      function restoreTab() {{
+        if (!TARGET) return true;
+        var btns = parentDoc.querySelectorAll('button[role="tab"]');
+        for (var i = 0; i < btns.length; i++) {{
+          var label = (btns[i].innerText || '').trim();
+          if (label === TARGET) {{
+            if (btns[i].getAttribute('aria-selected') !== 'true') {{
+              try {{ btns[i].click(); }} catch(_) {{}}
+            }}
+            return true;
+          }}
+        }}
+        return false;
+      }}
+      var attempts = 0;
+      var iv = parentWin.setInterval(function() {{
+        attempts++;
+        if (restoreTab() || attempts > 25) parentWin.clearInterval(iv);
+      }}, 120);
+
+      // Persist tab clicks to URL so the next reload (deploy or otherwise) lands here.
+      if (!parentWin._dccTabPersist) {{
+        parentWin._dccTabPersist = true;
+        parentDoc.addEventListener('click', function(e) {{
+          var t = e.target && e.target.closest && e.target.closest('button[role="tab"]');
+          if (!t) return;
+          var name = (t.innerText || '').trim();
+          if (!name) return;
+          try {{
+            var u = new URL(parentWin.location.href);
+            u.searchParams.set('tab', name);
+            parentWin.history.replaceState({{}}, '', u.toString());
+            try {{ parentWin.localStorage.setItem("dcc_last_tab", name); }} catch(_) {{}}
+          }} catch(_) {{}}
+        }}, true);
+      }}
+    }})();
+    </script>
+    """,
+    height=0,
+)
+
 # --- TAB 0: GLOBAL CONTROL ---
 with tabs[0]:
     if not _can_access_tab('Global'):
@@ -6188,7 +7446,7 @@ with tabs[6]:
     st.session_state['archived_wos'] = _archived_wos
     digital_ghosts_list = ghost_db.get("Global_Digital", [])
     
-    pod_ghosts, finalized_ghosts, sent_ghosts = [], [], []
+    pod_ghosts, finalized_ghosts, sent_ghosts, fn_ghosts = [], [], [], []
     seen_ghosts = set() # 🛡️ THE FIX: Streamlit Crash Shield
     
     for g in digital_ghosts_list:
@@ -6198,11 +7456,20 @@ with tabs[6]:
         if g_hash in seen_ghosts:
             continue
         seen_ghosts.add(g_hash)
-        
+
+        # 🌟 Bug fix: if the dispatcher just revoked/re-routed this route,
+        # suppress the sheet ghost until the async sheet archive lands.
+        # Without this skip, the route appears "stuck" in Sent/Accepted
+        # for ~5-15s after revoke because the live cluster is filtered by
+        # is_reverted but the ghost path bypassed that check.
+        if g_hash and st.session_state.get(f"reverted_{g_hash}", False):
+            continue
+
         g_stat = g.get("status", "")
         local_override = st.session_state.get(f"route_state_{g_hash}")
         if local_override == "finalized" or g_stat == "finalized": finalized_ghosts.append(g)
         elif g_stat == "sent": sent_ghosts.append(g)
+        elif g_stat == "field_nation": fn_ghosts.append(g)
         else: pod_ghosts.append(g)
     
     # --- 🚦 TRAFFIC COP: BUCKET SORTING (Pulls WO from Sheet) ---
@@ -6256,6 +7523,21 @@ with tabs[6]:
             if c.get('status') == 'Ready': d_ready.append(c) 
             else: d_flagged.append(c)
                 
+    # 🌐 FN-GHOST RECONSTRUCTION (Digital pool) — mirrors the per-pod path.
+    # Digital routes rarely go to FN, but when they do (e.g. a service ticket
+    # batch) we want the same recovery behavior so they stay visible after the
+    # OnFleet tasks transition to state=1.
+    for _fng in fn_ghosts:
+        _fng_hash = _fng.get('hash')
+        if not _fng_hash or _fng_hash in live_hashes:
+            continue
+        _pseudo = _fn_ghost_to_cluster(_fng)
+        if _pseudo is None:
+            continue
+        d_fn.append(_pseudo)
+        if not st.session_state.get(f"route_state_{_fng_hash}"):
+            st.session_state[f"route_state_{_fng_hash}"] = "field_nation"
+
     # Supercard Counts
     pool_ready = len(d_ready)
     pool_flagged = len(d_flagged)
@@ -6602,12 +7884,17 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
                                 # 🖨️ Temporary — packing slip button on Sent routes for testing.
                                 # Mirrors the per-pod tab placement; pod name inferred from cluster.
-                                # DISABLED (packing-list rollback): render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
+                                # 🖨️ Admin-only: same as per-pod Sent. Global Overview is admin/manager
+                                # only anyway, but we keep the strict admin check to match the per-pod gate.
+                                if _user_tier() == 'admin':
+                                    render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    if st.button("🚨 Yes, Re-Route", key=f"rev_d_sent_live_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                        st.rerun()
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6629,8 +7916,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-            
+                                    if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_d_sent_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                        st.rerun()
             with t_acc:
                 unified_acc = unify_and_sort_by_date(d_acc, pod_ghosts, live_hashes)
                 if not unified_acc: st.info("Waiting for portal acceptances...")
@@ -6669,7 +7957,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                    if st.button("🚨 Yes, Remove", key=f"rev_d_acc_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                        st.rerun()
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6694,8 +7984,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
-
+                                    if st.button("🚨 Yes, Remove", key=f"rev_ghost_digi_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g})
+                                        st.rerun()
             with t_dec:
                 unified_dec = unify_and_sort_by_date(d_dec, [], live_hashes)
                 if not unified_dec: st.info("No declined routes.")
@@ -6722,8 +8013,9 @@ with tabs[6]:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
-                    
+                                if st.button("🚨 Yes, Remove", key=f"rev_d_dec_{cluster_hash}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c})
+                                    st.rerun()
             with t_fin:
                 unified_fin = unify_and_sort_by_date(d_fin, finalized_ghosts, live_hashes)
                 if not unified_fin: st.info("No finalized digital routes.") 
@@ -6760,8 +8052,9 @@ with tabs[6]:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True, on_click=move_to_dispatch, kwargs={"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-
+                                    if st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                        st.rerun()
 # --- FOOTER ---
 st.markdown("---")
 st.markdown(

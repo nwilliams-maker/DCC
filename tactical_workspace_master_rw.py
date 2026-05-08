@@ -2003,101 +2003,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
 from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
-from packing_slip import render_packing_slip_button, render_packing_slip_autodownload
 
-
-
-
-def _ghost_to_packing_cluster(g):
-    """Build a packing-slip-ready cluster dict from a ghost (sheet-only) route.
-
-    Live clusters carry full Onfleet task dicts in cluster['data']; ghosts only
-    have aggregate stop_data (one entry per address with counts of each task
-    type). To render a packing slip on an Accepted ghost we fan those counts
-    out into individual synthetic task dicts so packing_slip.py's row mapper
-    sees a familiar shape. Campaign/venue come straight from stop_data;
-    art_file is left blank because the original Onfleet free-text isn't in
-    the saved row. Returns a dict packing_slip can consume directly.
-    """
-    synthetic_data = []
-    for sd in (g.get('stop_data') or []):
-        addr = sd.get('addr', '') or ''
-        venue = sd.get('venue', '') or ''
-        # New (post-2026-05) saveRoute writes kioskId/venueId/locationInVenue per
-        # stop. Older sheet rows don't have these — they fall back to '' and
-        # show empty in the packing slip's Kiosk / Loc columns.
-        _kiosk_id = str(sd.get('kioskId', '') or '').strip()
-        _venue_id = str(sd.get('venueId', '') or '').strip()
-        _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
-        # First non-empty campaign on this stop, if any — used for client_company.
-        _camps = sd.get('campaigns') or []
-        _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
-        # Pull the new per-stop packing-slip fields. Old (pre-2026-05-04) sheet
-        # rows won't have them — they fall back to '' which the slip handles
-        # gracefully (customer-type detection falls back to substring match;
-        # boost & art file simply render blank).
-        _customer_type    = str(sd.get('customerType', '') or '').strip()
-        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
-        _art_file         = str(sd.get('artFile', '') or '').strip()
-        _sio              = str(sd.get('sio', '') or '').strip()
-        # State falls out of the address ("..., CITY, ST, ZIP" → "ST"). Best-effort.
-        _parts = [p.strip() for p in addr.split(',')]
-        _state = (_parts[2] if len(_parts) > 2 else '').strip().upper()[:2]
-
-        # Fan-out: emit one row per task per type, count-times each.
-        for label, key in (
-            ('Kiosk Install',  'inst'),
-            ('Kiosk Removal',  'remov'),
-            ('New Ad',         'n_ad'),
-            ('Continuity',     'c_ad'),
-            ('Service',        'd_ad'),
-        ):
-            try:
-                n = int(sd.get(key, 0) or 0)
-            except (TypeError, ValueError):
-                n = 0
-            for _ in range(n):
-                synthetic_data.append({
-                    'id': f'ghost_{addr}_{label}_{_}',
-                    'full': addr,
-                    'state': _state,
-                    'venue_name': venue,
-                    'venue_id': _venue_id,
-                    'kiosk_id': _kiosk_id,
-                    'location_in_venue': _loc_in_venue,
-                    'task_type': label,
-                    'client_company': _camp_name,
-                    'is_digital': label == 'Service',
-                    'boosted_standard': _boosted_standard,
-                    'art_file': _art_file,
-                    'customer_type': _customer_type,
-                    'sio': _sio,
-                })
-        # If a stop has no breakdown counts (older sheet rows), still emit one
-        # generic row so the address shows up on the slip.
-        if not any(int(sd.get(k, 0) or 0) for k in ('inst','remov','n_ad','c_ad','d_ad')):
-            synthetic_data.append({
-                'id': f'ghost_{addr}_generic',
-                'full': addr,
-                'state': _state,
-                'venue_name': venue,
-                'venue_id': _venue_id,
-                'kiosk_id': _kiosk_id,
-                'location_in_venue': _loc_in_venue,
-                'task_type': '',
-                'client_company': _camp_name,
-                'is_digital': False,
-                'boosted_standard': _boosted_standard,
-                'art_file': _art_file,
-                'customer_type': _customer_type,
-                'sio': _sio,
-            })
-
-    return {
-        'wo': g.get('wo', '') or g.get('contractor_name', '') or '',
-        'contractor_name': g.get('contractor_name', '') or '',
-        'data': synthetic_data,
-    }
 
 
 def _fn_ghost_to_cluster(g):
@@ -4833,24 +4739,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
-                # 🌟 Option A — Auto-download the packing slip PDF before Gmail opens.
-                # The PDF lands in the browser's downloads bar; the dispatcher drags
-                # it into the Gmail compose tab as an attachment.
-                # Key includes final_route_id so the same dispatch can't trigger twice.
-                # We inject contractor_name + wo onto a shallow cluster copy because at
-                # dispatch time the live `cluster` dict hasn't been mutated by the render
-                # loop yet (those fields only get populated on the NEXT render after the
-                # sheet write lands). Without this, the slip header shows "Unassigned"
-                # and "Work Order" instead of the real worker + WO #.
-                try:
-                    _ps_cluster = {
-                        **cluster,
-                        "contractor_name": ic.get("name", "Unknown"),
-                        "wo": wo_val,
-                    }
-                    render_packing_slip_autodownload(_ps_cluster, pod_name, key=f"dispatch_{cluster_hash}_{final_route_id}")
-                except Exception as _ps_e:
-                    _log_err("dispatch/packing_slip_autodownload", _ps_e)
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
@@ -4869,14 +4757,6 @@ style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px soli
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
-                # 📎 Tell the dispatcher the packing slip is in their downloads bar
-                # and needs to be dragged into the Gmail compose window manually.
-                st.markdown(
-                    '''<div style="margin:6px 0 0 0;padding:8px 10px;background:#fef3c7;
-border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#92400e;
-text-align:center;font-weight:600;">📎 Packing slip downloaded — drag it into Gmail to attach.</div>''',
-                    unsafe_allow_html=True,
-                )
                 time.sleep(1)
                 _link_ph.empty()
                 st.rerun()
@@ -6425,14 +6305,6 @@ def run_pod_tab(pod_name):
     </div>
     {_venues_html}
 </div>""", unsafe_allow_html=True)
-                            # 🖨️ Temporary — packing slip button on Sent routes for testing
-                            # before any routes have been accepted. Same call as in Accepted;
-                            # safe to leave here permanently or remove once Accepted has data.
-                            # 🖨️ Admin-only: packing slip on Sent routes (temporary, for warehouse
-                            # pre-staging before the IC accepts). Hidden from Dispatchers and
-                            # Associates so it doesn't clutter their queue.
-                            if _user_tier() == 'admin':
-                                render_packing_slip_button(c, pod_name, key=f"sent_{cluster_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -6474,7 +6346,6 @@ def run_pod_tab(pod_name):
     </div>
     {_gvenues_html}
 </div>""", unsafe_allow_html=True)
-                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_sent_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -6525,11 +6396,6 @@ def run_pod_tab(pod_name):
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
                             _acc_venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            # 🖨️ Packing slip — generates the warehouse-style PDF (header +
-                            # 3 summary cards + LOCALS + Route Details). Mirrors the same
-                            # button on the index_45.html portal so dispatch + warehouse use
-                            # the same artifact. Renders client-side via jsPDF in an iframe.
-                            render_packing_slip_button(c, pod_name, key=cluster_hash)
                             render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -6559,10 +6425,6 @@ def run_pod_tab(pod_name):
                             u_locs = list(dict.fromkeys(task_locs))
                             _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            # 🖨️ Packing slip — ghost accepted routes use synthesized
-                            # cluster data (sheet stop_data → fan-out task rows). Same
-                            # button as live accepted; warehouse gets the same artifact.
-                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_acc_{ghost_hash}")
                             render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
@@ -6674,7 +6536,6 @@ def run_pod_tab(pod_name):
                             _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             g_ic_name_fin = g.get('contractor_name', 'Unknown')
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
-                            render_packing_slip_button(_ghost_to_packing_cluster(g), pod_name, key=f"ghost_fin_{ghost_hash}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -7882,12 +7743,6 @@ with tabs[6]:
                                         _dslv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
                                 _ds_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_ds_venues}</div>""", unsafe_allow_html=True)
-                                # 🖨️ Temporary — packing slip button on Sent routes for testing.
-                                # Mirrors the per-pod tab placement; pod name inferred from cluster.
-                                # 🖨️ Admin-only: same as per-pod Sent. Global Overview is admin/manager
-                                # only anyway, but we keep the strict admin check to match the per-pod gate.
-                                if _user_tier() == 'admin':
-                                    render_packing_slip_button(c, c.get('pod', '') or 'Global', key=f"global_sent_{cluster_hash}")
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):

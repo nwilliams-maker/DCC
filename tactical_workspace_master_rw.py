@@ -1611,13 +1611,13 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         except Exception as e:
             _log_err("move_to_dispatch/unassign-outer", e)
 
-    # 4. Fire-and-forget the SHEET archival to GAS in a background thread (no Onfleet
-    # work — pass task_ids=None so background_sheet_move skips its own scrub block).
-    threading.Thread(
-        target=background_sheet_move,
-        args=(cluster_hash, cluster_data, None, action_label, ic_name),
-        daemon=True
-    ).start()
+    # 4. Sheet archival — run inline. The daemon-thread version was dropping
+    # silently under Streamlit (same root cause as the Onfleet PUT issue
+    # documented above), leaving rows un-archived and routes stuck in FN.
+    try:
+        background_sheet_move(cluster_hash, cluster_data, None, action_label, ic_name)
+    except Exception as _bsm_e:
+        _log_err("move_to_dispatch/sheet_move_sync", _bsm_e)
 
     # 5. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
     st.session_state[f"reverted_{cluster_hash}"] = True
@@ -1989,15 +1989,21 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
 def revoke_field_nation(cluster_hash, pod_name):
     """Removes route from Field Nation sheet tab AND resets UI state.
 
-    Fires two background calls intentionally:
+    Fires two GAS calls intentionally:
       1. removeFieldNation — explicit FN tab cleanup (handler in GAS)
       2. archiveRoute (via move_to_dispatch) — moves the row to Archive
     The archiveRoute call would already remove the FN row, but the explicit
     removeFieldNation makes intent legible if you ever wire up FN-only flows
     that shouldn't archive.
+
+    Both calls run inline (was daemon=True, which dropped silently under
+    Streamlit's thread context — same pattern that bit the assign path and
+    the move_to_dispatch Onfleet PUTs before it).
     """
-    import threading
-    threading.Thread(target=background_fn_revoke, args=(cluster_hash,), daemon=True).start()
+    try:
+        background_fn_revoke(cluster_hash)
+    except Exception as _e:
+        _log_err("revoke_field_nation/fn_revoke", _e)
     move_to_dispatch(cluster_hash, "Field Nation", pod_name, action_label="Field Nation Revoked", check_onfleet=True)
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
@@ -4844,6 +4850,7 @@ text-decoration:none;">📨 Default Mail</a>
                 # 🌟 THE FIX: Upgraded to a callback so it doesn't freeze the screen!
                 if st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
                     revoke_field_nation(**{"cluster_hash": cluster_hash, "pod_name": pod_name})
+                    fetch_sent_records_from_sheet.clear()   # bust the sheet cache so the rerun sees the post-revoke state
                     st.rerun()
             st.stop()
 

@@ -4771,6 +4771,32 @@ text-decoration:none;">📨 Default Mail</a>
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
             home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
+            # WO# format: FN{MMDDYYYY}-{City} {ST}-{N}
+            #   Example: FN05112026-Ladera Ranch CA-1
+            # N auto-increments for repeat routes to the same centroid on the same day.
+            _fn_date_tag = datetime.now().strftime('%m%d%Y')
+            _fn_city  = str(cluster.get('city', '') or 'Unknown').strip()
+            _fn_state = str(cluster.get('state', '') or '').strip().upper()
+            _fn_wo_prefix = f"FN{_fn_date_tag}-{_fn_city} {_fn_state}-"
+            _fn_next_n = 1
+            try:
+                _, _gd_all, _, _ = fetch_sent_records_from_sheet()
+                _existing_nums = []
+                for _pod_ghosts in (_gd_all or {}).values():
+                    if not isinstance(_pod_ghosts, list):
+                        continue
+                    for _g in _pod_ghosts:
+                        _g_wo = str(_g.get('wo', '') or '')
+                        if _g_wo.startswith(_fn_wo_prefix):
+                            try:
+                                _existing_nums.append(int(_g_wo[len(_fn_wo_prefix):]))
+                            except (TypeError, ValueError):
+                                pass
+                if _existing_nums:
+                    _fn_next_n = max(_existing_nums) + 1
+            except Exception as _wo_e:
+                _log_err("fn_wo_counter_lookup", _wo_e)
+            _fn_wo_full = f"{_fn_wo_prefix}{_fn_next_n}"
             fn_payload = {
                 "cluster_hash": cluster_hash,
                 "icn": "Field Nation",
@@ -4781,7 +4807,7 @@ text-decoration:none;">📨 Default Mail</a>
                 # route created on the same day the same WO — fetch_sent_records_from_sheet
                 # then collapsed them into one ghost route on refresh. Suffix with the
                 # first 6 chars of cluster_hash so each route gets a stable, unique WO.
-                "wo": f"FN-{datetime.now().strftime('%m%d%Y')}-{cluster_hash[:6].upper()}",
+                "wo": _fn_wo_full,
                 "due": str(_fn_due),
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),

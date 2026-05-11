@@ -1921,23 +1921,23 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
                     {"name": "ASSIGNED_VIA", "value": "DCC_FN", "type": "string", "visibility": ["api"]},
                 ],
             })
-            _ok = 0
-            for _i, tid in enumerate(task_ids):
+            def _do_assign(tid):
                 try:
                     r = requests.put(
                         f"https://onfleet.com/api/v2/tasks/{tid}",
                         headers=auth, data=assign_payload, timeout=10,
                     )
-                    if r.status_code == 200:
-                        _ok += 1
-                    else:
+                    if r.status_code != 200:
                         _log_err("assign_tasks_to_fn_team/worker",
                                  f"task={tid} HTTP {r.status_code}: {r.text[:200]}")
+                    return r.status_code == 200
                 except Exception as _we:
                     _log_err(f"assign_tasks_to_fn_team/worker task={tid}", _we)
-                # Throttle 70ms — keeps sustained rate ~14 req/sec, under Onfleet ~20 limit
-                if _i < len(task_ids) - 1:
-                    time.sleep(0.07)
+                    return False
+            
+            with ThreadPoolExecutor(max_workers=min(10, len(task_ids))) as _ex:
+                _results = list(_ex.map(_do_assign, task_ids))
+            _ok = sum(_results)
             _log_err("assign_tasks_to_fn_team/done",
                      f"team_move OK; worker assigned {_ok}/{len(task_ids)}")
         else:
@@ -4825,18 +4825,14 @@ text-decoration:none;">📨 Default Mail</a>
                 _fn_tid = st.session_state.get('_fn_team_id')
                 _fn_wid = st.session_state.get('_fn_worker_id')
                 if task_ids and (_fn_tid or _fn_wid):
-                    threading.Thread(
-                        target=assign_tasks_to_fn_team,
-                        args=(list(task_ids), _fn_tid),
-                        kwargs={
-                            'fn_worker_id': _fn_wid,
-                            'wo_name': fn_payload.get('wo', ''),
-                            'due_date': str(_fn_due),
-                        },
-                        daemon=True,
-                    ).start()
+                    assign_tasks_to_fn_team(
+                        list(task_ids), _fn_tid,
+                        fn_worker_id=_fn_wid,
+                        wo_name=fn_payload.get('wo', ''),
+                        due_date=str(_fn_due),
+                    )
             except Exception as _fn_team_e:
-                _log_err("fn_assign_thread_start", _fn_team_e)
+                _log_err("fn_assign_sync", _fn_team_e)
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun()

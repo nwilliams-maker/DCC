@@ -1453,10 +1453,9 @@ div[data-baseweb="popover"]:has([role="listbox"]):not(:has([role="option"])) {{
 # --- 1. BACKGROUND THREAD WORKER ---
 def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_label="Revoked", ic_name=""):
     """Silent worker to update Google Sheets AND scrub Onfleet — never blocks the UI.
-
     Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
     so the Ready-card history banner can recover Revoked/Re-Routed events after a
-    session reset (was previously session-only via st.session_state[\'_actions_*\'])."""
+    session reset (was previously session-only via st.session_state['_actions_*'])."""
     try:
         requests.post(GAS_WEB_APP_URL, json={
             "action": "archiveRoute",
@@ -1468,7 +1467,6 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         }, timeout=15)
     except Exception as e:
         _log_err("background_sheet_move/archive", e)
-
     # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
     # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
     if task_ids:
@@ -1480,7 +1478,7 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
             _scrub_total = len(task_ids)
             _scrub_ok = 0
             _log_err("background_sheet_move/scrub-start", f"scrubbing {_scrub_total} tasks for cluster {cluster_hash}")
-            for tid in task_ids:
+            def _do_scrub(tid):
                 try:
                     _r = requests.put(
                         f"https://onfleet.com/api/v2/tasks/{tid}",
@@ -1488,16 +1486,19 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
                         data=scrub_payload,
                         timeout=10,
                     )
-                    if _r.status_code == 200:
-                        _scrub_ok += 1
-                    else:
+                    if _r.status_code != 200:
                         _body = ""
                         try: _body = _r.text[:300]
                         except Exception: _body = ""
                         _log_err(f"background_sheet_move/scrub task={tid}", f"HTTP {_r.status_code}: {_body}")
+                    return _r.status_code == 200
                 except Exception as e:
                     _log_err(f"background_sheet_move/scrub task={tid}", e)
-            _log_err("background_sheet_move/scrub-end", f"scrubbed {_scrub_ok}/{_scrub_total} successfully for cluster {cluster_hash}")
+                    return False
+            with ThreadPoolExecutor(max_workers=min(10, len(task_ids))) as _ex:
+                _scrub_ok = sum(_ex.map(_do_scrub, task_ids))
+            _log_err("background_sheet_move/scrub-end",
+                     f"scrubbed {_scrub_ok}/{_scrub_total} successfully for cluster {cluster_hash}")
         except Exception as e:
             _log_err("background_sheet_move/scrub-outer", e)
         

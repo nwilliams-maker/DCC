@@ -1916,9 +1916,9 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
             assign_payload = json.dumps({
                 "worker": fn_worker_id,
                 "metadata": [
-                    {"name": "WO_NAME", "value": str(wo_name or ""), "type": "string", "visibility": ["api"]},
-                    {"name": "DUE_DATE", "value": str(due_date or ""), "type": "string", "visibility": ["api"]},
-                    {"name": "ASSIGNED_VIA", "value": "DCC_FN", "type": "string", "visibility": ["api"]},
+                    {"name": "WO_NAME", "value": str(wo_name or ""), "type": "string", "visibility": ["api", "dashboard"]},
+                    {"name": "DUE_DATE", "value": str(due_date or ""), "type": "string", "visibility": ["api", "dashboard"]},
+                    {"name": "ASSIGNED_VIA", "value": "DCC_FN", "type": "string", "visibility": ["api", "dashboard"]},
                 ],
             })
             def _do_assign(tid):

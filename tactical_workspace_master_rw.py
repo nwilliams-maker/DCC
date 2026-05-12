@@ -853,6 +853,52 @@ else:
     st.sidebar.error("Logo file not found! Check the file name.")
 
 # --- UI STYLING ---
+# 🛡️ SessionInfo / Bad-message auto-refresh.
+# Streamlit's "Bad message format / Tried to use SessionInfo before it was
+# initialized" modal can appear under heavy init load or after a redeploy.
+# It's a framework-side race condition, not a DCC bug — the documented fix
+# is a hard refresh. We do that automatically (once, then a 60s cooldown
+# to prevent reload loops on real persistent errors).
+st.components.v1.html("""
+<script>
+(function() {
+    var REFRESH_KEY = '_dcc_sessioninfo_refresh_ts';
+    var COOLDOWN_MS = 60000;  // don't auto-refresh more than once per minute
+    function shouldRefresh() {
+        try {
+            var last = parseInt(sessionStorage.getItem(REFRESH_KEY) || '0', 10);
+            return (Date.now() - last) > COOLDOWN_MS;
+        } catch (e) { return true; }
+    }
+    function markRefreshed() {
+        try { sessionStorage.setItem(REFRESH_KEY, String(Date.now())); } catch (e) {}
+    }
+    function checkForSessionInfoModal() {
+        var doc = window.parent.document;
+        var modals = doc.querySelectorAll('[role="dialog"], [data-testid="stException"]');
+        for (var i = 0; i < modals.length; i++) {
+            var txt = (modals[i].innerText || '').toLowerCase();
+            if (txt.indexOf('sessioninfo') !== -1 || txt.indexOf('bad message format') !== -1) {
+                if (shouldRefresh()) {
+                    markRefreshed();
+                    console.log('[dcc] SessionInfo modal detected → auto-refresh');
+                    window.parent.location.reload();
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    // Run once on first paint, then watch via MutationObserver.
+    setTimeout(checkForSessionInfoModal, 500);
+    try {
+        var obs = new MutationObserver(function() { checkForSessionInfoModal(); });
+        obs.observe(window.parent.document.body, { childList: true, subtree: true });
+    } catch (e) { console.warn('[dcc] sessioninfo-watcher observer failed:', e); }
+})();
+</script>
+""", height=0)
+
 st.components.v1.html("""
 <script>
 (function() {
@@ -890,6 +936,40 @@ header[data-testid="stHeader"]::before {{ background-color: {TB_APP_BG} !importa
 div[data-testid="stToolbar"] {{ display: none !important; }}
 .main .block-container,
 [data-testid="stMainBlockContainer"] {{ max-width: 1400px !important; padding-top: 8px !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }}
+
+/* =========================================
+   PHANTOM-WHITESPACE FIX (#1) — collapse stElementContainer wrappers
+   that only hold a height=0 iframe. Without this, every
+   st.components.v1.html(..., height=0) at the top of the script
+   (scroll-saver, deploy watcher, SessionInfo watcher, etc.) ends up
+   contributing ~42px of vertical space (26px container + 16px flex gap)
+   because the parent stVerticalBlock applies its gap to every flex
+   child regardless of content height. Result: ~230px of empty space
+   above the page title, which gets worse after popover interaction
+   because Streamlit re-mounts the iframes during cleanup.
+   Targeting [height="0"] is precise — non-zero iframes (maps, packing
+   slip button, etc.) keep their layout.
+   ========================================= */
+.stElementContainer:has(> iframe.stIFrame[height="0"]) {{ display: none !important; }}
+
+/* =========================================
+   DESTRUCTIVE BUTTON RED (#6) — buttons whose label starts with "🚨 "
+   (Yes, Re-Route / Yes, Remove / Yes, Revoke FN) live inside revoke
+   popovers. Streamlit's type="primary" theme renders them green, which
+   contradicts the danger signal. Override to red so the visual matches
+   the action.
+   ========================================= */
+.stPopover button[kind="primary"],
+[data-baseweb="popover"] button[kind="primary"] {{
+    background-color: #dc2626 !important;
+    border-color: #b91c1c !important;
+    color: #ffffff !important;
+}}
+.stPopover button[kind="primary"]:hover,
+[data-baseweb="popover"] button[kind="primary"]:hover {{
+    background-color: #b91c1c !important;
+    border-color: #991b1b !important;
+}}
 
 /* =========================================
    WIDGET & INPUT STANDARDIZATION (Fixes the White Box Glitch)
@@ -2955,7 +3035,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
     
     # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
     # top of this file. If a Dispatcher already pulled within the last 60s, this
@@ -2989,7 +3069,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
     
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
@@ -3151,7 +3231,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
     
     # 3. Route ONLY the Digital Tasks
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -3280,7 +3360,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {_pn} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5114,7 +5194,7 @@ def smart_sync_pod(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {_pn} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5644,7 +5724,7 @@ def run_pod_tab(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Checking New Tasks — {pod} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Scanning Onfleet for tasks not yet tracked...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5690,7 +5770,7 @@ def run_pod_tab(pod_name):
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing {pod} Pod</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching tasks from Onfleet and building routes...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -5997,7 +6077,7 @@ def run_pod_tab(pod_name):
         # CARD 4: SENT RECORDS (Accepted | Declined)
         st.markdown(f"""
             <div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height: 120px;'>
-                <p style='margin:0 0 10px 0; font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>Sent: {total_sent}</p>
+                <p style='margin:0 0 10px 0; font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>All Sent: {total_sent}</p>
                 <div style='display:flex; justify-content:space-around; align-items:center; gap:8px;'>
                     <div style='background:{TB_GREEN_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'>
                         <p style='margin:0; font-size:9px; font-weight:800; color:{TB_GREEN_TEXT};'>ACCEPTED</p>
@@ -7401,7 +7481,7 @@ with tabs[0]:
     loading_placeholder = st.empty()
     bar_placeholder = st.empty()
     if not has_global_data:
-        st.info("No operational data initialized. Click '🚀 Initialize All Pods' at the top right to fetch tasks across all pods.")
+        st.info("No operational data initialized. Click '🚀 Initialize All Pods' at the top right to fetch tasks for the 5 static pods. The Digital tab initializes separately.")
 
     if st.session_state.get("trigger_pull"):
         st.markdown("<style>.pod-card-pill { opacity: 0.35 !important; filter: grayscale(40%) !important; pointer-events: none !important; transition: opacity 0.3s ease !important; }</style>", unsafe_allow_html=True)
@@ -7488,7 +7568,7 @@ with tabs[0]:
                 
                 card_content = f"""
 <p style='margin: 10px 0 0 0; font-size: 26px; font-weight: 800; color: {colors['text']};'>{true_sent_count} / {visual_total_routes}</p>
-<p style='margin: -5px 0 0 0; font-size: 11px; font-weight: 700; color: {colors['text']}; opacity: 0.6; text-transform: uppercase;'>Routes Sent</p>
+<p style='margin: -5px 0 0 0; font-size: 11px; font-weight: 700; color: {colors['text']}; opacity: 0.6; text-transform: uppercase;'>All Routes Sent</p>
 <p style='margin: 2px 0 8px 0; font-size: 9px; font-weight: 700; color: {colors['text']}; opacity: 0.5;'>{total_accepted} ACCEPTED | {len(declined)} DECLINED</p>
 <div style='display: flex; justify-content: space-around; border-top: 1px solid rgba(0,0,0,0.08); padding-top: 10px;'>
 <div><p style='margin:0; font-size:9px; color: {colors['text']}; opacity: 0.8; font-weight: 800;'>TASKS</p><b style='color: {colors['text']};'>{total_tasks}</b></div>
@@ -7531,7 +7611,7 @@ with tabs[0]:
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing All Pods</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>{msg}</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -7728,7 +7808,7 @@ with tabs[6]:
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching Digital tasks from Onfleet...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>Timer starts after the Onfleet pull (~30s).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -7754,7 +7834,7 @@ with tabs[6]:
         # 🌟 UPDATED: Uses tasks_total instead of len(pool)
         st.markdown(f"<div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height: 110px;'><p style='margin:0 0 8px 0; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>Workload</p><div style='display:flex; justify-content:space-around; gap:8px;'><div style='background:{TB_STATIC_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_STATIC_TEXT};'>TASKS</p><p style='margin:0; font-size:22px; font-weight:800;'>{tasks_total}</p></div><div style='background:{TB_STATIC_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_STATIC_TEXT};'>STOPS</p><p style='margin:0; font-size:22px; font-weight:800;'>{unique_stops_total}</p></div></div></div>", unsafe_allow_html=True)
     with dc3:
-        st.markdown(f"<div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height:110px;'><p style='margin:0 0 8px 0; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>Sent: {pool_total_sent}</p><div style='display:flex; justify-content:space-around; gap:8px;'><div style='background:{TB_GREEN_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_GREEN_TEXT};'>ACCEPTED</p><p style='margin:0; font-size:22px; font-weight:800;'>{len(d_acc)}</p></div><div style='background:{TB_RED_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_RED_TEXT};'>DECLINED</p><p style='margin:0; font-size:22px; font-weight:800;'>{len(d_dec)}</p></div></div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height:110px;'><p style='margin:0 0 8px 0; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>All Sent: {pool_total_sent}</p><div style='display:flex; justify-content:space-around; gap:8px;'><div style='background:{TB_GREEN_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_GREEN_TEXT};'>ACCEPTED</p><p style='margin:0; font-size:22px; font-weight:800;'>{len(d_acc)}</p></div><div style='background:{TB_RED_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'><p style='margin:0; font-size:8px; font-weight:800; color:{TB_RED_TEXT};'>DECLINED</p><p style='margin:0; font-size:22px; font-weight:800;'>{len(d_dec)}</p></div></div></div>", unsafe_allow_html=True)
     # 🌟 THE FIX: Force spacing after the cards
     st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
     

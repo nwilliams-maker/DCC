@@ -5630,7 +5630,7 @@ def run_pod_tab(pod_name):
         # 🌟 THE FIX: If we just clicked Finalize, override the Google Sheet instantly!
         if route_state == "finalized":
             finalized.append(c)
-        elif sheet_match and not is_reverted:
+        elif sheet_match and not is_reverted and str(sheet_match.get('status', '')).lower() != 'archived':
             raw_status = str(sheet_match.get('status', '')).lower()
             if raw_status == 'field_nation':
                 # 🌟 Restore session state so checkbox stays checked after reload
@@ -7198,7 +7198,7 @@ with tabs[0]:
                     is_reverted = st.session_state.get(f"reverted_{cluster_hash}", False)
                     
                     # --- PRIORITY: LIVE DATABASE OVERRIDES LOCAL STATE ---
-                    if sheet_match and not is_reverted:
+                    if sheet_match and not is_reverted and str(sheet_match.get('status', '')).lower() != 'archived':
                         raw_status = str(sheet_match.get('status', '')).lower()
                         if raw_status == 'field_nation':
                             if not st.session_state.get(f"route_state_{cluster_hash}"):

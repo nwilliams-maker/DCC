@@ -4865,7 +4865,41 @@ text-decoration:none;">📨 Default Mail</a>
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),
                 "kCnt": cluster.get('inst_count', 0),
-                "locs": " | ".join([home] + list(stop_metrics.keys()) + [home])
+                "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
+                # 🌟 FN-stopData fix (May 2026):
+                # Previously this payload had no stopData, so FN sheet rows landed
+                # with empty stop_data. _fn_ghost_to_cluster then reconstructed every
+                # synthetic task with client_company='' (no campaigns to read), the
+                # venue accordion's camp_rows came out empty, and the dispatcher saw
+                # only the task-type tally — no campaign names. Mirror the saveRoute
+                # payload at line ~4733 so FN ghosts carry the same per-stop metadata
+                # (campaigns / kioskId / customerType / boostedStandard / artFile / sio)
+                # that normal Sent ghosts already have. Only affects FN routes assigned
+                # AFTER this deploy; existing FN rows in the sheet still lack stopData
+                # and will keep showing only the task-type tally until re-assigned.
+                "stopData": json.dumps([{
+                    "addr": addr,
+                    "venue": metrics.get("venue_name", ""),
+                    "t_count": metrics.get("t_count", 0),
+                    "esc": metrics.get("esc", False),
+                    "inst": metrics.get("inst", 0),
+                    "remov": metrics.get("remov", 0),
+                    "n_ad": metrics.get("n_ad", 0),
+                    "c_ad": metrics.get("c_ad", 0),
+                    "d_ad": metrics.get("d_ad", 0),
+                    "kioskId": next((str(t.get("kiosk_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("kiosk_id","")).strip()), ""),
+                    "venueId": next((str(t.get("venue_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("venue_id","")).strip()), ""),
+                    "locationInVenue": next((str(t.get("location_in_venue","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("location_in_venue","")).strip()), ""),
+                    "campaigns": list({
+                        (t.get("client_company",""), t.get("escalated",False), str(t.get("boosted_standard","")).lower()):
+                        {"name": t.get("client_company",""), "esc": t.get("escalated",False), "bs": str(t.get("boosted_standard","")).lower()}
+                        for t in cluster["data"] if t.get("full") == addr and t.get("client_company")
+                    }.values()),
+                    "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
+                    "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
+                    "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
+                    "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
+                } for addr, metrics in stop_metrics.items()]),
             }
 
             save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)

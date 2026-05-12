@@ -1732,7 +1732,22 @@ def auto_sync_checker(pod_name):
                 elif action == 'finalizeRoute':
                     new_status = 'finalized'
                 elif action == 'archiveRoute':
-                    new_status = 'archived'
+                    # 🌟 BUG FIX (May 2026 — revoke/re-route stuck in Sent):
+                    # Was: new_status = 'archived', falling through to the patch loop
+                    # which set sent_db_local[tid]={status:'archived'}. Broke revoke 2 ways:
+                    #   1) cleanup loop ~10 lines down sees tid in sent_db_local and
+                    #      clears reverted_{cluster_hash}, undoing move_to_dispatch step 5.
+                    #   2) run_pod_tab bucket logic (~line 5634) has no 'archived' case
+                    #      → falls to `else: sent.append(c)` → cluster snaps back to Sent.
+                    # Mirror the slow-path: remove the tid from sent_db_local instead.
+                    for tid in tids_csv.split(','):
+                        tid = tid.strip()
+                        if not tid:
+                            continue
+                        if tid in pod_tid_set:
+                            affected_this_pod = True
+                        sent_db_local.pop(tid, None)
+                    continue  # skip the generic patch loop below
                 elif action == 'markFNAssigned':
                     new_status = 'accepted'
                 elif action == 'saveRoute':
@@ -5630,7 +5645,7 @@ def run_pod_tab(pod_name):
         # 🌟 THE FIX: If we just clicked Finalize, override the Google Sheet instantly!
         if route_state == "finalized":
             finalized.append(c)
-        elif sheet_match and not is_reverted and str(sheet_match.get('status', '')).lower() != 'archived':
+        elif sheet_match and not is_reverted:
             raw_status = str(sheet_match.get('status', '')).lower()
             if raw_status == 'field_nation':
                 # 🌟 Restore session state so checkbox stays checked after reload
@@ -7198,7 +7213,7 @@ with tabs[0]:
                     is_reverted = st.session_state.get(f"reverted_{cluster_hash}", False)
                     
                     # --- PRIORITY: LIVE DATABASE OVERRIDES LOCAL STATE ---
-                    if sheet_match and not is_reverted and str(sheet_match.get('status', '')).lower() != 'archived':
+                    if sheet_match and not is_reverted:
                         raw_status = str(sheet_match.get('status', '')).lower()
                         if raw_status == 'field_nation':
                             if not st.session_state.get(f"route_state_{cluster_hash}"):

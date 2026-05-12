@@ -2080,15 +2080,33 @@ def _fn_ghost_to_cluster(g):
         _kiosk_id     = str(sd.get('kioskId', '') or '').strip()
         _venue_id     = str(sd.get('venueId', '') or '').strip()
         _loc_in_venue = str(sd.get('locationInVenue', '') or '').strip()
-        _camps = sd.get('campaigns') or []
-        _camp_name = (_camps[0].get('name') if _camps and isinstance(_camps[0], dict) else '') or ''
+        # 🌟 FN-campaign-fanout fix (May 2026):
+        # Previously this used only the FIRST campaign's name and stamped it
+        # onto every synthetic task at the stop, so multi-campaign stops
+        # collapsed to a single name in the venue accordion. Round-robin the
+        # campaigns list across the per-stop tasks so every campaign name
+        # surfaces in make_venue_details' grouped output. Also carry each
+        # campaign's `esc` / `bs` flags onto the task it's assigned to so the
+        # ❗/🔥/⭐ pills reflect the actual campaign mix rather than only the
+        # stop-level boostedStandard fallback.
+        _camps_raw = sd.get('campaigns') or []
+        _camps = [c for c in _camps_raw if isinstance(c, dict) and (c.get('name') or '').strip()]
+        _stop_boosted = str(sd.get('boostedStandard', '') or '').strip()
+        if not _camps:
+            # No campaign list at all — synthesize a single placeholder so the
+            # rest of the loop doesn't have to special-case an empty list.
+            # Empty name + stop-level boostedStandard preserves the old behavior
+            # for legacy sheet rows (pre-2026-05-04) that never carried campaigns.
+            _camps = [{'name': '', 'esc': False, 'bs': _stop_boosted}]
         _customer_type    = str(sd.get('customerType', '') or '').strip()
-        _boosted_standard = str(sd.get('boostedStandard', '') or '').strip()
         _art_file         = str(sd.get('artFile', '') or '').strip()
         _sio              = str(sd.get('sio', '') or '').strip()
         _parts = [p.strip() for p in addr.split(',')]
         _state = (_parts[2] if len(_parts) > 2 else (g.get('state') or '')).strip().upper()[:2]
         _zip   = (_parts[3] if len(_parts) > 3 else '').strip()
+
+        # Per-stop task counter for round-robin campaign assignment.
+        _stop_task_idx = 0
 
         # Fan out per task-type count; consume one real ID per row.
         for label, key in (
@@ -2105,6 +2123,8 @@ def _fn_ghost_to_cluster(g):
             for _ in range(n):
                 if not id_queue:
                     break
+                _cmp_entry = _camps[_stop_task_idx % len(_camps)]
+                _stop_task_idx += 1
                 synthetic.append({
                     'id':              id_queue.pop(0),
                     'full':            addr,
@@ -2115,12 +2135,12 @@ def _fn_ghost_to_cluster(g):
                     'kiosk_id':        _kiosk_id,
                     'location_in_venue': _loc_in_venue,
                     'task_type':       label,
-                    'client_company':  _camp_name,
+                    'client_company':  str(_cmp_entry.get('name', '') or ''),
                     'is_digital':      label == 'Service',
-                    'boosted_standard': _boosted_standard,
+                    'boosted_standard': str(_cmp_entry.get('bs', '') or '') or _stop_boosted,
                     'art_file':        _art_file,
                     'customer_type':   _customer_type,
-                    'escalated':       False,
+                    'escalated':       bool(_cmp_entry.get('esc', False)),
                 })
 
     # Tail: any real IDs left after stop_data exhaustion get distributed onto
@@ -5320,7 +5340,35 @@ def make_venue_details(data):
                 f"</div>"
             )
             camp_rows.append(row)
-        camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else ""
+        # 🌟 FN-empty-accordion fix (May 2026):
+        # When a cluster's tasks don't carry client_company (typical for FN
+        # ghost clusters reconstructed from pre-2026-05-04 sheet rows whose
+        # stop_data predates the `campaigns` field), camp_rows stays empty and
+        # the <details> body renders blank — the accordion technically opens
+        # but the dispatcher sees nothing change. Fall back to a task-type
+        # tally so clicking a location ALWAYS reveals useful detail.
+        if camp_rows:
+            camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>"
+        else:
+            _tt_lines = []
+            if inst:     _tt_lines.append(f"🛠️ Install &times; {inst}")
+            if remov:    _tt_lines.append(f"🗑️ Removal &times; {remov}")
+            if n_ad:     _tt_lines.append(f"🆕 New Ad &times; {n_ad}")
+            if c_ad:     _tt_lines.append(f"🔄 Continuity &times; {c_ad}")
+            if d_ad:     _tt_lines.append(f"⚪ Default &times; {d_ad}")
+            if digi_ins: _tt_lines.append(f"🔧 Ins/Rem &times; {digi_ins}")
+            if digi_off: _tt_lines.append(f"📵 Offline &times; {digi_off}")
+            if digi_srv: _tt_lines.append(f"⚙️ Service &times; {digi_srv}")
+            for _lbl, _n in custom_types.items():
+                _tt_lines.append(f"📋 {_lbl} &times; {_n}")
+            if _tt_lines:
+                _body = "".join(
+                    f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>• <span style='font-weight:700;color:#0f172a;'>{_ln}</span></div>"
+                    for _ln in _tt_lines
+                )
+                camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{_body}</div>"
+            else:
+                camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
 
         rows.append(
             f"<details class='fn-loc-row'>"
@@ -6223,6 +6271,69 @@ def run_pod_tab(pod_name):
                             use_container_width=True,
                             disabled=True,
                         )
+
+                # 📢 ASSIGNED FN REP (BULK) — May 2026:
+                # Mirrors the per-cluster button inside render_dispatch (line ~4935)
+                # but operates over every hash in the multiselect, firing
+                # markFNAssigned in parallel via ThreadPoolExecutor. Each successful
+                # GAS call moves that route from the FN tab into Accepted on the
+                # next rerender. Mirrors the per-cluster session-state writes so
+                # the route hops to Accepted instantly (no wait for sheet readback).
+                _fn_assigned_dict = st.session_state.setdefault('_fn_assigned', {})
+                if _fn_selected:
+                    _newly_assigning = [_h for _h in _fn_selected if _h not in _fn_assigned_dict]
+                    if st.button(
+                        f"📢 Assigned FN Rep — Move to Accepted ({len(_newly_assigning)} new · {len(_fn_selected)} selected)",
+                        key=f"fn_assigned_bulk_{pod_name}",
+                        use_container_width=True,
+                        type="primary",
+                        disabled=(len(_newly_assigning) == 0),
+                    ):
+                        _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
+                        def _fire_assigned(_h):
+                            try:
+                                _r = requests.post(
+                                    GAS_WEB_APP_URL,
+                                    json={"action": "markFNAssigned", "cluster_hash": _h},
+                                    timeout=25,
+                                ).json()
+                                return (_h, bool(_r.get("success")), _r.get("error", ""))
+                            except Exception as _ex:
+                                return (_h, False, str(_ex))
+                        _ok = 0
+                        _fail = 0
+                        with st.spinner(f"Marking {len(_newly_assigning)} route(s) as Assigned FN Rep..."):
+                            with ThreadPoolExecutor(max_workers=min(8, max(1, len(_newly_assigning)))) as _ex:
+                                _results = list(_ex.map(_fire_assigned, _newly_assigning))
+                            for _h, _success, _err in _results:
+                                if _success:
+                                    _ok += 1
+                                    _fn_assigned_dict[_h] = _ts_now
+                                    # Mirror per-cluster session-state writes so the
+                                    # route flips to Accepted on the very next render.
+                                    st.session_state[f"contractor_{_h}"] = "Field Nation"
+                                    st.session_state.pop(f"route_state_{_h}", None)
+                                    st.session_state[f"reverted_{_h}"] = True
+                                else:
+                                    _fail += 1
+                                    _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
+                        st.session_state['_fn_assigned'] = _fn_assigned_dict
+                        fetch_sent_records_from_sheet.clear()
+                        if _fail == 0:
+                            st.toast(f"✅ {_ok} route(s) marked Assigned FN Rep — moved to Accepted.")
+                        elif _ok == 0:
+                            st.error(f"All {_fail} GAS calls failed. Check logs.")
+                        else:
+                            st.toast(f"⚠️ {_ok} succeeded, {_fail} failed. Check logs for details.")
+                        st.rerun()
+                else:
+                    st.button(
+                        "📢 Assigned FN Rep — Move to Accepted (none selected)",
+                        key=f"fn_assigned_bulk_empty_{pod_name}",
+                        use_container_width=True,
+                        disabled=True,
+                    )
+
                 st.divider()
 
                 # Partition the FN routes into Pending (not yet posted) and Sent (posted).
@@ -7720,6 +7831,64 @@ with tabs[6]:
                                 use_container_width=True,
                                 disabled=True,
                             )
+
+                    # 📢 ASSIGNED FN REP (BULK) — digital, May 2026:
+                    # Mirror of the pod FN bulk handler above. Shares the same
+                    # _fn_assigned session-state dict so the badge / disabled state
+                    # is consistent across pods + digital.
+                    _fn_assigned_dict_d = st.session_state.setdefault('_fn_assigned', {})
+                    if _fn_selected:
+                        _newly_assigning_d = [_h for _h in _fn_selected if _h not in _fn_assigned_dict_d]
+                        if st.button(
+                            f"📢 Assigned FN Rep — Move to Accepted ({len(_newly_assigning_d)} new · {len(_fn_selected)} selected)",
+                            key="fn_assigned_bulk_digital",
+                            use_container_width=True,
+                            type="primary",
+                            disabled=(len(_newly_assigning_d) == 0),
+                        ):
+                            _ts_now_d = datetime.now().strftime('%m/%d %I:%M %p')
+                            def _fire_assigned_d(_h):
+                                try:
+                                    _r = requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNAssigned", "cluster_hash": _h},
+                                        timeout=25,
+                                    ).json()
+                                    return (_h, bool(_r.get("success")), _r.get("error", ""))
+                                except Exception as _ex:
+                                    return (_h, False, str(_ex))
+                            _ok_d = 0
+                            _fail_d = 0
+                            with st.spinner(f"Marking {len(_newly_assigning_d)} digital route(s) as Assigned FN Rep..."):
+                                with ThreadPoolExecutor(max_workers=min(8, max(1, len(_newly_assigning_d)))) as _ex:
+                                    _results_d = list(_ex.map(_fire_assigned_d, _newly_assigning_d))
+                                for _h, _success, _err in _results_d:
+                                    if _success:
+                                        _ok_d += 1
+                                        _fn_assigned_dict_d[_h] = _ts_now_d
+                                        st.session_state[f"contractor_{_h}"] = "Field Nation"
+                                        st.session_state.pop(f"route_state_{_h}", None)
+                                        st.session_state[f"reverted_{_h}"] = True
+                                    else:
+                                        _fail_d += 1
+                                        _log_err(f"bulk markFNAssigned/digital hash={_h}", _err)
+                            st.session_state['_fn_assigned'] = _fn_assigned_dict_d
+                            fetch_sent_records_from_sheet.clear()
+                            if _fail_d == 0:
+                                st.toast(f"✅ {_ok_d} digital route(s) marked Assigned FN Rep — moved to Accepted.")
+                            elif _ok_d == 0:
+                                st.error(f"All {_fail_d} GAS calls failed. Check logs.")
+                            else:
+                                st.toast(f"⚠️ {_ok_d} succeeded, {_fail_d} failed. Check logs for details.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "📢 Assigned FN Rep — Move to Accepted (none selected)",
+                            key="fn_assigned_bulk_empty_digital",
+                            use_container_width=True,
+                            disabled=True,
+                        )
+
                     st.divider()
 
                     # Partition into Pending Post + Sent (Posted to Field Nation).
@@ -7762,6 +7931,30 @@ with tabs[6]:
                         _dfn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
                         _dfn_exp_check = "✓ " if _dfn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
                         with st.expander(_dfn_exp_check + f"🌐 FN {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdfn_boost}{_gdfn_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            # 🌟 FN-locations fix (May 2026):
+                            # Digital FN tab previously jumped straight to render_dispatch
+                            # with no venue section, so the dispatcher couldn't click into a
+                            # location to see its tasks. Mirror the pod FN tab's route
+                            # summary + venue accordion (line ~6256) before the dispatch
+                            # block so clicking a location reveals task-type detail.
+                            _dfn_task_ids = [str(_t['id']).strip() for _t in c.get('data', [])]
+                            _dfn_hash = hashlib.md5("".join(sorted(_dfn_task_ids)).encode()).hexdigest()
+                            if not st.session_state.get(f"route_state_{_dfn_hash}"):
+                                st.session_state[f"route_state_{_dfn_hash}"] = "field_nation"
+                            _dfn_stops, _dfn_tasks = len(set(_t['full'] for _t in c.get('data', []))), len(c.get('data', []))
+                            _dfn_venues = venue_section(make_venue_details(c.get('data', [])))
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
+    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
+        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
+    </div>
+    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
+        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{{_dfn_stops}} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {{_dfn_tasks}} Tasks</span></div></div>
+        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Status</div>
+        <div style="font-size:13px; font-weight:700; color:#854d0e;">Field Nation</div></div>
+    </div>
+    {{_dfn_venues}}
+</div>""".format(_dfn_stops=_dfn_stops, _dfn_tasks=_dfn_tasks, _dfn_venues=_dfn_venues), unsafe_allow_html=True)
                             render_dispatch(i+9500, c, "Global_Digital")
 
         with col_right:

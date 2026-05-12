@@ -395,12 +395,23 @@ _components.html(
           try {
             var doc = w.document;
 
-            // Banner: text contains "App was updated" or "auto-refreshing"
-            var banners = doc.querySelectorAll('[data-testid="stToast"], [class*="stAlert"], div[role="alert"]');
-            for (var i = 0; i < banners.length; i++) {
-              var t = (banners[i].textContent || '').toLowerCase();
-              if (t.indexOf('app was updated') >= 0 || t.indexOf('auto-refreshing') >= 0) {
-                _hardReload('updated banner');
+            // Banner detection — text-content match instead of testid/class.
+            // Streamlit hashes its CSS class names and shifts testids between
+            // versions; the prior selector list missed the 1.39 native "App
+            // was updated — auto-refreshing in 30s" toast entirely, leaving
+            // the auto-reload path dead. Mirror the modal-header approach
+            // below: walk small leaf-ish elements and match by content.
+            // We require BOTH "app was updated" AND "auto-refreshing" so we
+            // don't false-positive on DCC's own hidden custom banner
+            // (#dcc-update-banner) which carries only the first phrase.
+            var _scan_leaves = doc.body ? doc.body.querySelectorAll('span, div, p') : [];
+            for (var i = 0; i < _scan_leaves.length; i++) {
+              var _bn = _scan_leaves[i];
+              if (_bn.children && _bn.children.length > 3) continue;
+              var t = (_bn.textContent || '').toLowerCase();
+              if (t.indexOf('app was updated') >= 0 && t.indexOf('auto-refreshing') >= 0) {
+                if (_bn.closest && _bn.closest('#dcc-update-banner')) continue;
+                _hardReload('updated banner (text)');
                 return;
               }
             }

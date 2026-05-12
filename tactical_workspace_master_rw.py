@@ -356,6 +356,63 @@ _components.html(
     (function() {
       try {
         var w = window.parent;
+        var d = w.document;
+
+        // 🌟 DEPLOY OVERLAY (May 2026):
+        // After a hard reload triggered by the stale-guard, Streamlit shows its
+        // bare gray skeleton placeholders while Python boots up (5-15s). This
+        // looks alarming — Nick reported "this pops up on my app." Replace the
+        // skeleton period with a branded "Updating DCC..." overlay. Driven by
+        // a sessionStorage flag set right before the reload fires.
+        try {
+          var _deployFlag = w.sessionStorage.getItem('_dcc_deploy_reload_ts');
+          if (_deployFlag) {
+            var _deployAge = Date.now() - parseInt(_deployFlag, 10);
+            if (_deployAge >= 0 && _deployAge < 90000 && !d.getElementById('dcc-deploy-overlay')) {
+              var _ov = d.createElement('div');
+              _ov.id = 'dcc-deploy-overlay';
+              _ov.style.cssText = 'position:fixed;inset:0;background:linear-gradient(135deg,#faf5ff 0%,#f3e8ff 100%);z-index:2147483646;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#633094;transition:opacity 0.4s ease;';
+              _ov.innerHTML = '<style>@keyframes dccSpin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}</style>' +
+                '<div style="width:64px;height:64px;border:6px solid #e9d5ff;border-top-color:#633094;border-radius:50%;animation:dccSpin 0.9s linear infinite;"></div>' +
+                '<div style="margin-top:24px;font-size:20px;font-weight:800;letter-spacing:0.02em;">📦 Updating DCC...</div>' +
+                '<div style="margin-top:8px;font-size:13px;color:#7e22ce;font-weight:600;">Loading the latest version, hang tight.</div>';
+              d.body.appendChild(_ov);
+              // Remove the overlay once the real Terraboost header is present,
+              // or after a 30s hard timeout (don't trap dispatchers on a broken
+              // load forever). MutationObserver checks every DOM mutation for
+              // the title element; cheaper than polling.
+              var _removeOverlay = function() {
+                var _o = d.getElementById('dcc-deploy-overlay');
+                if (!_o) return;
+                _o.style.opacity = '0';
+                setTimeout(function() { try { _o.parentNode.removeChild(_o); } catch (e) {} }, 450);
+                w.sessionStorage.removeItem('_dcc_deploy_reload_ts');
+              };
+              var _seenHeader = function() {
+                // Title text "Terraboost Media: Dispatch Command Center" or the
+                // login screen heading "Terraboost Media" both count as "real
+                // content has rendered."
+                var _texts = d.body ? d.body.textContent || '' : '';
+                return _texts.indexOf('Dispatch Command Center') >= 0 || _texts.indexOf('SIGN IN') >= 0;
+              };
+              if (_seenHeader()) {
+                // Already rendered before observer attached.
+                setTimeout(_removeOverlay, 250);
+              } else {
+                var _obs = new MutationObserver(function() {
+                  if (_seenHeader()) { _obs.disconnect(); _removeOverlay(); }
+                });
+                _obs.observe(d.body, { childList: true, subtree: true });
+                // Hard timeout safety net.
+                setTimeout(function() { try { _obs.disconnect(); } catch(e){} _removeOverlay(); }, 30000);
+              }
+            } else if (_deployAge >= 90000) {
+              // Stale flag — clear it so the next non-deploy load doesn't trip.
+              w.sessionStorage.removeItem('_dcc_deploy_reload_ts');
+            }
+          }
+        } catch (e) { console.warn('[dcc-deploy-overlay]', e); }
+
         if (w._dccStaleGuardLoaded) return;
         w._dccStaleGuardLoaded = true;
 
@@ -376,17 +433,41 @@ _components.html(
           } catch (e) { return true; }
         }
 
+        function _doReload(reason) {
+          // Set the deploy-overlay flag right before reload so the next page
+          // load picks it up and renders the branded overlay over Streamlit's
+          // bare skeleton.
+          try { w.sessionStorage.setItem('_dcc_deploy_reload_ts', Date.now().toString()); } catch (e) {}
+          console.log('[dcc-stale] hard reload:', reason);
+          var u = new URL(w.location.href);
+          u.searchParams.set('_r', Date.now().toString());
+          w.location.replace(u.toString());
+        }
+
         function _hardReload(reason) {
           if (!_shouldReload()) {
             console.warn('[dcc-stale] reload loop suppressed:', reason);
             return;
           }
-          console.log('[dcc-stale] hard reload:', reason);
-          // location.reload(true) is deprecated but still works; the cache-
-          // bust query param is the belt to that suspender.
-          var u = new URL(w.location.href);
-          u.searchParams.set('_r', Date.now().toString());
-          w.location.replace(u.toString());
+          // Pre-warm the new deploy with a tiny /healthz hit before reloading
+          // so the new server's Python process is already hot by the time the
+          // tab navigates. Shaves several seconds off the Streamlit skeleton
+          // phase. Fire-and-forget with a short timeout — never block the
+          // reload itself if /healthz is slow or 404s.
+          try {
+            var _ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            var _t = setTimeout(function() { try { if (_ctl) _ctl.abort(); } catch(e){} _doReload(reason); }, 2500);
+            fetch(w.location.origin + '/?healthz=1', {
+              cache: 'no-cache',
+              signal: _ctl ? _ctl.signal : undefined,
+            }).then(function() {
+              clearTimeout(_t);
+              _doReload(reason);
+            }).catch(function() {
+              clearTimeout(_t);
+              _doReload(reason);
+            });
+          } catch (e) { _doReload(reason); }
         }
 
         // (1) "App was updated" banner — auto-click Reload now.

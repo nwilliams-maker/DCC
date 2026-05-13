@@ -5126,6 +5126,41 @@ text-decoration:none;">📨 Default Mail</a>
                 use_container_width=True
             )
 
+        # 📤 PER-ROUTE POSTED! — mirrors the bulk Posted! at the top of the FN tab
+        # but fires markFNPosted for just this cluster_hash. Once posted, the
+        # button switches to a disabled "Posted ✓ {timestamp}" indicator.
+        _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+        _already_posted_ts = _fn_posted_dict.get(cluster_hash)
+        if _already_posted_ts:
+            st.button(
+                f"📤 Posted ✓ {_already_posted_ts}",
+                key=f"fn_posted_done_{pod_name}_{cluster_hash}",
+                use_container_width=True,
+                disabled=True,
+            )
+        else:
+            if st.button(
+                "📤 Mark as Posted",
+                key=f"fn_post_one_{pod_name}_{cluster_hash}",
+                use_container_width=True,
+            ):
+                _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                _fn_posted_dict[cluster_hash] = _ts
+                st.session_state['_fn_posted'] = _fn_posted_dict
+                try:
+                    threading.Thread(
+                        target=lambda: requests.post(
+                            GAS_WEB_APP_URL,
+                            json={"action": "markFNPosted", "cluster_hash": cluster_hash},
+                            timeout=15,
+                        ),
+                        daemon=True,
+                    ).start()
+                except Exception as _fpe:
+                    _log_err("markFNPosted/per-route", _fpe)
+                st.toast("📤 Marked as Posted to Field Nation.")
+                st.rerun()
+
         # 🌟 UNIQUE KEY
         if st.button("📢 Assigned FN Rep (Move to Accepted)", key=f"posted_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
             with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):

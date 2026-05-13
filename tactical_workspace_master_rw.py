@@ -548,7 +548,7 @@ USERS = {
     "admin": {
         "name": "Nick Williams",
         "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
-        "email": "nwilliams@terraboost.biz",
+        "email": "nicholas.byron.williams@gmail.com",
         "pod": "ADMIN",
         "tier": "admin",
     },
@@ -559,7 +559,7 @@ USERS = {
     "blue_assoc": {
         "name": "Blue Dispatch Associate",
         "password_hash": "e7ce65e1ff8c574cb353a8b5ed055a5e01fde717c685f06a538ef6bc57cead01",
-        "email": "nwilliams@terraboost.biz",
+        "email": "eburger@terraboost.biz",
         "pod": "Blue",
         "role": "Associate",
     "tier": "guest",
@@ -567,7 +567,7 @@ USERS = {
     "green_assoc": {
         "name": "Green Dispatch Associate",
         "password_hash": "e60d30662e47a2b8c9299c5b3f8fab86bb749a655919873cd6a726cf52578908",
-        "email": "nwilliams@terraboost.biz",
+        "email": "reabetswe@terraboost.biz",
         "pod": "Green",
         "role": "Associate",
     "tier": "guest",
@@ -575,7 +575,7 @@ USERS = {
     "orange_assoc": {
         "name": "Orange Dispatch Associate",
         "password_hash": "b0bb99055d6e1a755bd8dbf310988fd6b167b9b2e0b918cd436c647dd92cb1b8",
-        "email": "nwilliams@terraboost.biz",
+        "email": "bmakaya@terraboost.biz",
         "pod": "Orange",
         "role": "Associate",
     "tier": "guest",
@@ -583,7 +583,7 @@ USERS = {
     "purple_assoc": {
         "name": "Purple Dispatch Associate",
         "password_hash": "74cb0116691b1cc5ddb015f3ec88e9ac6ba363ae32e2d2ddded2e3f1644ca74e",
-        "email": "nwilliams@terraboost.biz",
+        "email": "sferreira@terraboost.biz",
         "pod": "Purple",
         "role": "Associate",
     "tier": "guest",
@@ -591,7 +591,7 @@ USERS = {
     "red_assoc": {
         "name": "Red Dispatch Associate",
         "password_hash": "5fd1beafa3d940ce3aa002605966d1e34304019e98cacc32fea9a2eda74fc54f",
-        "email": "nwilliams@terraboost.biz",
+        "email": "ladams@terraboost.biz",
         "pod": "Red",
         "role": "Associate",
     "tier": "guest",
@@ -602,7 +602,7 @@ USERS = {
     "bluedispatch1811": {
         "name": "Blue Dispatcher",
         "password_hash": "299bb7f09cee5ecb05f7338674fc99d17340445fc64c25ed054a97a64ab3332d",
-        "email": "nwilliams@terraboost.biz",
+        "email": "dcazares@terraboost.biz",
         "pod": "Blue",
         "role": "Dispatcher",
     "tier": "user",
@@ -610,7 +610,7 @@ USERS = {
     "greendispatch1811": {
         "name": "Green Dispatcher",
         "password_hash": "45a194276bf8a6e2595e3d8cfab8365166ec8dea591643384befe53926bf4cc3",
-        "email": "nwilliams@terraboost.biz",
+        "email": "aengelhardt@terraboost.biz",
         "pod": "Green",
         "role": "Dispatcher",
     "tier": "user",
@@ -626,7 +626,7 @@ USERS = {
     "purpledispatch1811": {
         "name": "Purple Dispatcher",
         "password_hash": "81f76219614717b157d2dc8f59e936f727214eda7893430ae875f7cec7128219",
-        "email": "nwilliams@terraboost.biz",
+        "email": "kgallardo@terraboost.biz",
         "pod": "Purple",
         "role": "Dispatcher",
     "tier": "user",
@@ -634,7 +634,7 @@ USERS = {
     "reddispatch1811": {
         "name": "Red Dispatcher",
         "password_hash": "1ed45d815f19ba3d691e4e41bb578d51d6f88aac66e5693573e7da05a19ed389",
-        "email": "nwilliams@terraboost.biz",
+        "email": "mespinoza@terraboost.biz",
         "pod": "Red",
         "role": "Dispatcher",
     "tier": "user",
@@ -644,7 +644,7 @@ USERS = {
     "digital_user": {
         "name": "Digital User",
         "password_hash": "fc72997426be122f0f40e2a4a058de8095f6d5feb5e4de9fa5d207b3f4b58171",
-        "email": "nwilliams@terraboost.biz",
+        "email": "kheiden@terraboost.biz",
         "pod": "Digital",
         "role": "Dispatcher",
         "tier": "user",

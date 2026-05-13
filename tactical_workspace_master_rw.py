@@ -6992,65 +6992,6 @@ if '_auth_user' not in st.session_state:
             height=0,
         )
 
-# --- DISPATCHER EMAIL AUTO-RESTORE (browser localStorage → session_state) ---
-# Independent of the auth system. The "Email" pill in the top-right header lets
-# any signed-in user save their personal email; we mirror it to localStorage so
-# it survives page refreshes and (eventually) outlives the login system being
-# removed. Same URL-param→reload pattern as the stay-signed-in token above:
-#   1. JS reads localStorage on page load. If found and not yet in URL, it
-#      appends ?dispatcher_email=... and reloads.
-#   2. Python sees the URL param, stores it in session_state, strips it from
-#      the URL on the next rerun (handled inline below).
-# The email is then attached to every "Send to IC" payload as dispatcherEmail
-# so the portal CCs the right human on Formspree confirmations.
-if 'dispatcher_email' not in st.session_state:
-    _de_param = st.query_params.get("dispatcher_email")
-    if _de_param:
-        # Light validation — must contain "@" and a "." somewhere after it.
-        _de_clean = str(_de_param).strip()
-        if "@" in _de_clean and "." in _de_clean.split("@", 1)[-1]:
-            st.session_state['dispatcher_email'] = _de_clean
-        # Strip the param from the URL so it doesn't linger in shareable links.
-        try: del st.query_params["dispatcher_email"]
-        except Exception: pass
-    else:
-        # No URL param — ask the browser if it has a saved email.
-        # Idempotency guard: set a flag on the PARENT window so the redirect
-        # only fires once per page load. Without this, Python's st.query_params
-        # cleanup race-loops against the JS re-injecting on every rerun.
-        _components.html(
-            """
-            <script>
-                try {
-                    var topwin = window.parent;
-                    if (!topwin._dcc_email_restore_attempted) {
-                        topwin._dcc_email_restore_attempted = true;
-                        var e = localStorage.getItem('dcc_dispatcher_email');
-                        var here = topwin.location;
-                        if (e && !new URLSearchParams(here.search).has('dispatcher_email')) {
-                            var sep = here.search ? '&' : '?';
-                            here.replace(here.pathname + here.search + sep + 'dispatcher_email=' + encodeURIComponent(e) + here.hash);
-                        }
-                    }
-                } catch (err) {}
-            </script>
-            """,
-            height=0,
-        )
-
-# --- EMAIL SETTINGS URL HANDLER ---
-# Click on the email pill anchor in the header navigates with ?email_settings=1.
-# We catch it AFTER auth-restore (above) so the user is still signed in, then
-# strip the param + flip the dialog flag + rerun. The dialog renders on next pass.
-try:
-    if st.query_params.get("email_settings") == "1":
-        st.session_state['_show_email_settings'] = True
-        try: del st.query_params["email_settings"]
-        except Exception: pass
-        st.rerun()
-except Exception:
-    pass
-
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
 # their record sits in st.session_state['_auth_user'] for the lifetime of the
@@ -7118,108 +7059,30 @@ _u = st.session_state.get('_auth_user', {})
 _pod_label = _u.get('pod', '?')
 _role_label = _u.get('role')
 _signin_line = f"{_u.get('name','?')} · {_pod_label}" + (f" {_role_label}" if _role_label else "")
+_user_email = str(_u.get('email', '') or '').strip()
 
-# The dispatcher's saved email — shown as a small label so they know what's
-# attached to outgoing routes. Empty string when nothing's configured yet.
-_de_saved = str(st.session_state.get('dispatcher_email', '')).strip()
-_de_pill_label = _de_saved if _de_saved else "Set email"
-_de_pill_color = "#0f172a" if _de_saved else "#dc2626"
-
-# Header markdown — pinned info + email pill + Sign out, all in one fixed-position
-# block. Email pill is a styled <a> with onclick that triggers a hidden Streamlit
-# button (rendered below). NO href, so clicking does NOT navigate or reload.
-# Sign out remains an anchor since it intentionally drops session state.
+# Header markdown — pinned info + Sign out pill. The dispatcher email used for
+# IC accept/decline notifications now comes from each user's login record
+# (USERS dict), so no manual entry / pill is needed.
 _pill_base = ("display: inline-block; padding: 3px 10px; background: #ffffff;"
               " border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none;"
               " font-size: 11px; font-weight: 700; line-height: 1.4; cursor: pointer;")
+_email_line_html = (f'<div style="font-size: 11px; color: #64748b; font-weight: 600; margin: 0 0 4px 0;">{_user_email}</div>'
+                    if _user_email else '')
 st.markdown(
     f"""
     <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
                 font-family: 'Inter', sans-serif; line-height: 1.2;">
         <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
-        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 4px 0;">{_signin_line}</div>
+        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 1px 0;">{_signin_line}</div>
+        {_email_line_html}
         <span style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
-          <a href="javascript:void(0)" id="dcc-email-pill" data-action="email-settings"
-             style="{_pill_base} color: {_de_pill_color};"
-             title="Email used for route confirmations">✉️ {_de_pill_label}</a>
           <a href="?logout=1" target="_self" style="{_pill_base} color: #475569;">Sign out</a>
         </span>
     </div>
-    <style>
-      /* Hide the real Streamlit button — it exists only to receive programmatic clicks
-         from the visible anchor above. */
-      div.st-key-_email_pill_hidden {{ display: none !important; }}
-    </style>
     """,
     unsafe_allow_html=True,
 )
-
-# Hidden Streamlit button — clicked programmatically by the anchor's onclick handler.
-# When clicked, sets the dialog flag and reruns (NO page reload).
-if st.button("✉️ Set email (hidden)", key="_email_pill_hidden"):
-    st.session_state['_show_email_settings'] = True
-    st.rerun()
-
-# --- EMAIL SETTINGS DIALOG ---
-# Triggered by clicking the ✉️ pill in the header (which sets ?email_settings=1).
-# Lets the user save / update / clear their personal email. We persist to BOTH
-# session_state (immediate effect this session) AND localStorage (survives page
-# refreshes and tab reopens). Outgoing routes attach this email to the GAS
-# payload as dispatcherEmail; the portal then CCs it on the Formspree
-# confirmation. If empty, no CC is added (Nick still gets the primary email).
-# Dialog is triggered by a session_state flag (set by the bridge button above)
-# instead of a URL query param. Avoids the full-page reload that the previous
-# ?email_settings=1 anchor caused — that reload was wiping st.session_state
-# (including _auth_user) and bouncing users who hadn't enabled "Stay signed in"
-# back to the login screen.
-if st.session_state.get('_show_email_settings'):
-    @st.dialog("📧 Your Confirmation Email")
-    def _email_settings_dialog():
-        st.write(
-            "When you accept or decline a route, the IC's response email is sent to "
-            "Nick — but it can also CC **you** so you've got the same paper trail. "
-            "Set the email address you want CC'd here. Saved on this device only."
-        )
-        _current = str(st.session_state.get('dispatcher_email', '')).strip()
-        _new_val = st.text_input(
-            "Your email address",
-            value=_current,
-            key="_email_settings_input",
-            placeholder="firstname@terraboost.biz",
-        )
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            if st.button("💾 Save", type="primary", use_container_width=True, key="_email_settings_save"):
-                _v = str(_new_val or "").strip()
-                if not _v:
-                    st.error("Email can't be empty. Use Clear if you want to remove it.")
-                elif "@" not in _v or "." not in _v.split("@", 1)[-1]:
-                    st.error("That doesn't look like a valid email address.")
-                else:
-                    st.session_state['dispatcher_email'] = _v
-                    # Persist to localStorage. Single-quote the value to keep the
-                    # JS literal simple — emails don't contain quotes.
-                    _safe_v = _v.replace("'", "")
-                    _components.html(
-                        f"<script>try{{localStorage.setItem('dcc_dispatcher_email','{_safe_v}');}}catch(e){{}}</script>",
-                        height=0,
-                    )
-                    st.session_state['_show_email_settings'] = False
-                    st.rerun()
-        with c2:
-            if st.button("🗑️ Clear", use_container_width=True, key="_email_settings_clear"):
-                st.session_state.pop('dispatcher_email', None)
-                _components.html(
-                    "<script>try{localStorage.removeItem('dcc_dispatcher_email');}catch(e){}</script>",
-                    height=0,
-                )
-                st.session_state['_show_email_settings'] = False
-                st.rerun()
-        with c3:
-            if st.button("Cancel", use_container_width=True, key="_email_settings_cancel"):
-                st.session_state['_show_email_settings'] = False
-                st.rerun()
-    _email_settings_dialog()
 
 st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 

@@ -4873,8 +4873,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     # CC'ing Nick on his own primary email — Formspree dedupes those
                     # anyway, which is why nobody else was getting a copy.
                     "dispatcherEmail": str(
-                        st.session_state.get('dispatcher_email')
-                        or st.session_state.get('_auth_user', {}).get('email', '')
+                        st.session_state.get('_auth_user', {}).get('email', '')
                         or ''
                     ).strip(),
                     "dispatcherName": str(st.session_state.get('_auth_user', {}).get('name', '') or '').strip(),

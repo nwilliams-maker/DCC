@@ -3829,7 +3829,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                     "boosted_tag": _boosted_tag,
                     "inst_count": sum(1 for x in g_data if "install" in str(x.get('task_type', '')).lower()),
                     "remov_count": sum(1 for x in g_data if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"]),
-                    "wo": anc_wo
+                    "wo": anc_wo,
+                    "_default_ic_loc": closest_ic_loc
                 })
                 pool = rem
 
@@ -3843,6 +3844,31 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 'skipped_out_of_pod_states': _skipped_out_of_pod_states,
             }
         st.session_state[f"clusters_{pod_name}"] = clusters
+        # 🚀 PRE-WARM ROUTE GMAPS — render_dispatch calls get_gmaps(default_ic_loc,
+        # stops) for every Ready card on first render, which is what makes the
+        # Dispatch (left) column slow to populate. Each cluster now carries its
+        # default IC location; warm the shared _gmaps_route_cache for those exact
+        # keys off the main thread so render_dispatch hits a warm cache instead of
+        # making ~50 live Mapbox calls. Pure I/O + cache reads, wrapped in try/except
+        # — degrades gracefully: if it fails, render_dispatch just computes live.
+        try:
+            _warm_pairs = []
+            for _wc in clusters:
+                _wloc = _wc.get('_default_ic_loc')
+                if not _wloc:
+                    continue
+                _wstops = tuple(dict.fromkeys(_t['full'] for _t in _wc.get('data', []) if _t.get('full')))
+                if _wstops:
+                    _warm_pairs.append((_wloc, _wstops))
+            def _warm_route_gmaps(_pairs):
+                for _wloc, _wstops in _pairs:
+                    try:
+                        get_gmaps(_wloc, _wstops)
+                    except Exception as _we:
+                        _log_err("warm_route_gmaps", _we)
+            threading.Thread(target=_warm_route_gmaps, args=(_warm_pairs,), daemon=True).start()
+        except Exception as _wt_e:
+            _log_err("warm_route_gmaps/setup", _wt_e)
         # Re-apply any bundles the dispatcher previously confirmed for this pod, so a
         # full re-init via Initialize Data doesn\'t silently undo them.
         _replay_bundles(pod_name)

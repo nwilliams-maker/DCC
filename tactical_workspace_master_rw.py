@@ -1856,6 +1856,31 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
+@st.fragment(run_every=10)
+def render_sync_age():
+    """🌟 Opt #9 — small 'Updated Xs ago' caption that refreshes every 10s
+    without triggering a full page rerun. Reads st.session_state['_last_sync_ts']
+    which is stamped by auto_sync_checker (every 60s) and by the init/sync
+    callbacks. Shows nothing if the data hasn't been pulled yet."""
+    last_ts = st.session_state.get('_last_sync_ts')
+    if not last_ts:
+        return
+    try:
+        elapsed = (datetime.now() - last_ts).total_seconds()
+    except Exception:
+        return
+    if elapsed < 60:
+        age = f"{int(elapsed)}s ago"
+    elif elapsed < 3600:
+        age = f"{int(elapsed/60)}m ago"
+    else:
+        age = f"{int(elapsed/3600)}h ago"
+    st.markdown(
+        f"<div style='font-size:10px; color:#94a3b8; text-align:center; margin-top:4px; font-style:italic;'>Updated {age}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 @st.fragment(run_every=60)
 def auto_sync_checker(pod_name):
     """Polls every 60s. Sync_version short-circuit means the heavy sheet fetch only runs when something ACTUALLY changed — between events, polls are tiny version probes. Uses GAS push-style change events to patch sent_db in-memory — no sheet fetch when accept/decline/archive happens. Falls back to full fetch only when the change buffer is empty or stale. Refreshes the sheet cache and triggers a rerun whenever
@@ -1866,6 +1891,10 @@ def auto_sync_checker(pod_name):
     pod_clusters = st.session_state.get(f"clusters_{pod_name}", [])
     if not pod_clusters:
         return
+    # 🌟 Opt #9 — stamp last-sync ts every poll. The 'Updated Xs ago' pill in
+    # the pod header reads this. Polls are 60s apart, so worst-case staleness
+    # the dispatcher sees is ~60s.
+    st.session_state['_last_sync_ts'] = datetime.now()
 
     pod_tid_set = set()
     for c in pod_clusters:
@@ -3050,7 +3079,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div></div>""", unsafe_allow_html=True)
     
     # 🌍 SHARED ONFLEET PULL — see _fetch_onfleet_open_tasks_cached() near the
     # top of this file. If a Dispatcher already pulled within the last 60s, this
@@ -3084,7 +3113,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div></div>""", unsafe_allow_html=True)
     
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
@@ -3246,7 +3275,7 @@ def process_digital_pool(master_bar=None):
 .dcc-pill{{display:inline-block;font-size:13px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:20px;padding:4px 14px;margin-top:12px;}}</style>
 <div class='dcc-card'><div class='dcc-spin'></div>
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
-<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div></div>""", unsafe_allow_html=True)
+<div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div></div>""", unsafe_allow_html=True)
     
     # 3. Route ONLY the Digital Tasks
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -3811,7 +3840,10 @@ def get_digi_badges(cluster_data):
     if off_n > 0: parts.append(f"📵 {off_n} Offline")
     if ins_n > 0: parts.append(f"🔧 {ins_n} Ins/Rem")
     if svc_n > 0: parts.append(f"⚙️ {svc_n} Service")
-    return " · ".join(parts)
+    # 🌟 Trailing '|' separates the badge block from the city/state field in
+    # the caller's f-string (`{badges} {city}`). Empty when no digital tasks
+    # so a non-digital cluster's title doesn't get a stray pipe.
+    return (" · ".join(parts) + " |") if parts else ""
 
 
 # 🔗 Bundled tag for route-card expander headers. Dim non-bold gray, far-right of the
@@ -5765,11 +5797,15 @@ def run_pod_tab(pod_name):
             # STATE 2: Loaded — smart sync for new tasks only
             init_clicked = False
             sync_clicked = st.button("🔄 Check New Tasks", key=f"reopt_{pod_name}", use_container_width=True)
+            # 🌟 Opt #9 — last-sync indicator below the Sync button.
+            render_sync_age()
         st.markdown("</div>", unsafe_allow_html=True)
 
     # 🌟 Check New Tasks: same full-width overlay as Initialize so the dispatcher
     # sees the spin-card + timer instead of a bare progress bar while smart_sync_pod runs.
     if is_initialized and sync_clicked:
+        # 🌟 Opt #9 — manual Check New Tasks gets immediate ts feedback.
+        st.session_state['_last_sync_ts'] = datetime.now()
         import time as _time
         _start = _time.time()
 
@@ -7762,7 +7798,7 @@ with tabs[6]:
                     <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
                     <p style='font-size:13px;color:#64748b;margin:0 0 8px 0;'>Fetching Digital tasks from Onfleet...</p>
                     <div class='dcc-pill'>⏱ {m}:{s:02d}</div>
-                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: 2–4 min for full pod fleet (Red Pod is heaviest).</div>
+                <div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div>
                 </div>
             """, unsafe_allow_html=True)
 

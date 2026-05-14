@@ -1,6 +1,5 @@
 streamlit==1.39.0
 requests
 pandas
-folium==0.17.0
-streamlit-folium==0.22.0
-streamlit-searchbox==0.1.23
+folium
+streamlit-folium

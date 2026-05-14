@@ -1777,48 +1777,11 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             _log_err("move_to_dispatch/state-check", e)
             outstanding_ids = list(all_task_ids)  # fallback: unassign everything
 
-    # 3. Onfleet unassign — SYNCHRONOUS parallel PUTs on the main thread. The daemon-
-    # thread version was failing silently (Streamlit thread context issues, no Railway
-    # log output), so the worker kept seeing routes after revoke. This runs the PUTs
-    # inline; toast at the bottom of this function reflects the real result.
-    #
-    # 🚀 SPEED FIX — only fire the PUTs when check_completed=True (Accepted/
-    # Finalized routes whose tasks are actively assigned to a worker). For
-    # Sent/Declined/FN re-routes (check_completed=False) the tasks are still
-    # Onfleet state=0 — never accepted, never assigned — so these PUTs are
-    # pure no-ops that just block the UI for 1-4s of wasted HTTP. Skipping
-    # them makes the route move back to Dispatch near-instantly. (See this
-    # function's docstring: "Sent/Declined tasks are still in Onfleet state=0".)
-    if outstanding_ids and check_completed:
-        try:
-            _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
-            _put_payload = json.dumps({"worker": None, "metadata": []})
-            def _do_put(tid):
-                try:
-                    r = requests.put(f"https://onfleet.com/api/v2/tasks/{tid}", headers=_put_auth, data=_put_payload, timeout=8)
-                    if r.status_code != 200:
-                        _log_err(f"move_to_dispatch/unassign task={tid}", f"HTTP {r.status_code}: {r.text[:200]}")
-                    return (tid, r.status_code)
-                except Exception as e:
-                    _log_err(f"move_to_dispatch/unassign task={tid}", e)
-                    return (tid, -1)
-            with ThreadPoolExecutor(max_workers=min(10, len(outstanding_ids))) as _ex:
-                _put_results = list(_ex.map(_do_put, outstanding_ids))
-        except Exception as e:
-            _log_err("move_to_dispatch/unassign-outer", e)
-
-    # 4. Sheet archival — run inline. The daemon-thread version was dropping
-    # silently under Streamlit (same root cause as the Onfleet PUT issue
-    # documented above), leaving rows un-archived and routes stuck in FN.
-    try:
-        background_sheet_move(cluster_hash, cluster_data, None, action_label, ic_name)
-    except Exception as _bsm_e:
-        _log_err("move_to_dispatch/sheet_move_sync", _bsm_e)
-
-    # 5. 🛡️ Set reverted flag so UI ignores stale Sheet record immediately
+    # 🚀 INSTANT UI MOVE — set the reverted flag + clear per-route state +
+    # record the action FIRST, synchronously, before any network I/O. The
+    # bucket-sorting logic keys on reverted_{hash}, so the route leaves Sent on
+    # the very next rerun: the button-press feels instant.
     st.session_state[f"reverted_{cluster_hash}"] = True
-
-    # 6. 🧠 INSTANT RESET: Clear all state for this route
     st.session_state.pop(f"route_state_{cluster_hash}", None)
     st.session_state.pop(f"sent_ts_{cluster_hash}", None)
     st.session_state.pop(f"contractor_{cluster_hash}", None)
@@ -1840,7 +1803,50 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     except Exception as _e:
         _log_err('move_to_dispatch/action-record', _e)
 
-    # 6. Toast — completion-aware variant only when check_completed=True.
+    # 🚀 BACKGROUND RECONCILE — the slow part (Onfleet unassign PUTs + the GAS
+    # archiveRoute POST, both multi-second HTTP) runs off the main thread so the
+    # button-press returns instantly. The reverted_ flag above already moved the
+    # route in the UI; this thread only reconciles Onfleet + the sheet. It touches
+    # nothing but `requests` and `_log_err` (a print) — no Streamlit APIs — so it
+    # has no ScriptRunContext dependency and completes reliably while the process
+    # stays alive. (This is what makes "Sheet update + Onfleet scrub run in
+    # background" in the docstring actually true again.)
+    def _bg_reconcile():
+        # Onfleet unassign — only for Accepted/Finalized re-routes (check_completed=
+        # True) whose tasks are actively assigned. Sent/Declined/FN tasks are still
+        # Onfleet state=0, so their PUTs would be pure no-ops — skip them.
+        if outstanding_ids and check_completed:
+            try:
+                _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
+                _put_payload = json.dumps({"worker": None, "metadata": []})
+                def _do_put(tid):
+                    try:
+                        r = requests.put(f"https://onfleet.com/api/v2/tasks/{tid}", headers=_put_auth, data=_put_payload, timeout=8)
+                        if r.status_code != 200:
+                            _log_err(f"move_to_dispatch/unassign task={tid}", f"HTTP {r.status_code}: {r.text[:200]}")
+                        return (tid, r.status_code)
+                    except Exception as e:
+                        _log_err(f"move_to_dispatch/unassign task={tid}", e)
+                        return (tid, -1)
+                with ThreadPoolExecutor(max_workers=min(10, len(outstanding_ids))) as _ex:
+                    list(_ex.map(_do_put, outstanding_ids))
+            except Exception as e:
+                _log_err("move_to_dispatch/unassign-outer", e)
+        # Sheet archival — the GAS archiveRoute POST (multi-second).
+        try:
+            background_sheet_move(cluster_hash, cluster_data, None, action_label, ic_name)
+        except Exception as _bsm_e:
+            _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
+
+    try:
+        threading.Thread(target=_bg_reconcile, daemon=True).start()
+    except Exception as _t_e:
+        # If the thread can't start, fall back to inline so the sheet + Onfleet
+        # still reconcile (slower, but correct — never leaves a route un-archived).
+        _log_err("move_to_dispatch/bg-thread-start", _t_e)
+        _bg_reconcile()
+
+    # Toast — completion-aware variant only when check_completed=True.
     if check_completed:
         _city = (cluster_data.get('city') if cluster_data else '') or ''
         _state = (cluster_data.get('state') if cluster_data else '') or ''

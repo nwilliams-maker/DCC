@@ -876,14 +876,29 @@ st.components.v1.html("""
     function checkForSessionInfoModal() {
         var doc = window.parent.document;
         var modals = doc.querySelectorAll('[role="dialog"], [data-testid="stException"]');
+        // Magic strings — every Streamlit framework race / stale-chunk-after-deploy
+        // surfaces as a modal containing one of these. They all want the same fix:
+        // a hard refresh to get the new JS chunks + a fresh WebSocket session.
+        var TRIGGERS = [
+            'sessioninfo',
+            'bad message format',
+            'failed to process a websocket message',
+            'axioserror',
+            'request failed with status code 4',
+            'could not find fragment id',
+            'bad setin index',
+            'connection error'
+        ];
         for (var i = 0; i < modals.length; i++) {
             var txt = (modals[i].innerText || '').toLowerCase();
-            if (txt.indexOf('sessioninfo') !== -1 || txt.indexOf('bad message format') !== -1) {
-                if (shouldRefresh()) {
-                    markRefreshed();
-                    console.log('[dcc] SessionInfo modal detected → auto-refresh');
-                    window.parent.location.reload();
-                    return true;
+            for (var j = 0; j < TRIGGERS.length; j++) {
+                if (txt.indexOf(TRIGGERS[j]) !== -1) {
+                    if (shouldRefresh()) {
+                        markRefreshed();
+                        console.log('[dcc] Streamlit error modal detected (' + TRIGGERS[j] + ') -> auto-refresh');
+                        window.parent.location.reload();
+                        return true;
+                    }
                 }
             }
         }

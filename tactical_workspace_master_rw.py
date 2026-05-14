@@ -3374,6 +3374,17 @@ def process_digital_pool(master_bar=None):
     prog_bar.empty()
 
 # --- CORE LOGIC ---
+@st.cache_resource(show_spinner=False)
+def _pod_cluster_store():
+    """Process-wide shared cache of computed pod clusters \u2014 one entry per pod,
+    keyed internally by a content signature. Lets the FIRST dispatcher to
+    initialize a pod absorb the heavy classify+route cost; every other session
+    within the same data window deepcopies the result instead of re-routing
+    800+ tasks. Main relief for GIL contention when all 5 dispatchers
+    initialize at once. See the SHARED CLUSTER CACHE block in process_pod()."""
+    return {}
+
+
 def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
     config = POD_CONFIGS[pod_name]
     
@@ -3448,344 +3459,383 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state.sent_db = fresh_sent_db
         st.session_state['archived_wos'] = _archived_wos
 
-        pool = []
-        _skipped_assigned = 0
-        # 📊 ATTRITION COUNTERS: track tasks dropped at each filter gate
-        _skipped_no_state_cf = 0
-        _skipped_wrong_team = 0
-        _skipped_out_of_pod_states = 0
-        for t in all_tasks:
-            # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
-            # "Start at driver address" / "End at driver's address" tasks for native
-            # Route Plans, bound to a contractor's home address. Real kiosk tasks
-            # always carry a `state` custom field; the pseudo-tasks don't. Require it
-            # so the pseudo-tasks never land in the dispatchable pool.
-            _has_state_cf = any(
-                (str(_f.get('name', '')).strip().lower() == 'state'
-                 or str(_f.get('key', '')).strip().lower() == 'state')
-                and str(_f.get('value', '')).strip()
-                for _f in (t.get('customFields') or [])
-            )
-            if not _has_state_cf:
-                _skipped_no_state_cf += 1
-                continue
-
-            container = t.get('container', {})
-            c_type = str(container.get('type', '')).upper()
-
-            # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
-            # already-assigned tasks through (container=WORKER or worker field set on task).
-            # Skip them explicitly so the supercard count + cluster pool only reflects
-            # tasks actually available to dispatch. Without this, dispatchers can see
-            # phantom availability and accidentally re-dispatch a task to a second IC.
-            if c_type == 'WORKER' or t.get('worker'):
-                _skipped_assigned += 1
-                continue
-
-            if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
-                _skipped_wrong_team += 1
-                continue
-
-            addr = t.get('destination', {}).get('address', {})
-            stt = normalize_state(addr.get('state', ''))
-            is_esc = (c_type == 'TEAM' and container.get('team') in esc_team_ids)
-            
-            # --- 🔍 STRICT CLASSIFICATION ENGINE (v5) ---
-            native_details = str(t.get('taskDetails', '')).strip()
-            custom_fields = t.get('customFields') or []
-            
-            # 1. EXTRACT OFFICIAL CUSTOM FIELDS
-            custom_task_type = ""
-            custom_boosted = ""
-            tt_val = native_details # Fallback UI display
-            venue_name = ""
-            venue_id = ""
-            kiosk_id = ""
-            sio = ""
-            client_company = ""
-            campaign_name = ""
-            location_in_venue = ""
-            customer_type = ""
-            # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
-            # (free-text). See extract_art_file() up top for the heuristic.
-            art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
-            
-            for f in custom_fields:
-                f_name = str(f.get('name', '')).strip().lower()
-                f_key = str(f.get('key', '')).strip().lower()
-                f_val = str(f.get('value', '')).strip()
-                f_val_lower = f_val.lower()
-                
-                # Capture Official 'Task Type'
-                if f_name in ['task type', 'tasktype'] or f_key in ['tasktype', 'task_type']:
-                    custom_task_type = f_val_lower
-                    tt_val = f_val # Set the UI badge text
-                    
-                # Capture Official 'Boosted Standard'
-                if f_name in ['boosted standard', 'boostedstandard'] or f_key in ['boostedstandard', 'boosted_standard']:
-                    custom_boosted = f_val_lower
-                    
-                # Capture Escalation (Adds the ⭐)
-                if 'escalation' in f_name or 'escalation' in f_key:
-                    if f_val_lower in ['1', '1.0', 'true', 'yes'] or 'escalation' in f_val_lower:
-                        is_esc = True
-
-                # 🌟 Capture Field Nation metadata fields
-                if f_name in ['venuename', 'venue name'] or f_key in ['venuename', 'venue_name']:
-                    venue_name = f_val
-                if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
-                    venue_id = f_val
-                # 🔢 SIO — see site-1 comment.
-                if f_name == 'sio' or f_key == 'sio':
-                    sio = f_val
-                if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
-                    kiosk_id = f_val
-                if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
-                    client_company = f_val
-                if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
-                    location_in_venue = f_val
-                if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
-                    campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
-                # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
-                if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
-                    customer_type = f_val
-
-            # 🌟 Campaign Name always wins over Client Company for FN Customer Name
-            client_company = campaign_name or client_company
-            # 2. CHECK REGULAR (STATIC) EXEMPTIONS FIRST
-            # Combines native and custom type to ensure "Magnet" or "Photo" are never missed
-            search_string = f"{native_details} {custom_task_type}".lower()
-            REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
-            is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
-            
-            # 3. APPLY DIGITAL RULES
-            # Locked strictly to the triggers you defined
-            DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
-            is_digital_task = False
-
-            if not is_exempt:
-                # Rule A: Official Task Type matches whitelist
-                if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
-                    is_digital_task = True
-                # 🌟 Rule B: Boosted Standard contains the word 'digital' (matches 'Premium_Digital')
-                elif "digital" in custom_boosted:
-                    is_digital_task = True
-
-            # --- 3. ASSIGN STATUS & POOL ---
-            t_status = 'ready'
-            t_wo = 'none'
-            if t['id'] in fresh_sent_db:
-                t_status = fresh_sent_db[t['id']].get('status', 'ready').lower()
-                t_wo = fresh_sent_db[t['id']].get('wo', 'none')
-            
-            if stt not in config['states']:
-                _skipped_out_of_pod_states += 1
-                continue
-            if stt in config['states']:
-                _remov_keywords = ["kiosk removal", "remove kiosk"]
-                _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
-                _is_removal = _is_cvs_team and any(kw in f"{native_details} {custom_task_type}".lower() for kw in _remov_keywords)
-                pool.append({
-                    "id": t['id'], 
-                    "city": addr.get('city', 'Unknown'), 
-                    "state": stt,
-                    "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
-                    "zip": addr.get('postalCode', ''),
-                    "lat": t['destination']['location'][1], 
-                    "lon": t['destination']['location'][0],
-                    "escalated": is_esc, 
-                    "task_type": tt_val,
-                    "is_digital": is_digital_task,
-                    "is_removal": _is_removal,
-                    "boosted_standard": custom_boosted,
-                    "db_status": t_status, 
-                    "wo": t_wo,
-                    "venue_name": venue_name,
-                    "venue_id": venue_id,
-                    "kiosk_id": kiosk_id,
-                    "sio": sio,
-                    "client_company": client_company,
-                    "location_in_venue": location_in_venue,
-                    "art_file": art_file,
-                    "customer_type": customer_type,
-                })
-                
-        clusters = []
-        total_pool = len(pool)
-        ic_df = st.session_state.get('ic_df', pd.DataFrame())
-        
-        # 🌟 CRITICAL FIX: Safe extraction using standardized headers
-        lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
-        lng_col = next((col for col in ic_df.columns if 'lng' in str(col).lower()), 'lng')
-        
-        if lat_col in ic_df.columns and lng_col in ic_df.columns:
-            v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
+        # \U0001f680 SHARED CLUSTER CACHE \u2014 the classify+route block below produces an
+        # identical result for every dispatcher viewing the same pod within the
+        # same data window. Compute it once; other sessions deepcopy the result
+        # instead of re-routing 800+ tasks. This is the main relief for GIL
+        # contention when all 5 dispatchers initialize at once. On ANY miss it
+        # falls through to the original code path (the `else`) unchanged \u2014 so a
+        # cache bug can only cost the speedup, never correctness.
+        import copy as _copy
+        _ic_df_peek = st.session_state.get('ic_df', pd.DataFrame())
+        _clu_sig = (
+            pod_name,
+            len(all_tasks),
+            hash(frozenset(_t.get('id', '') for _t in all_tasks)),
+            len(fresh_sent_db),
+            hash(frozenset(
+                (_k, str(_v.get('status', '')), str(_v.get('wo', '')))
+                for _k, _v in fresh_sent_db.items()
+            )),
+            len(_ic_df_peek),
+        )
+        _clu_store = _pod_cluster_store()
+        _clu_hit = _clu_store.get(pod_name)
+        if _clu_hit is not None and _clu_hit.get('sig') == _clu_sig:
+            clusters                   = _copy.deepcopy(_clu_hit['clusters'])
+            total_pool                 = _clu_hit['total_pool']
+            _skipped_no_state_cf       = _clu_hit['skipped_no_state_cf']
+            _skipped_assigned          = _clu_hit['skipped_assigned']
+            _skipped_wrong_team        = _clu_hit['skipped_wrong_team']
+            _skipped_out_of_pod_states = _clu_hit['skipped_out_of_pod_states']
         else:
-            v_ics_base = pd.DataFrame()
+            pool = []
+            _skipped_assigned = 0
+            # 📊 ATTRITION COUNTERS: track tasks dropped at each filter gate
+            _skipped_no_state_cf = 0
+            _skipped_wrong_team = 0
+            _skipped_out_of_pod_states = 0
+            for t in all_tasks:
+                # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
+                # "Start at driver address" / "End at driver's address" tasks for native
+                # Route Plans, bound to a contractor's home address. Real kiosk tasks
+                # always carry a `state` custom field; the pseudo-tasks don't. Require it
+                # so the pseudo-tasks never land in the dispatchable pool.
+                _has_state_cf = any(
+                    (str(_f.get('name', '')).strip().lower() == 'state'
+                     or str(_f.get('key', '')).strip().lower() == 'state')
+                    and str(_f.get('value', '')).strip()
+                    for _f in (t.get('customFields') or [])
+                )
+                if not _has_state_cf:
+                    _skipped_no_state_cf += 1
+                    continue
 
-        while pool:
-            # Routing progress calculation
-            rel_prog = 0.4 + (0.6 * (1 - (len(pool) / total_pool if total_pool > 0 else 1)))
-            update_prog(rel_prog, f"🗺️ Routing {len(pool)} remaining tasks...")
+                container = t.get('container', {})
+                c_type = str(container.get('type', '')).upper()
+
+                # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
+                # already-assigned tasks through (container=WORKER or worker field set on task).
+                # Skip them explicitly so the supercard count + cluster pool only reflects
+                # tasks actually available to dispatch. Without this, dispatchers can see
+                # phantom availability and accidentally re-dispatch a task to a second IC.
+                if c_type == 'WORKER' or t.get('worker'):
+                    _skipped_assigned += 1
+                    continue
+
+                if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
+                    _skipped_wrong_team += 1
+                    continue
+
+                addr = t.get('destination', {}).get('address', {})
+                stt = normalize_state(addr.get('state', ''))
+                is_esc = (c_type == 'TEAM' and container.get('team') in esc_team_ids)
             
-            anc = pool.pop(0)
+                # --- 🔍 STRICT CLASSIFICATION ENGINE (v5) ---
+                native_details = str(t.get('taskDetails', '')).strip()
+                custom_fields = t.get('customFields') or []
             
-            # --- NEW: Strict Digital Separation & Dynamic Radius ---
-            anc_tt = str(anc.get('task_type', '')).lower()
-            anc_is_digital = anc.get('is_digital', False)
-            anc_is_removal = anc.get('is_removal', False)
-            anc_status = anc.get('db_status', 'ready')
-            anc_wo = anc.get('wo', 'none')
+                # 1. EXTRACT OFFICIAL CUSTOM FIELDS
+                custom_task_type = ""
+                custom_boosted = ""
+                tt_val = native_details # Fallback UI display
+                venue_name = ""
+                venue_id = ""
+                kiosk_id = ""
+                sio = ""
+                client_company = ""
+                campaign_name = ""
+                location_in_venue = ""
+                customer_type = ""
+                # 🎨 Pull art file token(s) from the OnFleet Task Details / notes field
+                # (free-text). See extract_art_file() up top for the heuristic.
+                art_file = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
             
-            # Set radius strictly based on type
-            route_radius = 25 if anc_is_digital else 35
-            
-            candidates = []; rem = []
-            for t in pool:
-                t_tt = str(t.get('task_type', '')).lower()
-                t_is_digital = t.get('is_digital', False)
-                t_is_removal = t.get('is_removal', False)
-                t_status = t.get('db_status', 'ready')
-                t_wo = t.get('wo', 'none')
+                for f in custom_fields:
+                    f_name = str(f.get('name', '')).strip().lower()
+                    f_key = str(f.get('key', '')).strip().lower()
+                    f_val = str(f.get('value', '')).strip()
+                    f_val_lower = f_val.lower()
                 
-                # Rule 1: Digital, Removal, and Standard never mix
-                if anc_is_digital == t_is_digital and anc_is_removal == t_is_removal:
+                    # Capture Official 'Task Type'
+                    if f_name in ['task type', 'tasktype'] or f_key in ['tasktype', 'task_type']:
+                        custom_task_type = f_val_lower
+                        tt_val = f_val # Set the UI badge text
                     
-                    # Rule 2: Sent and Accepted are FROZEN
-                    # 🌟 FIX 1: Add 'field_nation' so these routes stay grouped together!
-                    if anc_status in ['sent', 'accepted', 'field_nation']:
-                        # Bypasses distance! ONLY groups if the Work Order matches perfectly.
-                        if t_status == anc_status and t_wo == anc_wo:
-                            candidates.append((0, t)) 
-                        else:
-                            rem.append(t)
-                            
-                    # Rule 3: Ready and Declined are LIQUID (They can mix!)
-                    elif anc_status in ['ready', 'declined']:
-                        if t_status in ['ready', 'declined']:
-                            d = haversine(anc['lat'], anc['lon'], t['lat'], t['lon'])
-                            if d <= route_radius: 
-                                candidates.append((d, t))
-                            else: 
+                    # Capture Official 'Boosted Standard'
+                    if f_name in ['boosted standard', 'boostedstandard'] or f_key in ['boostedstandard', 'boosted_standard']:
+                        custom_boosted = f_val_lower
+                    
+                    # Capture Escalation (Adds the ⭐)
+                    if 'escalation' in f_name or 'escalation' in f_key:
+                        if f_val_lower in ['1', '1.0', 'true', 'yes'] or 'escalation' in f_val_lower:
+                            is_esc = True
+
+                    # 🌟 Capture Field Nation metadata fields
+                    if f_name in ['venuename', 'venue name'] or f_key in ['venuename', 'venue_name']:
+                        venue_name = f_val
+                    if f_name in ['venueid', 'venue id'] or f_key in ['venueid', 'venue_id']:
+                        venue_id = f_val
+                    # 🔢 SIO — see site-1 comment.
+                    if f_name == 'sio' or f_key == 'sio':
+                        sio = f_val
+                    if f_name in ['kioskid', 'kiosk id', 'kiosk_id'] or f_key in ['kioskid', 'kiosk_id']:
+                        kiosk_id = f_val
+                    if f_name in ['clientcompany', 'client company'] or f_key in ['clientcompany', 'client_company']:
+                        client_company = f_val
+                    if f_name in ['locationinvenue', 'location in venue'] or f_key in ['locationinvenue', 'location_in_venue']:
+                        location_in_venue = f_val
+                    if f_name in ['campaignname', 'campaign name'] or f_key in ['campaignname', 'campaign_name']:
+                        campaign_name = f_val  # 🌟 Captured separately so Client Company can't overwrite it
+                    # 🌟 Customer Type — drives National vs Regional/Local bucketing on the packing slip.
+                    if f_name in ['customer type', 'customertype'] or f_key in ['customertype', 'customer_type']:
+                        customer_type = f_val
+
+                # 🌟 Campaign Name always wins over Client Company for FN Customer Name
+                client_company = campaign_name or client_company
+                # 2. CHECK REGULAR (STATIC) EXEMPTIONS FIRST
+                # Combines native and custom type to ensure "Magnet" or "Photo" are never missed
+                search_string = f"{native_details} {custom_task_type}".lower()
+                REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
+                is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
+            
+                # 3. APPLY DIGITAL RULES
+                # Locked strictly to the triggers you defined
+                DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
+                is_digital_task = False
+
+                if not is_exempt:
+                    # Rule A: Official Task Type matches whitelist
+                    if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
+                        is_digital_task = True
+                    # 🌟 Rule B: Boosted Standard contains the word 'digital' (matches 'Premium_Digital')
+                    elif "digital" in custom_boosted:
+                        is_digital_task = True
+
+                # --- 3. ASSIGN STATUS & POOL ---
+                t_status = 'ready'
+                t_wo = 'none'
+                if t['id'] in fresh_sent_db:
+                    t_status = fresh_sent_db[t['id']].get('status', 'ready').lower()
+                    t_wo = fresh_sent_db[t['id']].get('wo', 'none')
+            
+                if stt not in config['states']:
+                    _skipped_out_of_pod_states += 1
+                    continue
+                if stt in config['states']:
+                    _remov_keywords = ["kiosk removal", "remove kiosk"]
+                    _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
+                    _is_removal = _is_cvs_team and any(kw in f"{native_details} {custom_task_type}".lower() for kw in _remov_keywords)
+                    pool.append({
+                        "id": t['id'], 
+                        "city": addr.get('city', 'Unknown'), 
+                        "state": stt,
+                        "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
+                        "zip": addr.get('postalCode', ''),
+                        "lat": t['destination']['location'][1], 
+                        "lon": t['destination']['location'][0],
+                        "escalated": is_esc, 
+                        "task_type": tt_val,
+                        "is_digital": is_digital_task,
+                        "is_removal": _is_removal,
+                        "boosted_standard": custom_boosted,
+                        "db_status": t_status, 
+                        "wo": t_wo,
+                        "venue_name": venue_name,
+                        "venue_id": venue_id,
+                        "kiosk_id": kiosk_id,
+                        "sio": sio,
+                        "client_company": client_company,
+                        "location_in_venue": location_in_venue,
+                        "art_file": art_file,
+                        "customer_type": customer_type,
+                    })
+                
+            clusters = []
+            total_pool = len(pool)
+            ic_df = st.session_state.get('ic_df', pd.DataFrame())
+        
+            # 🌟 CRITICAL FIX: Safe extraction using standardized headers
+            lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
+            lng_col = next((col for col in ic_df.columns if 'lng' in str(col).lower()), 'lng')
+        
+            if lat_col in ic_df.columns and lng_col in ic_df.columns:
+                v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
+            else:
+                v_ics_base = pd.DataFrame()
+
+            while pool:
+                # Routing progress calculation
+                rel_prog = 0.4 + (0.6 * (1 - (len(pool) / total_pool if total_pool > 0 else 1)))
+                update_prog(rel_prog, f"🗺️ Routing {len(pool)} remaining tasks...")
+            
+                anc = pool.pop(0)
+            
+                # --- NEW: Strict Digital Separation & Dynamic Radius ---
+                anc_tt = str(anc.get('task_type', '')).lower()
+                anc_is_digital = anc.get('is_digital', False)
+                anc_is_removal = anc.get('is_removal', False)
+                anc_status = anc.get('db_status', 'ready')
+                anc_wo = anc.get('wo', 'none')
+            
+                # Set radius strictly based on type
+                route_radius = 25 if anc_is_digital else 35
+            
+                candidates = []; rem = []
+                for t in pool:
+                    t_tt = str(t.get('task_type', '')).lower()
+                    t_is_digital = t.get('is_digital', False)
+                    t_is_removal = t.get('is_removal', False)
+                    t_status = t.get('db_status', 'ready')
+                    t_wo = t.get('wo', 'none')
+                
+                    # Rule 1: Digital, Removal, and Standard never mix
+                    if anc_is_digital == t_is_digital and anc_is_removal == t_is_removal:
+                    
+                        # Rule 2: Sent and Accepted are FROZEN
+                        # 🌟 FIX 1: Add 'field_nation' so these routes stay grouped together!
+                        if anc_status in ['sent', 'accepted', 'field_nation']:
+                            # Bypasses distance! ONLY groups if the Work Order matches perfectly.
+                            if t_status == anc_status and t_wo == anc_wo:
+                                candidates.append((0, t)) 
+                            else:
                                 rem.append(t)
-                        else:
-                            rem.append(t)
-                else:
-                    rem.append(t)
-            
-            candidates.sort(key=lambda x: x[0])
-            
-            # --- STOP LIMIT: 10 for CVS Removal, 20 for all others ---
-            stop_limit = 10 if anc_is_removal else 20
-            group = [anc]
-            unique_stops = {anc['full']}
-            spillover = []
-            
-            for _, t in candidates:
-                if len(unique_stops) < stop_limit or t['full'] in unique_stops:
-                    group.append(t)
-                    unique_stops.add(t['full'])
-                else:
-                    spillover.append(t)
-            
-            # 🌟 BRIDGE: Put spillover back and fix the 'd' column error
-            rem.extend(spillover)
-            
-            # --- 📡 1. IC SEARCH & DISTANCE CHECK (OPTIMIZED) ---
-            has_ic = False
-            ic_dist = 0
-            closest_ic_loc = f"{anc['lat']},{anc['lon']}" 
-            
-            if not v_ics_base.empty:
-                # 🚀 OPTIMIZATION: Use list comprehension instead of pandas .apply(). It is ~100x faster.
-                dists = [
-                    haversine(anc['lat'], anc['lon'], lat, lng) 
-                    for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])
-                ]
-                
-                valid_ics = v_ics_base.copy()
-                valid_ics['d'] = dists
-                valid_ics = valid_ics[valid_ics['d'] <= 100]
-                
-                if not valid_ics.empty:
-                    best_ic = valid_ics.sort_values('d').iloc[0]
-                    has_ic = True
-                    ic_dist = best_ic['d']
-                    closest_ic_loc = _ic_home_loc(best_ic, closest_ic_loc)
-
-            def check_viability(grp):
-                seen = set(); u_locs = []
-                for x in grp:
-                    if x['full'] not in seen: seen.add(x['full']); u_locs.append(x['full'])
-                if not u_locs: return 0, 0
-                
-                # 🚀 OPTIMIZATION: Reverted back to real Google Maps!
-                # Wrapping u_locs[:25] in a tuple() makes Streamlit's cache process it instantly.
-                _, hrs, _, _ = get_gmaps(closest_ic_loc, tuple(u_locs[:25]))
-                pay = round(hrs * 25.0, 2) # 🌟 STRICTLY HOURLY ($25/hr)
-                return round(pay / len(u_locs), 2), len(u_locs)
-            
-            gate_avg, _ = check_viability(group)
-            
-            # --- 🚦 2. UPDATED FLAGGING LOGIC ---
-            if anc_status in ['sent', 'accepted', 'finalized']:
-                status = anc_status.capitalize()
-            else:
-                status = "Ready" # Default status
-                
-                # Flag Criteria A: High Rate (> $23/stop)
-                if gate_avg > 23.00:
-                    if len(group) > 1:
-                        removed = group.pop()
-                        new_avg, _ = check_viability(group)
-                        if new_avg <= 23.00:
-                            rem.append(removed)
-                        else:
-                            group.append(removed)
-                            status = "Flagged"
+                            
+                        # Rule 3: Ready and Declined are LIQUID (They can mix!)
+                        elif anc_status in ['ready', 'declined']:
+                            if t_status in ['ready', 'declined']:
+                                d = haversine(anc['lat'], anc['lon'], t['lat'], t['lon'])
+                                if d <= route_radius: 
+                                    candidates.append((d, t))
+                                else: 
+                                    rem.append(t)
+                            else:
+                                rem.append(t)
                     else:
-                        status = "Flagged"
-                
-                # Flag Criteria B: Long Distance (> 60 miles) or No Contractor
-                if not has_ic or ic_dist > 60:
-                    status = "Flagged"
-
-            # --- 📊 3. COUNTERS & SAVE TO SESSION ---
-            g_data = group
-
-            # 🌟 CLEANUP: No need to loop again; the anchor already knows!
-            route_is_digital = anc_is_digital
+                        rem.append(t)
             
-            # Route is tagged boosted/local-plus if ANY task in the cluster has that tier.
-            # The header pill ensures the dispatcher sees boosted routes immediately,
-            # even when the boosted task is a single one inside a mostly-pulldown cluster.
-            # Drill-down to the specific stop + campaign happens via make_venue_details,
-            # which counts boosted tasks per location and per campaign row.
-            _boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in g_data if x.get('boosted_standard')]
-            if any('local plus' in v for v in _boosted_vals):
-                _boosted_tag = 'local plus'
-            elif any('boosted' in v for v in _boosted_vals):
-                _boosted_tag = 'boosted'
-            else:
-                _boosted_tag = ''
+                candidates.sort(key=lambda x: x[0])
+            
+                # --- STOP LIMIT: 10 for CVS Removal, 20 for all others ---
+                stop_limit = 10 if anc_is_removal else 20
+                group = [anc]
+                unique_stops = {anc['full']}
+                spillover = []
+            
+                for _, t in candidates:
+                    if len(unique_stops) < stop_limit or t['full'] in unique_stops:
+                        group.append(t)
+                        unique_stops.add(t['full'])
+                    else:
+                        spillover.append(t)
+            
+                # 🌟 BRIDGE: Put spillover back and fix the 'd' column error
+                rem.extend(spillover)
+            
+                # --- 📡 1. IC SEARCH & DISTANCE CHECK (OPTIMIZED) ---
+                has_ic = False
+                ic_dist = 0
+                closest_ic_loc = f"{anc['lat']},{anc['lon']}" 
+            
+                if not v_ics_base.empty:
+                    # 🚀 OPTIMIZATION: Use list comprehension instead of pandas .apply(). It is ~100x faster.
+                    dists = [
+                        haversine(anc['lat'], anc['lon'], lat, lng) 
+                        for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])
+                    ]
+                
+                    valid_ics = v_ics_base.copy()
+                    valid_ics['d'] = dists
+                    valid_ics = valid_ics[valid_ics['d'] <= 100]
+                
+                    if not valid_ics.empty:
+                        best_ic = valid_ics.sort_values('d').iloc[0]
+                        has_ic = True
+                        ic_dist = best_ic['d']
+                        closest_ic_loc = _ic_home_loc(best_ic, closest_ic_loc)
 
-            clusters.append({
-                "data": g_data, 
-                "center": [anc['lat'], anc['lon']], 
-                "stops": len(set(x['full'] for x in g_data)), 
-                "city": anc['city'], "state": anc['state'],
-                "status": status,
-                "has_ic": has_ic,
-                "esc_count": sum(1 for x in g_data if x.get('escalated')),
-                "is_digital": route_is_digital,
-                "is_removal": anc_is_removal,
-                "boosted_tag": _boosted_tag,
-                "inst_count": sum(1 for x in g_data if "install" in str(x.get('task_type', '')).lower()),
-                "remov_count": sum(1 for x in g_data if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"]),
-                "wo": anc_wo
-            })
-            pool = rem
+                def check_viability(grp):
+                    seen = set(); u_locs = []
+                    for x in grp:
+                        if x['full'] not in seen: seen.add(x['full']); u_locs.append(x['full'])
+                    if not u_locs: return 0, 0
+                
+                    # 🚀 OPTIMIZATION: Reverted back to real Google Maps!
+                    # Wrapping u_locs[:25] in a tuple() makes Streamlit's cache process it instantly.
+                    _, hrs, _, _ = get_gmaps(closest_ic_loc, tuple(u_locs[:25]))
+                    pay = round(hrs * 25.0, 2) # 🌟 STRICTLY HOURLY ($25/hr)
+                    return round(pay / len(u_locs), 2), len(u_locs)
+            
+                gate_avg, _ = check_viability(group)
+            
+                # --- 🚦 2. UPDATED FLAGGING LOGIC ---
+                if anc_status in ['sent', 'accepted', 'finalized']:
+                    status = anc_status.capitalize()
+                else:
+                    status = "Ready" # Default status
+                
+                    # Flag Criteria A: High Rate (> $23/stop)
+                    if gate_avg > 23.00:
+                        if len(group) > 1:
+                            removed = group.pop()
+                            new_avg, _ = check_viability(group)
+                            if new_avg <= 23.00:
+                                rem.append(removed)
+                            else:
+                                group.append(removed)
+                                status = "Flagged"
+                        else:
+                            status = "Flagged"
+                
+                    # Flag Criteria B: Long Distance (> 60 miles) or No Contractor
+                    if not has_ic or ic_dist > 60:
+                        status = "Flagged"
 
+                # --- 📊 3. COUNTERS & SAVE TO SESSION ---
+                g_data = group
+
+                # 🌟 CLEANUP: No need to loop again; the anchor already knows!
+                route_is_digital = anc_is_digital
+            
+                # Route is tagged boosted/local-plus if ANY task in the cluster has that tier.
+                # The header pill ensures the dispatcher sees boosted routes immediately,
+                # even when the boosted task is a single one inside a mostly-pulldown cluster.
+                # Drill-down to the specific stop + campaign happens via make_venue_details,
+                # which counts boosted tasks per location and per campaign row.
+                _boosted_vals = [str(x.get('boosted_standard', '')).lower() for x in g_data if x.get('boosted_standard')]
+                if any('local plus' in v for v in _boosted_vals):
+                    _boosted_tag = 'local plus'
+                elif any('boosted' in v for v in _boosted_vals):
+                    _boosted_tag = 'boosted'
+                else:
+                    _boosted_tag = ''
+
+                clusters.append({
+                    "data": g_data, 
+                    "center": [anc['lat'], anc['lon']], 
+                    "stops": len(set(x['full'] for x in g_data)), 
+                    "city": anc['city'], "state": anc['state'],
+                    "status": status,
+                    "has_ic": has_ic,
+                    "esc_count": sum(1 for x in g_data if x.get('escalated')),
+                    "is_digital": route_is_digital,
+                    "is_removal": anc_is_removal,
+                    "boosted_tag": _boosted_tag,
+                    "inst_count": sum(1 for x in g_data if "install" in str(x.get('task_type', '')).lower()),
+                    "remov_count": sum(1 for x in g_data if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"]),
+                    "wo": anc_wo
+                })
+                pool = rem
+
+            _clu_store[pod_name] = {
+                'sig': _clu_sig,
+                'clusters': _copy.deepcopy(clusters),
+                'total_pool': total_pool,
+                'skipped_no_state_cf': _skipped_no_state_cf,
+                'skipped_assigned': _skipped_assigned,
+                'skipped_wrong_team': _skipped_wrong_team,
+                'skipped_out_of_pod_states': _skipped_out_of_pod_states,
+            }
         st.session_state[f"clusters_{pod_name}"] = clusters
         # Re-apply any bundles the dispatcher previously confirmed for this pod, so a
         # full re-init via Initialize Data doesn\'t silently undo them.

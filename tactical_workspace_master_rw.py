@@ -6666,7 +6666,21 @@ def run_pod_tab(pod_name):
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    # 🌟 Digital task-type breakdown — same classification used elsewhere
+                    # in the file (lines ~4463-4464 + ~4485-4486). 'offline' beats 'service'
+                    # because "Digital Offline" tasks contain both words, so check Offline
+                    # before Service to avoid double-counting.
+                    _dig_off_n = sum(1 for _t in c['data'] if 'offline' in str(_t.get('task_type','')).lower())
+                    _dig_ins_n = sum(1 for _t in c['data'] if 'ins/re' in str(_t.get('task_type','')).lower())
+                    _dig_svc_n = sum(1 for _t in c['data']
+                                     if 'service' in str(_t.get('task_type','')).lower()
+                                     and 'offline' not in str(_t.get('task_type','')).lower())
+                    _dig_type_parts = []
+                    if _dig_off_n > 0: _dig_type_parts.append(f"📵 {_dig_off_n} Offline")
+                    if _dig_ins_n > 0: _dig_type_parts.append(f"🔧 {_dig_ins_n} Ins/Rem")
+                    if _dig_svc_n > 0: _dig_type_parts.append(f"⚙️ {_dig_svc_n} Service")
+                    _dig_type_pill = f" | {' · '.join(_dig_type_parts)}" if _dig_type_parts else ""
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_type_pill}{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:

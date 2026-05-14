@@ -7171,36 +7171,24 @@ if '_auth_user' not in st.session_state:
     _render_login_form()
     st.stop()
 
-# --- STAY-SIGNED-IN PROMPT ---
-# After a successful FRESH login (URL has no ?auth= and no prior dismissal),
-# show a modal asking if the user wants to stay signed in on this device.
-# Mark dismissed BEFORE rendering so the modal opens exactly ONCE per session,
-# regardless of how the user closes it (Yes / Not now / X / Esc / click-outside).
-# Without this pre-flag, clicking the X close button would close the dialog
-# without firing either button handler, and the next Streamlit rerun would
-# re-open it, pestering the user repeatedly.
+# --- STAY-SIGNED-IN (SILENT) ---
+# The old "Stay signed in?" modal was removed. After a fresh username/password
+# login, the session is now persisted silently and automatically (no prompt) for the user
+# skips the login screen next time, with no prompt. Sign-out still clears the
+# localStorage token (see the logout handler above). Auto-login via a ?auth=
+# URL already sets _stay_prompt_dismissed, so this block runs exactly once,
+# only after a fresh credential login.
 if not st.session_state.get('_stay_prompt_dismissed'):
     st.session_state['_stay_prompt_dismissed'] = True
-    @st.dialog("Stay signed in?")
-    def _stay_dialog():
-        st.write("Save your login on this device so you don't have to sign in again next time?")
-        st.caption("You can sign out any time using the Sign out button in the top right corner.")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Yes, stay signed in", type="primary", use_container_width=True, key="_stay_yes"):
-                _u_now = st.session_state['_auth_user'].get('username', '')
-                _tok = _stay_token_for(_u_now)
-                # Persist to localStorage AND tag the current URL so reloads keep the session.
-                _components.html(
-                    f"<script>try{{localStorage.setItem('dcc_stay_auth','{_tok}');}}catch(e){{}}</script>",
-                    height=0,
-                )
-                st.query_params['auth'] = _tok
-                st.rerun()
-        with c2:
-            if st.button("Not now", use_container_width=True, key="_stay_no"):
-                st.rerun()
-    _stay_dialog()
+    _u_now = st.session_state['_auth_user'].get('username', '')
+    _tok = _stay_token_for(_u_now)
+    # Persist to localStorage AND tag the current URL so reloads keep the session.
+    _components.html(
+        f"<script>try{{localStorage.setItem('dcc_stay_auth','{_tok}');}}catch(e){{}}</script>",
+        height=0,
+    )
+    st.query_params['auth'] = _tok
+    st.rerun()
 
 # --- START ---
 if "ic_df" not in st.session_state:
@@ -7524,11 +7512,7 @@ _components.html(
     height=0,
 )
 
-# --- TAB 0: GLOBAL CONTROL ---
-with tabs[0]:
-    if not _can_access_tab('Global'):
-        st.info(f"🔒 Global Overview is restricted to Admin and Manager roles. Your assigned pod is **{st.session_state.get('_auth_user', {}).get('pod', '?')}** — head to your pod tab to dispatch.")
-        st.stop()
+def _render_global_tab_body():
     # Check if ANY pod is loaded to toggle button state
     has_global_data = any(f"clusters_{p}" in st.session_state for p in POD_CONFIGS.keys())
     
@@ -7714,6 +7698,14 @@ with tabs[0]:
     with st.expander("🗺️ Master Route Map", expanded=False):
         st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
+
+
+# --- TAB 0: GLOBAL CONTROL ---
+with tabs[0]:
+    if _can_access_tab('Global'):
+        _render_global_tab_body()
+    else:
+        st.info(f"🔒 Global Overview is restricted to Admin and Manager roles. Your assigned pod is **{st.session_state.get('_auth_user', {}).get('pod', '?')}** — head to your pod tab to dispatch.")
 # --- INDIVIDUAL POD TABS ---
 # 🌟 FIX: Using 2 instead of 1 to account for the new Digital Pool tab!
 # Each tab body is gated by _can_access_tab — pod-locked users see a friendly

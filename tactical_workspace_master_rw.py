@@ -3783,14 +3783,35 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.error(f"Error initializing {pod_name}: {str(e)}")
 # 🌟 NEW HELPER: Standardized Digital Badges
 def get_digi_badges(cluster_data):
-    icons = set()
+    """Labeled task-type breakdown for Digital tab accordion headers.
+
+    Old behavior: returned concatenated unique icons (e.g., "📵🔧"),
+    leaving dispatchers to consult the legend to decode the icons.
+    New behavior: returns counts + labels (e.g., "📵 1 Offline · 🔧 3 Ins/Rem")
+    so the task mix is readable at a glance.
+
+    Categories follow the same substring rules used elsewhere in the file
+    (see lines ~4485-4486 and the digital sub-tab pill). Order is fixed
+    Offline → Ins/Rem → Service so the layout stays consistent across routes.
+    """
+    off_n = 0
+    ins_n = 0
+    svc_n = 0
     for t in cluster_data:
-        if t.get('is_digital'):
-            tt = str(t.get('task_type', '')).lower()
-            if 'offline' in tt: icons.add('📵')
-            elif 'ins/re' in tt: icons.add('🔧') # 🌟 Standard Wrench
-            else: icons.add('⚙️')
-    return "".join(sorted(list(icons)))
+        if not t.get('is_digital'):
+            continue
+        tt = str(t.get('task_type', '')).lower()
+        if 'offline' in tt:
+            off_n += 1
+        elif 'ins/re' in tt:
+            ins_n += 1
+        else:
+            svc_n += 1
+    parts = []
+    if off_n > 0: parts.append(f"📵 {off_n} Offline")
+    if ins_n > 0: parts.append(f"🔧 {ins_n} Ins/Rem")
+    if svc_n > 0: parts.append(f"⚙️ {svc_n} Service")
+    return " · ".join(parts)
 
 
 # 🔗 Bundled tag for route-card expander headers. Dim non-bold gray, far-right of the

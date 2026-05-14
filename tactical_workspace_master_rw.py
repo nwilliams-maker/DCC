@@ -3078,6 +3078,23 @@ def load_ic_database(sheet_url):
         _log_err("load_ic_database", e)
         return None
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _warm_load_ic_df():
+    """IC database for the headless startup warm-up. Replicates the dispatcher
+    path EXACTLY (pd.read_csv + lowercased column headers) so the warm-computed
+    cluster signature AND the IC-matching inside the cluster loop line up with a
+    normal dispatcher load. load_ic_database() does NOT lowercase headers, so the
+    warm path used to build a differently-cased ic_df and poison the shared
+    cluster cache. Returns an empty DataFrame (never None) on failure."""
+    try:
+        _url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid=0"
+        _df = pd.read_csv(_url)
+        _df.columns = [str(_c).strip().lower() for _c in _df.columns]
+        return _df
+    except Exception as _e:
+        _log_err("warm_load_ic_df", _e)
+        return pd.DataFrame()
+
 def process_digital_pool(master_bar=None):
     prog_bar = master_bar if master_bar else st.progress(0)
     prog_bar.progress(0.1, text="📥 Fetching National Tasks from Onfleet...")
@@ -3391,7 +3408,7 @@ def _pod_cluster_store():
     return {}
 
 
-def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
+def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=False):
     config = POD_CONFIGS[pod_name]
     
     # Logic to handle if we are doing a single pod or a global pull
@@ -3399,9 +3416,10 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
     start_pct = pod_idx * pod_weight
     
     # Use the master bar if provided, otherwise create a local one
-    prog_bar = master_bar if master_bar else st.progress(0)
+    prog_bar = None if warm_only else (master_bar if master_bar else st.progress(0))
     
     def update_prog(rel_val, msg):
+        if warm_only: return  # headless startup warm-up: no progress UI
         global_val = min(start_pct + (rel_val * pod_weight), 0.99)
         prog_bar.progress(global_val, text=f"[{pod_name}] {msg}")
         # 🌟 Tick the loading overlay timer if it exists
@@ -3445,25 +3463,25 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         try:
             _onfleet_data = _fetch_onfleet_open_tasks_cached()
         except Exception as _e:
-            st.error(f"Onfleet API Error: {_e}")
+            if not warm_only: st.error(f"Onfleet API Error: {_e}")
             _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
             return
         target_team_ids    = _onfleet_data['target_team_ids']
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
-        st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
-        st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
+        if not warm_only: st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
+        if not warm_only: st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
-            st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
+            if not warm_only: st.warning(f"\u26a0\ufe0f Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
         update_prog(0.4, f"📡 Got {len(all_tasks)} tasks — routing...")
 
         # PERFORMANCE FIX: Fetch Google Sheets data once before the loop
         fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
-        st.session_state['_history_db'] = _history_db
-        st.session_state.sent_db = fresh_sent_db
-        st.session_state['archived_wos'] = _archived_wos
+        if not warm_only: st.session_state['_history_db'] = _history_db
+        if not warm_only: st.session_state.sent_db = fresh_sent_db
+        if not warm_only: st.session_state['archived_wos'] = _archived_wos
 
         # \U0001f680 SHARED CLUSTER CACHE \u2014 the classify+route block below produces an
         # identical result for every dispatcher viewing the same pod within the
@@ -3473,7 +3491,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         # falls through to the original code path (the `else`) unchanged \u2014 so a
         # cache bug can only cost the speedup, never correctness.
         import copy as _copy
-        _ic_df_peek = st.session_state.get('ic_df', pd.DataFrame())
+        _ic_df_peek = (_warm_load_ic_df() if warm_only else st.session_state.get('ic_df', pd.DataFrame()))
         _clu_sig = (
             pod_name,
             len(all_tasks),
@@ -3659,7 +3677,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 
             clusters = []
             total_pool = len(pool)
-            ic_df = st.session_state.get('ic_df', pd.DataFrame())
+            ic_df = (_warm_load_ic_df() if warm_only else st.session_state.get('ic_df', pd.DataFrame()))
         
             # 🌟 CRITICAL FIX: Safe extraction using standardized headers
             lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
@@ -3843,7 +3861,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
                 'skipped_wrong_team': _skipped_wrong_team,
                 'skipped_out_of_pod_states': _skipped_out_of_pod_states,
             }
-        st.session_state[f"clusters_{pod_name}"] = clusters
+        if not warm_only: st.session_state[f"clusters_{pod_name}"] = clusters
         # 🚀 PRE-WARM ROUTE GMAPS — render_dispatch calls get_gmaps(default_ic_loc,
         # stops) for every Ready card on first render, which is what makes the
         # Dispatch (left) column slow to populate. Each cluster now carries its
@@ -3869,6 +3887,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
             threading.Thread(target=_warm_route_gmaps, args=(_warm_pairs,), daemon=True).start()
         except Exception as _wt_e:
             _log_err("warm_route_gmaps/setup", _wt_e)
+        if warm_only:
+            return  # headless startup warm-up: cluster + gmaps caches populated; skip session-scoped writes below
         # Re-apply any bundles the dispatcher previously confirmed for this pod, so a
         # full re-init via Initialize Data doesn\'t silently undo them.
         _replay_bundles(pod_name)
@@ -3899,7 +3919,31 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1):
         st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
     except Exception as e:
-        st.error(f"Error initializing {pod_name}: {str(e)}")
+        if not warm_only: st.error(f"Error initializing {pod_name}: {str(e)}")
+        else: _log_err(f"process_pod/warm/{pod_name}", e)
+
+# 🌅 SELF-WARM ON STARTUP — fires once per process (cold start). A background
+# thread runs process_pod(warm_only=True) for all 5 colored pods, populating the
+# shared cluster cache + Mapbox cache before any dispatcher logs in. warm_only=True
+# makes process_pod do the compute + cache writes but skip every session-scoped /
+# UI call, so it is safe to run headless in a thread. The @st.cache_resource guard
+# guarantees the body runs exactly once per process; every later rerun is a no-op.
+@st.cache_resource(show_spinner=False)
+def _startup_warm_guard():
+    def _do_startup_warm():
+        for _wp in list(POD_CONFIGS.keys()):
+            try:
+                process_pod(_wp, warm_only=True)
+            except Exception as _swe:
+                _log_err(f"startup_warm/{_wp}", _swe)
+    try:
+        threading.Thread(target=_do_startup_warm, daemon=True).start()
+    except Exception as _sw_e:
+        _log_err("startup_warm/thread-start", _sw_e)
+    return True
+
+_startup_warm_guard()
+
 # 🌟 NEW HELPER: Standardized Digital Badges
 def get_digi_badges(cluster_data):
     """Labeled task-type breakdown for Digital tab accordion headers.

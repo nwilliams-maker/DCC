@@ -6237,27 +6237,32 @@ def run_pod_tab(pod_name):
         st.info(f"No active tasks pending in the {pod_name} region.")
         return
 
-    # 🌟 THE FIX: Prevent IndexError if there are Ghost routes but no Live routes!
-    map_center = cls[0]['center'] if cls else [39.8283, -98.5795]
-    m = folium.Map(location=map_center, zoom_start=6 if cls else 4, tiles="cartodbpositron")
-    # 🗺️ Map shows only the operational buckets the dispatcher acts on:
-    # Ready, Flagged (review), Field Nation, Sent. Accepted/Declined/Finalized
-    # are deliberately excluded so the map stays a working surface, not a history view.
-    # Digital is excluded too — it has its own dedicated map below.
-    for c in ready:        folium.CircleMarker(c['center'], radius=8, color=TB_GREEN,   fill=True, opacity=0.8).add_to(m)
-    for c in review:       folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
-    # FN-ghost pseudo-clusters whose Mapbox geocode failed have center=(0,0).
-    # Skipping them keeps the marker out of the Atlantic when the only location
-    # info we have is a saved address that didn't resolve.
-    for c in field_nation:
-        if c.get('_is_fn_ghost_pseudo') and not c.get('_has_real_center'):
-            continue
-        folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
-    for c in sent:         folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
-    # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
-    # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
-    # Streamlit script, causing the "page keeps refreshing" experience.
-    st_folium(m, height=400, use_container_width=True, key=f"map_{pod_name}", returned_objects=[])
+    # 🚀 Opt B — Lazy-load the Folium map. Wrapping in a collapsed expander
+    # defers the heavy Leaflet iframe + marker render until the dispatcher
+    # clicks. Most operational interactions don't need the map, so this
+    # removes ~100KB of HTML/JS from the default page weight.
+    with st.expander("🗺️ Master Route Map", expanded=False):
+        # 🌟 THE FIX: Prevent IndexError if there are Ghost routes but no Live routes!
+        map_center = cls[0]['center'] if cls else [39.8283, -98.5795]
+        m = folium.Map(location=map_center, zoom_start=6 if cls else 4, tiles="cartodbpositron")
+        # 🗺️ Map shows only the operational buckets the dispatcher acts on:
+        # Ready, Flagged (review), Field Nation, Sent. Accepted/Declined/Finalized
+        # are deliberately excluded so the map stays a working surface, not a history view.
+        # Digital is excluded too — it has its own dedicated map below.
+        for c in ready:        folium.CircleMarker(c['center'], radius=8, color=TB_GREEN,   fill=True, opacity=0.8).add_to(m)
+        for c in review:       folium.CircleMarker(c['center'], radius=8, color="#ef4444", fill=True, opacity=0.8).add_to(m)
+        # FN-ghost pseudo-clusters whose Mapbox geocode failed have center=(0,0).
+        # Skipping them keeps the marker out of the Atlantic when the only location
+        # info we have is a saved address that didn't resolve.
+        for c in field_nation:
+            if c.get('_is_fn_ghost_pseudo') and not c.get('_has_real_center'):
+                continue
+            folium.CircleMarker(c['center'], radius=8, color="#ca8a04", fill=True, opacity=0.8).add_to(m)
+        for c in sent:         folium.CircleMarker(c['center'], radius=8, color="#3b82f6", fill=True, opacity=0.8).add_to(m)
+        # 📌 returned_objects=[] disables the map's rerun-on-interaction behavior.
+        # Without this, every zoom/pan/click on the Leaflet map re-runs the entire
+        # Streamlit script, causing the "page keeps refreshing" experience.
+        st_folium(m, height=400, use_container_width=True, key=f"map_{pod_name}", returned_objects=[])
     
     st.markdown("""
 <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:14px 20px; margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,0.04);">
@@ -7567,8 +7572,10 @@ with tabs[0]:
     # 🌟 THE FIX: Inject the blue prompt right above the map if no data exists
 
 
-    st.markdown("<br> 🗺️ Master Route Map", unsafe_allow_html=True)
-    st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
+    # 🚀 Opt B — Lazy-load the Global master map. The map was building all
+    # 5 pods + ghosts on every Global view render; collapsed by default now.
+    with st.expander("🗺️ Master Route Map", expanded=False):
+        st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
 # --- INDIVIDUAL POD TABS ---
 # 🌟 FIX: Using 2 instead of 1 to account for the new Digital Pool tab!
@@ -7769,11 +7776,13 @@ with tabs[6]:
         st.info("Click '🚀 Initialize Data' at the top right to fetch data.")
     else:
         # 4. 🗺️ MAP & LEGEND
-        # 🌟 THE FIX: Safe coordinate extraction
-        map_center_digi = global_digital[0]['center'] if global_digital else [39.8283, -98.5795]
-        m_digi = folium.Map(location=map_center_digi, zoom_start=4, tiles="cartodbpositron")
-        for c in global_digital: folium.CircleMarker(c['center'], radius=8, color="#0f766e", fill=True, opacity=0.8).add_to(m_digi)
-        st_folium(m_digi, height=400, use_container_width=True, key="digital_pool_map", returned_objects=[])
+        # 🚀 Opt B — Lazy-load the Digital pool map.
+        with st.expander("🗺️ Master Route Map", expanded=False):
+            # 🌟 THE FIX: Safe coordinate extraction
+            map_center_digi = global_digital[0]['center'] if global_digital else [39.8283, -98.5795]
+            m_digi = folium.Map(location=map_center_digi, zoom_start=4, tiles="cartodbpositron")
+            for c in global_digital: folium.CircleMarker(c['center'], radius=8, color="#0f766e", fill=True, opacity=0.8).add_to(m_digi)
+            st_folium(m_digi, height=400, use_container_width=True, key="digital_pool_map", returned_objects=[])
         
         # 5. 🚀 TWO-COLUMN DISPATCH (Parity with Pods)
         st.markdown("""

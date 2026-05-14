@@ -6851,6 +6851,19 @@ def run_pod_tab(pod_name):
             _live_sent = [c for c in sent if not _is_reverted_cluster(c)]
             _live_ghosts = [g for g in sent_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
             unified_sent = unify_and_sort_by_date(_live_sent, _live_ghosts, live_hashes)
+            # 🚪 Close the re-route popover after a route moves. Streamlit keeps a
+            # popover open when you click a button inside it; once the route is gone the
+            # popover is orphaned. The re-route handlers set this flag, then this fires
+            # Escape + an outside-click on the parent document to dismiss it.
+            if st.session_state.pop('_close_reroute_popover', False):
+                _components.html(
+                    "<script>try{var d=window.parent.document;"
+                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
+                    "}catch(e){}</script>",
+                    height=0,
+                )
             if not unified_sent: st.info("No pending routes sent.")
             
             current_date = None
@@ -6898,6 +6911,7 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    st.session_state['_close_reroute_popover'] = True
                                     st.rerun(scope="fragment")
                 else:
                     g = item
@@ -6939,6 +6953,7 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                    st.session_state['_close_reroute_popover'] = True
                                     st.rerun(scope="fragment")
         with t_sent:
             _render_sent_panel()

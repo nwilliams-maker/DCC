@@ -1781,7 +1781,15 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # thread version was failing silently (Streamlit thread context issues, no Railway
     # log output), so the worker kept seeing routes after revoke. This runs the PUTs
     # inline; toast at the bottom of this function reflects the real result.
-    if outstanding_ids:
+    #
+    # 🚀 SPEED FIX — only fire the PUTs when check_completed=True (Accepted/
+    # Finalized routes whose tasks are actively assigned to a worker). For
+    # Sent/Declined/FN re-routes (check_completed=False) the tasks are still
+    # Onfleet state=0 — never accepted, never assigned — so these PUTs are
+    # pure no-ops that just block the UI for 1-4s of wasted HTTP. Skipping
+    # them makes the route move back to Dispatch near-instantly. (See this
+    # function's docstring: "Sent/Declined tasks are still in Onfleet state=0".)
+    if outstanding_ids and check_completed:
         try:
             _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
             _put_payload = json.dumps({"worker": None, "metadata": []})

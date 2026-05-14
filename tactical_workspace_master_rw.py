@@ -6835,8 +6835,22 @@ def run_pod_tab(pod_name):
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
         t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
         
-        with t_sent:
-            unified_sent = unify_and_sort_by_date(sent, sent_ghosts, live_hashes)
+        @st.fragment
+        def _render_sent_panel():
+            # 🚀 INSTANT RE-ROUTE — the re-route buttons below fire
+            # st.rerun(scope="fragment"), which re-runs ONLY this fragment, not the
+            # whole pod tab — so the route leaves the Sent list the instant the
+            # button is hit. But `sent` / `sent_ghosts` were built by the
+            # (non-rerunning) outer bucket-sort, so on a fragment-only rerun they
+            # still include anything just re-routed. Re-filter on the reverted_
+            # flag here so the just-re-routed route drops straight out of the list.
+            def _is_reverted_cluster(_c):
+                _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
+                _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
+                return st.session_state.get(f"reverted_{_h}", False)
+            _live_sent = [c for c in sent if not _is_reverted_cluster(c)]
+            _live_ghosts = [g for g in sent_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_sent = unify_and_sort_by_date(_live_sent, _live_ghosts, live_hashes)
             if not unified_sent: st.info("No pending routes sent.")
             
             current_date = None
@@ -6884,7 +6898,7 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
-                                    st.rerun()
+                                    st.rerun(scope="fragment")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -6925,7 +6939,9 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-                                    st.rerun()
+                                    st.rerun(scope="fragment")
+        with t_sent:
+            _render_sent_panel()
         with t_acc:
             unified_acc = unify_and_sort_by_date(accepted, pod_ghosts, live_hashes)
             if not unified_acc: st.info("Waiting for portal acceptances...")

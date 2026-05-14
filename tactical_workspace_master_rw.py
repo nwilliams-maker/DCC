@@ -5801,6 +5801,28 @@ def run_pod_tab(pod_name):
             render_sync_age()
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # 🛡️ SESSION-RESET SELF-HEAL
+    # clusters_{pod} lives only in volatile st.session_state. When the
+    # Streamlit session resets (WebSocket reconnect under load, redeploy,
+    # memory eviction) the ?auth= URL token rehydrates the login — but the
+    # pod's initialized clusters are NOT rehydrated, stranding the dispatcher
+    # on the "Initialize Data" button mid-shift. Observed live: Red Pod
+    # dropped clusters_Red after a dispatch under stress.
+    # Fix: if clusters are missing and the dispatcher didn't click anything,
+    # auto-fire the init flow. The GAS OnFleet pull is cached (sub-1s) so the
+    # pod self-heals in seconds. The 2-attempt guard stops an infinite loop
+    # if init genuinely fails — after that the dispatcher gets the manual
+    # Initialize button as a fallback. Side benefit: pod-locked dispatchers
+    # now auto-init on landing and never see the Initialize button at all.
+    _auto_init_key = f"_auto_init_attempts_{pod_name}"
+    if is_initialized:
+        st.session_state.pop(_auto_init_key, None)
+    elif not init_clicked:
+        _ai_attempts = st.session_state.get(_auto_init_key, 0)
+        if _ai_attempts < 2:
+            st.session_state[_auto_init_key] = _ai_attempts + 1
+            init_clicked = True
+
     # 🌟 Check New Tasks: same full-width overlay as Initialize so the dispatcher
     # sees the spin-card + timer instead of a bare progress bar while smart_sync_pod runs.
     if is_initialized and sync_clicked:

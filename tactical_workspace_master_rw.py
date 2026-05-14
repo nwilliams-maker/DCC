@@ -1870,12 +1870,17 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # to `if st.button(...): move_to_dispatch(...); st.rerun()` — that path runs
     # outside a callback context and rerun works normally.
 
-@st.fragment(run_every=10)
 def render_sync_age():
-    """🌟 Opt #9 — small 'Updated Xs ago' caption that refreshes every 10s
-    without triggering a full page rerun. Reads st.session_state['_last_sync_ts']
-    which is stamped by auto_sync_checker (every 60s) and by the init/sync
-    callbacks. Shows nothing if the data hasn't been pulled yet."""
+    """🌟 Opt #9 — small 'Updated Xs ago' caption. Reads st.session_state['_last_sync_ts']
+    which is stamped by auto_sync_checker (every 60s) and by the init/sync callbacks.
+    Shows nothing if the data hasn't been pulled yet.
+
+    ⚠️ NOT a run_every fragment. It used to be @st.fragment(run_every=10), but a SECOND
+    self-ticking run_every fragment alongside auto_sync_checker (run_every=60) starves
+    auto_sync_checker's auto-rerun loop — which is the ONLY thing that makes accept/decline
+    reflect in real time. Keep auto_sync_checker as the single run_every fragment in the app.
+    This caption now just renders on each normal rerun (every auto_sync_checker poll stamps
+    a fresh ts and reruns the page, so it stays accurate)."""
     last_ts = st.session_state.get('_last_sync_ts')
     if not last_ts:
         return

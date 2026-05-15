@@ -2002,13 +2002,16 @@ def auto_sync_checker(pod_name):
                     sent_db_local[tid] = rec
             st.session_state['sent_db'] = sent_db_local
             st.session_state[last_ver_key] = cur_ver
-            # Clear reverted flags for any cluster whose tasks just got patched,
-            # so the traffic cop in run_pod_tab picks up the fresh status.
-            for _c in pod_clusters:
-                _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
-                if any(tid in sent_db_local for tid in _c_tids):
-                    _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
-                    st.session_state[f"reverted_{_c_hash}"] = False
+            # 🛑 REMOVED (May 14 2026) — this loop cleared reverted_<hash> for ANY
+            # pod cluster still present in sent_db_local, not just the clusters this
+            # sync actually touched. That raced with re-route: a dispatcher re-routes
+            # a route (sets reverted_=True, fires st.rerun), the background archive
+            # write is still in flight, an unrelated sync poll lands, and this loop
+            # wiped the flag because the route was "still in the db" — snapping it
+            # right back into Sent/Accepted/Declined. The run_pod_tab merge loop
+            # already clears reverted_ when a patch genuinely changes a route's
+            # status, and the dispatch flow clears it on re-send, so this block was
+            # both redundant and harmful.
             if affected_this_pod:
                 st.rerun(scope="app")
             # Other pods affected → don't rerun this session, just record state.
@@ -2052,18 +2055,15 @@ def auto_sync_checker(pod_name):
             st.session_state[last_fp_key] = new_fp
             st.session_state.sent_db = fresh_sent_db
             st.session_state['archived_wos'] = _archived_wos
-            # Clear reverted flags for any cluster whose tasks just got new sheet data,
-            # so the traffic cop in run_pod_tab picks up the fresh status.
-            for _c in pod_clusters:
-                _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
-                if any(tid in fresh_sent_db for tid in _c_tids):
-                    _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
-                    if st.session_state.get(f"reverted_{_c_hash}", False):
-                        # Only clear if the sheet now reflects a non-revoked state
-                        for _tid in _c_tids:
-                            if _tid in fresh_sent_db:
-                                st.session_state[f"reverted_{_c_hash}"] = False
-                                break
+            # 🛑 REMOVED (May 14 2026) — same bug as the fast-path block above.
+            # This slow-path loop cleared reverted_<hash> for any cluster still
+            # appearing in the freshly-pulled sheet, which is exactly the state a
+            # just-re-routed route is in until its background archive write lands.
+            # Result: re-route from the Accepted/Declined/Finalized tabs never
+            # "stuck" — the route bounced straight back. A reverted route that is
+            # still in the sheet SHOULD stay suppressed; that's the whole point of
+            # the flag. It gets cleared legitimately by the dispatch/re-send flow
+            # and by the run_pod_tab merge loop on a real status change.
             st.rerun(scope="app")
 
     except Exception as e:
@@ -7125,8 +7125,30 @@ def run_pod_tab(pod_name):
                                     st.rerun(scope="fragment")
         with t_sent:
             _render_sent_panel()
-        with t_acc:
-            unified_acc = unify_and_sort_by_date(accepted, pod_ghosts, live_hashes)
+        # 🚀 Shared re-route helpers for the Accepted/Declined/Finalized panels.
+        # Each panel below is now its own @st.fragment, so a re-route is a
+        # fragment-scoped rerun: the route drops out instantly, with no
+        # full-page flicker and no auto_sync_checker re-trigger.
+        def _is_reverted_cluster(_c):
+            _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
+            _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
+            return st.session_state.get(f"reverted_{_h}", False)
+        def _close_popover_if_flagged():
+            if st.session_state.pop('_close_reroute_popover', False):
+                _components.html(
+                    "<script>try{var d=window.parent.document;"
+                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
+                    "}catch(e){}</script>",
+                    height=0,
+                )
+        @st.fragment
+        def _render_acc_panel():
+            _close_popover_if_flagged()
+            _live_acc = [c for c in accepted if not _is_reverted_cluster(c)]
+            _live_acc_ghosts = [g for g in pod_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_acc = unify_and_sort_by_date(_live_acc, _live_acc_ghosts, live_hashes)
             if not unified_acc: st.info("Waiting for portal acceptances...")
             
             current_date = None
@@ -7177,7 +7199,8 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
-                                    st.rerun()
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -7206,9 +7229,13 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                                    st.rerun()
-        with t_dec:
-            unified_dec = unify_and_sort_by_date(declined, [], live_hashes)
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")
+        @st.fragment
+        def _render_dec_panel():
+            _close_popover_if_flagged()
+            _live_dec = [c for c in declined if not _is_reverted_cluster(c)]
+            unified_dec = unify_and_sort_by_date(_live_dec, [], live_hashes)
             if not unified_dec: st.info("No declined routes.")
             
             current_date = None
@@ -7238,9 +7265,14 @@ def run_pod_tab(pod_name):
                             st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
                             if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                 move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
-                                st.rerun()
-        with t_fin:
-            unified_fin = unify_and_sort_by_date(finalized, finalized_ghosts, live_hashes)
+                                st.session_state['_close_reroute_popover'] = True
+                                st.rerun(scope="fragment")
+        @st.fragment
+        def _render_fin_panel():
+            _close_popover_if_flagged()
+            _live_fin = [c for c in finalized if not _is_reverted_cluster(c)]
+            _live_fin_ghosts = [g for g in finalized_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_fin = unify_and_sort_by_date(_live_fin, _live_fin_ghosts, live_hashes)
             if not unified_fin: st.info("No finalized routes.") 
             
             current_date = None
@@ -7287,7 +7319,8 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
-                                    st.rerun()
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -7314,7 +7347,14 @@ def run_pod_tab(pod_name):
                                 st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                                    st.rerun()
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")
+        with t_acc:
+            _render_acc_panel()
+        with t_dec:
+            _render_dec_panel()
+        with t_fin:
+            _render_fin_panel()
 # --- LOGOUT URL HANDLER ---
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of

@@ -5908,7 +5908,90 @@ def run_pod_tab(pod_name):
 
 
 
-    auto_sync_checker(pod_name)  # 🔄 Auto-detect accepted/declined routes every 60s
+    # 🔄 IC ACCEPT/DECLINE AUTO-REFLECTION — bug fix May 14 2026.
+    #
+    # auto_sync_checker's docstring claims "polls every 60s" but in fact only
+    # runs when the script reruns (user click, st.rerun, etc.). Without a
+    # periodic trigger, dispatchers had to click around the UI to see an IC's
+    # accept/decline reflect — sometimes instant (if they happened to click),
+    # sometimes never (if they walked away).
+    #
+    # Fix: a tiny JS poller hits GAS `?action=getSyncVersion` every 15s. When
+    # the version changes, it clicks the hidden _sync_pulse_hidden button
+    # below, which forces a Streamlit rerun. The rerun lands here and
+    # auto_sync_checker does the actual sent_db patching — no extra Python
+    # work added, just a way to wake the script up.
+    #
+    # Properties of the fix:
+    #   • All polling is JS → GAS. Streamlit server sees ZERO polls.
+    #   • GAS getSyncVersion is a single PropertiesService read (~50ms).
+    #   • lastVer is held on parent window so the iframe can re-mount on
+    #     reruns without losing the baseline (parent.setInterval keeps the
+    #     closure alive even after the iframe is destroyed).
+    #   • Idempotency guard `parent._dccSyncPollInstalled` prevents stacked
+    #     intervals across reruns / pod-tab switches.
+    #   • A rerun fires only when version actually changed; idle pods cost
+    #     nothing.
+    #
+    # Worst-case latency from IC click → dispatcher sees move: ~15s poll +
+    # ~500ms (button-click rerun + auto_sync_checker st.rerun) = ~15.5s.
+    st.markdown(
+        "<style>div[class*='st-key-_sync_pulse_hidden']{display:none !important;height:0 !important;margin:0 !important;padding:0 !important;}</style>",
+        unsafe_allow_html=True,
+    )
+    if st.button("sync", key="_sync_pulse_hidden"):
+        pass  # No-op — the click itself is what we want; it triggers the rerun.
+    _components.html(
+        f"""
+        <script>
+        (function() {{
+          if (parent._dccSyncPollInstalled) return;
+          parent._dccSyncPollInstalled = true;
+          var GAS_URL  = "{GAS_WEB_APP_URL}";
+          var lastVer  = null;   // null = baseline not yet recorded
+          var inFlight = false;  // guard against overlapping polls on slow GAS
+          function clickPulse() {{
+            try {{
+              var btn = parent.document.querySelector('[class*="st-key-_sync_pulse_hidden"] button');
+              if (btn) btn.click();
+            }} catch (_) {{}}
+          }}
+          function tick() {{
+            if (inFlight) return;
+            inFlight = true;
+            var url = GAS_URL + (GAS_URL.indexOf('?') > -1 ? '&' : '?') + 'action=getSyncVersion';
+            if (lastVer !== null) url += '&since=' + lastVer;
+            fetch(url)
+              .then(function (r) {{ return r.json(); }})
+              .then(function (j) {{
+                if (!j || typeof j.version !== 'number') return;
+                if (lastVer === null) {{
+                  // First poll of this browser session — record the baseline
+                  // silently. We only fire reruns on subsequent CHANGES, not
+                  // on the initial snapshot. Otherwise every page load would
+                  // immediately rerun, which is wasted work.
+                  lastVer = j.version;
+                  return;
+                }}
+                if (j.version !== lastVer) {{
+                  lastVer = j.version;
+                  clickPulse();
+                }}
+              }})
+              .catch(function () {{ /* silent — next tick will retry */ }})
+              .then(function () {{ inFlight = false; }});
+          }}
+          // First tick after a small delay so initial page paint isn't
+          // competing with the network for resources.
+          parent.setTimeout(tick, 2000);
+          parent.setInterval(tick, 15000);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+    auto_sync_checker(pod_name)  # 🔄 Picks up the version bump and patches sent_db in-memory.
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())

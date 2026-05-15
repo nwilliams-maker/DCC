@@ -3,14 +3,25 @@
 # All versions verified to install together (pip check: no conflicts).
 #
 # NOTE ON VERSIONS:
-#  - streamlit 1.57.0: the app uses @st.fragment(run_every=...), which does NOT
-#    exist before the 1.4x line. The previous 1.39.0 pin would crash on startup.
-#  - pandas held at the 2.x line on purpose. pandas 3.0 is a major release with
-#    breaking changes; do not bump to 3.x without a full regression test.
+#  - streamlit 1.41.1: chosen deliberately.
+#      * Needs >= 1.37 for stable st.fragment(run_every=) — used by
+#        auto_sync_checker. (1.39.0, the old pin, also satisfied this.)
+#      * Must stay BELOW the 1.55/1.56 line: Streamlit 1.56+ tightened the
+#        sandbox attribute on components.html iframes, dropping
+#        allow-top-navigation. That breaks the tab-persistence script
+#        (the ?tab= URL writer), which manipulates the top-level window
+#        from inside a components.html iframe. On 1.57 the browser blocks
+#        it with "Unsafe attempt to initiate navigation", leaving the
+#        Purple/Red/Digital tabs blank. 1.41.1 predates that change.
+#      * st.expander(key=) is NOT available before 1.56 — the Master Route
+#        Map expanders are de-duplicated by DISTINCT LABELS instead of keys,
+#        so this code is version-agnostic.
+#  - pandas held at the 2.x line on purpose. pandas 3.0 is a major release
+#    with breaking changes; do not bump to 3.x without a full regression test.
 #  - streamlit-autorefresh intentionally NOT listed: the app moved to native
 #    st.fragment(run_every=) and no longer imports it.
 
-streamlit==1.57.0
+streamlit==1.41.1
 streamlit-folium==0.25.3
 folium==0.19.7
 pandas==2.2.3

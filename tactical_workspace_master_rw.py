@@ -940,6 +940,17 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 .stApp {{ background-color: {TB_APP_BG} !important; color: #000000 !important; font-family: 'Inter', sans-serif !important; }}
+/* =========================================
+   DEFAULT 110% ZOOM (May 2026) — DCC's layout is tuned to be read at 110%.
+   Applying it in CSS means dispatchers (and the page after every redeploy
+   reload) land at the intended size without manually pressing Ctrl-+.
+   Using `zoom` rather than `transform: scale()` keeps scroll height and
+   click hit-testing correct — `transform` would visually scale but leave
+   the layout box at 100%, breaking scrollbars and popover positioning.
+   ⚠️ This STACKS on top of the browser's own zoom: keep Chrome at 100%
+   for a true 110%. If a dispatcher has Chrome zoomed too, they'll compound.
+   ========================================= */
+.stApp {{ zoom: 1.1; }}
 /* Streamlit injects a fixed-position header bar by default with a dark/black background.
    Recolor it to match the page so the logo doesn't sit on a black strip. Header still
    exists (Streamlit needs it for menu/toolbar), it's just visually invisible now. */

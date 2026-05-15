@@ -814,22 +814,43 @@ def _render_login_form():
             _password = st.text_input("Password", type="password", key="_login_pw_input", autocomplete="current-password")
             _submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
             if _submitted:
-                _rec = _check_password(_username, _password)
-                if _rec:
-                    _u_clean = str(_username).lower().strip()
-                    st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
-                    # ALWAYS set ?auth=TOKEN in URL so this tab survives deploys.
-                    # Independent of stay-signed-in (which controls localStorage).
-                    # Without this, a Railway redeploy boots active users back to
-                    # the login screen because Streamlit session_state is wiped
-                    # on server restart and there's no per-tab restore key.
-                    try:
-                        st.query_params['auth'] = _stay_token_for(_u_clean)
-                    except Exception:
-                        pass
-                    st.rerun()
+                # --- BRUTE-FORCE RATE LIMIT ---
+                # 5 failed attempts → 60s lockout. Per-session (session_state); stops
+                # casual/script brute-forcing of the predictable default passwords.
+                import time as _login_time
+                _now_ts = _login_time.time()
+                _lock_until = st.session_state.get('_login_lock_until', 0)
+                if _now_ts < _lock_until:
+                    _wait_s = int(_lock_until - _now_ts) + 1
+                    st.error(f"🔒 Too many failed attempts. Try again in {_wait_s}s.")
                 else:
-                    st.error("Invalid username or password.")
+                    _rec = _check_password(_username, _password)
+                    if _rec:
+                        # Successful login — clear any failed-attempt state.
+                        st.session_state.pop('_login_fails', None)
+                        st.session_state.pop('_login_lock_until', None)
+                        _u_clean = str(_username).lower().strip()
+                        st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
+                        # ALWAYS set ?auth=TOKEN in URL so this tab survives deploys.
+                        # Independent of stay-signed-in (which controls localStorage).
+                        # Without this, a Railway redeploy boots active users back to
+                        # the login screen because Streamlit session_state is wiped
+                        # on server restart and there's no per-tab restore key.
+                        try:
+                            st.query_params['auth'] = _stay_token_for(_u_clean)
+                        except Exception:
+                            pass
+                        st.rerun()
+                    else:
+                        _fails = st.session_state.get('_login_fails', 0) + 1
+                        if _fails >= 5:
+                            st.session_state['_login_lock_until'] = _now_ts + 60
+                            st.session_state['_login_fails'] = 0
+                            st.error("🔒 Too many failed attempts. Locked for 60 seconds.")
+                        else:
+                            st.session_state['_login_fails'] = _fails
+                            _left = 5 - _fails
+                            st.error(f"Invalid username or password. ({_left} attempt{'s' if _left != 1 else ''} left)")
 
 # --- PINNED TOP-LEFT LOGO ---
 # Function to convert the local image into web-safe code
@@ -837,7 +858,7 @@ def get_base64_image(image_path):
     try:
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode()
-    except Exception as e:
+    except Exception:
         return ""
 
 # Make sure "terraboost_logo.png" perfectly matches your saved file name!
@@ -2269,7 +2290,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
-from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
+from fn_utils import generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
 
 
 
@@ -2756,7 +2777,7 @@ def _cached_fetch_sent_records_from_sheet():
                                     if dt_obj < pd.to_datetime(MIGRATION_CUTOFF_DATE):
                                         continue 
                                     ts_display = dt_obj.strftime('%m/%d %I:%M %p')
-                                except:
+                                except Exception:
                                     ts_display = str(raw_ts)
                             else:
                                 continue # Skip empty date rows just to be safe
@@ -2854,7 +2875,7 @@ def _cached_fetch_sent_records_from_sheet():
                                     # Parse rich stop data if available
                                     try:
                                         stop_data = json.loads(p.get("stopData", "[]"))
-                                    except:
+                                    except Exception:
                                         stop_data = []
 
                                     ghost_routes[pod_name].append({
@@ -3282,8 +3303,8 @@ def process_digital_pool(master_bar=None):
     st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
-        _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
-        st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks. Some tasks may be missing.")
+        _log_err("process_digital_pool", "hit pagination cap (200 pages)")
+        st.warning("⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks. Some tasks may be missing.")
     prog_bar.progress(0.39, text=f"📡 Got {len(all_tasks_raw)} tasks from Onfleet...")
         
     prog_bar.progress(0.4, text="🔍 Isolating Digital Service Calls...")
@@ -3301,8 +3322,8 @@ def process_digital_pool(master_bar=None):
 <p style='font-size:16px;font-weight:800;color:#0f172a;margin:0 0 4px 0;'>Initializing Digital Pool</p>
 <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div></div>""", unsafe_allow_html=True)
     
-    # 🌟 STRICT DIGITAL FILTER
-    # --- 🌟 STRICT DIGITAL FILTER ---
+    # 🌟 STRICT DIGITAL FILTER — task types that qualify a task as "digital".
+    # Used below in the classification engine (Rule A). Single source of truth.
     DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
     fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
     st.session_state['_history_db'] = _history_db
@@ -3417,7 +3438,7 @@ def process_digital_pool(master_bar=None):
 
         if not is_exempt:
             # Rule A: Task Type contains service, ins/rem, or offline
-            if any(trigger in custom_task_type for trigger in ["service", "ins/rem", "offline"]):
+            if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
                 is_digital_task = True
             # 🌟 Rule B: Boosted Standard contains the word 'digital' (Matches 'Premium_Digital')
             elif "digital" in custom_boosted:
@@ -3502,7 +3523,7 @@ def process_digital_pool(master_bar=None):
         has_ic = False
         ic_dist = 0
         if not v_ics_base.empty:
-            dists = [haversine(anc['lat'], anc['lon'], lat, lng) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])]
+            dists = [haversine(anc['lat'], anc['lon'], lat, lng) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col], strict=True)]
             valid_ics = v_ics_base.copy()
             valid_ics['d'] = dists
             valid_ics = valid_ics[valid_ics['d'] <= 100]
@@ -3628,7 +3649,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         if not warm_only: st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
-            _log_err("process_pod", f"hit pagination cap (200 pages)")
+            _log_err("process_pod", "hit pagination cap (200 pages)")
             if not warm_only: st.warning(f"\u26a0\ufe0f Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
         update_prog(0.4, f"📡 Got {len(all_tasks)} tasks — routing...")
 
@@ -3851,7 +3872,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 anc = pool.pop(0)
             
                 # --- NEW: Strict Digital Separation & Dynamic Radius ---
-                anc_tt = str(anc.get('task_type', '')).lower()
                 anc_is_digital = anc.get('is_digital', False)
                 anc_is_removal = anc.get('is_removal', False)
                 anc_status = anc.get('db_status', 'ready')
@@ -3862,7 +3882,6 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             
                 candidates = []; rem = []
                 for t in pool:
-                    t_tt = str(t.get('task_type', '')).lower()
                     t_is_digital = t.get('is_digital', False)
                     t_is_removal = t.get('is_removal', False)
                     t_status = t.get('db_status', 'ready')
@@ -3920,7 +3939,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     # 🚀 OPTIMIZATION: Use list comprehension instead of pandas .apply(). It is ~100x faster.
                     dists = [
                         haversine(anc['lat'], anc['lon'], lat, lng) 
-                        for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])
+                        for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col], strict=True)
                     ]
                 
                     valid_ics = v_ics_base.copy()
@@ -4805,13 +4824,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             if metrics['digi_off'] > 0: expand_parts.append(f"📵 {metrics['digi_off']} Offline")
             if metrics['digi_ins'] > 0: expand_parts.append(f"🔧 {metrics['digi_ins']} Ins/Rem")
             if metrics['digi_srv'] > 0: expand_parts.append(f"⚙️ {metrics['digi_srv']} Service")
-            expand_str = " | ".join(expand_parts)
             esc_count_stop = sum(1 for t in cluster['data'] if t.get('full') == addr and t.get('escalated'))
             esc_inline = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_count_stop}</span>" if esc_count_stop > 0 else ""
             display_addr = f"+ {addr}" if metrics.get('is_new') else addr
             venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{metrics['venue_name']} — </span>" if metrics.get('venue_name') else ""
             task_pill = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{metrics['t_count']} Tasks</span>"
-            pill_html = f"<span style='font-size:11px;color:#94a3b8;'> — {pill_str}</span>" if pill_str else ""
             # Campaign expansion: aggregate by (campaign, task_type) with × N count
             # plus per-group escalation/boost/local-plus counters. Same shape as
             # make_venue_details so Sent/Accepted/Declined/Finalized/FN tabs match
@@ -5131,7 +5148,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # Format the breakdown list cleanly for the email
         task_breakdown_str = "\n".join([f"  {cat}: {count}" for cat, count in route_task_counts.items()]) + "\n"
     
-        install_warning = f"\n⚠️ NOTE: This route contains Kiosk Installs. Please ensure you have adequate storage and vehicle space.\n" if total_installs > 0 else ""
+        install_warning = "\n⚠️ NOTE: This route contains Kiosk Installs. Please ensure you have adequate storage and vehicle space.\n" if total_installs > 0 else ""
     
         sig_preview = (
             f"Hello {ic.get('name', 'Contractor')},\n\n"
@@ -5312,8 +5329,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
-                # Desktop: fire popup via height=0 script (not blocked by browser)
-                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open('{gmail_url}','_blank');}}</script>", height=0)
+                # Desktop: fire popup via height=0 script (not blocked by browser).
+                # JSON-encode the URL into the JS string literal so a stray quote or
+                # angle bracket in the contractor's email field can't break the script.
+                _gmail_js = json.dumps(gmail_url).replace("<", "\\u003c")
+                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open({_gmail_js},'_blank');}}</script>", height=0)
                 # Show a visible link unconditionally — desktop users hit by popup blockers
                 # used to get nothing; mobile users use the mailto. Now both have a fallback.
                 _mailto = f"mailto:{ic.get('email','')}?subject={subject_line}&body={body_content}"
@@ -5451,10 +5471,6 @@ text-decoration:none;">📨 Default Mail</a>
                     fetch_sent_records_from_sheet.clear()   # bust the sheet cache so the rerun sees the post-revoke state
                     st.rerun()
             st.stop()
-
-    BG_COLOR = "#FEF9C3"
-    TEXT_COLOR = "#854D0E"
-    BORDER_COLOR = "#FACC15"
 
     if route_state == "field_nation":
         st.info("💡 Route is currently tracked in the Field Nation tab.")
@@ -5606,8 +5622,8 @@ def smart_sync_pod(pod_name):
     cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
     all_tasks_raw      = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
-        _log_err("smart_sync_pod", f"hit pagination cap (200 pages)")
-        st.warning(f"⚠️ Hit pagination cap of 200 pages during Smart Sync. Some new tasks may be missing.")
+        _log_err("smart_sync_pod", "hit pagination cap (200 pages)")
+        st.warning("⚠️ Hit pagination cap of 200 pages during Smart Sync. Some new tasks may be missing.")
 
     _tick(0.4, "🔎 Identifying new tasks...")
 
@@ -5997,7 +6013,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         if sd.get('inst', 0) > 0: icon_parts.append(f"🛠️ {sd['inst']}")
         if sd.get('remov', 0) > 0: icon_parts.append(f"🗑️ {sd['remov']}")
         icon_html = f" <span style='font-size:12px;'>{' '.join(icon_parts)}</span>" if icon_parts else ""
-        esc_html = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗</span>" if sd.get('esc') else ""
+        esc_html = " <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗</span>" if sd.get('esc') else ""
 
         t_pill = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{sd['t_count']} Tasks</span>" if sd.get('t_count') else ""
 
@@ -6018,7 +6034,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
                 seen.add(row)
                 camp_rows.append(row)
 
-        camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else                      f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No campaign data.</div>"
+        camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else                      "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No campaign data.</div>"
 
         rows.append(
             f"<details class='fn-loc-row'>"
@@ -6183,7 +6199,7 @@ def run_pod_tab(pod_name):
         st.markdown("<div class='tab-action-btn'>", unsafe_allow_html=True)
         if not is_initialized:
             # STATE 1: Not loaded yet
-            init_clicked = st.button(f"🚀 Initialize Data", key=f"init_{pod_name}", use_container_width=True)
+            init_clicked = st.button("🚀 Initialize Data", key=f"init_{pod_name}", use_container_width=True)
             sync_clicked = False
         else:
             # STATE 2: Loaded — smart sync for new tasks only
@@ -6302,7 +6318,7 @@ def run_pod_tab(pod_name):
         st.session_state['_loading_start'] = _start
         st.session_state['_loading_pod'] = pod_name
 
-        _bar = st.progress(0, text=f"🔌 Connecting to Onfleet...")
+        _bar = st.progress(0, text="🔌 Connecting to Onfleet...")
         _time.sleep(0.05)
         _bar.progress(0.03, text=f"⏳ Fetching {pod_name} tasks from Onfleet...")
         process_pod(pod_name, master_bar=_bar)
@@ -6675,7 +6691,7 @@ def run_pod_tab(pod_name):
                     st.markdown(
                         f"<div style='font-size:12px; padding:6px 10px; margin:4px 0; "
                         f"background:#f8fafc; border-left:3px solid #94a3b8; border-radius:4px;'>"
-                        f"<b>{_wo}</b> &middot; {_ic} &middot; \${_comp} &middot; Due {_due} "
+                        f"<b>{_wo}</b> &middot; {_ic} &middot; ${_comp} &middot; Due {_due} "
                         f"&middot; {len(_c.get('data', []))} tasks @ {len(_addrs)} stops"
                         f"</div>",
                         unsafe_allow_html=True,
@@ -6818,21 +6834,19 @@ def run_pod_tab(pod_name):
                     if not ic_df.empty:
                         lat_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lat'), 'Lat')
                         lng_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lng'), 'Lng')
-                        loc_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'location'), 'Location')
                         if lat_col in ic_df.columns and lng_col in ic_df.columns:
                             v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
                             if not v_ics.empty:
                                 v_ics['d'] = v_ics.apply(lambda x: haversine(c['center'][0], c['center'][1], x[lat_col], x[lng_col]), axis=1)
                                 closest_ic = v_ics.sort_values('d').iloc[0]
-                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
-                                est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
-                                est_rate = est_pay / c['stops'] if c['stops'] > 0 else 0
+                                # Warm the Mapbox route cache for this cluster so opening
+                                # the route card later is instant. Return value intentionally unused.
+                                get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
                                 if closest_ic['d'] > 60: badges += " 📡"
 
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else "" 
                     remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if (c.get('remov_count', 0) > 0 and not c.get('is_removal')) else ""
-                    remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
@@ -6853,7 +6867,6 @@ def run_pod_tab(pod_name):
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
                     remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if (c.get('remov_count', 0) > 0 and not c.get('is_removal')) else ""
-                    remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
@@ -7416,7 +7429,6 @@ def run_pod_tab(pod_name):
                     stops_dec, tasks_dec = c['stops'], len(c['data'])
                     _pill_dec = get_task_pill(c.get('data', []))
                     with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                        u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
                         _dec_venues = venue_section(make_venue_details(c['data']))
                         st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
                 with btn_col:
@@ -7603,7 +7615,9 @@ if "ic_df" not in st.session_state:
         # 🌟 BULLETPROOF: Lowercase all headers the second the data is downloaded
         df.columns = [str(c).strip().lower() for c in df.columns]
         st.session_state.ic_df = df
-    except: st.error("Database connection failed.")
+    except Exception as _ic_load_err:
+        _log_err("ic_df_load", _ic_load_err)
+        st.error("Database connection failed.")
 
 # 🔵 PAGE-LOAD LAZY-INIT for worker task counts. Populates st.session_state['_worker_counts']
 # on the very first render of every fresh page load, BEFORE any tab/cluster renders. The
@@ -7972,7 +7986,6 @@ def _render_global_tab_body():
                 # (Routes Sent / Accepted / Declined / Tasks / Stops) and the master
                 # map markers focused on static-route operations only.
                 pod_cls = [c for c in st.session_state[f"clusters_{pod}"] if not c.get('is_digital')]
-                total_routes = len(pod_cls)
                 total_tasks = sum(len(c['data']) for c in pod_cls)
                 total_stops = sum(c['stops'] for c in pod_cls)
                 
@@ -8607,17 +8620,17 @@ with tabs[6]:
                                 st.session_state[f"route_state_{_dfn_hash}"] = "field_nation"
                             _dfn_stops, _dfn_tasks = len(set(_t['full'] for _t in c.get('data', []))), len(c.get('data', []))
                             _dfn_venues = venue_section(make_venue_details(c.get('data', [])))
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
+                            st.markdown("""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
         <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
     </div>
     <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
         <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{{_dfn_stops}} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {{_dfn_tasks}} Tasks</span></div></div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{_dfn_stops} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {_dfn_tasks} Tasks</span></div></div>
         <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Status</div>
         <div style="font-size:13px; font-weight:700; color:#854d0e;">Field Nation</div></div>
     </div>
-    {{_dfn_venues}}
+    {_dfn_venues}
 </div>""".format(_dfn_stops=_dfn_stops, _dfn_tasks=_dfn_tasks, _dfn_venues=_dfn_venues), unsafe_allow_html=True)
                             render_dispatch(i+9500, c, "Global_Digital")
 
@@ -8819,9 +8832,9 @@ with tabs[6]:
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):
-                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                    if st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
-                                        move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                    if st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "action_label": "Removed", "check_onfleet": True, "cluster_data": c, "check_completed": True})
                                         st.rerun()
 # --- FOOTER ---
 st.markdown("---")

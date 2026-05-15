@@ -1,5 +1,17 @@
-streamlit==1.39.0
-requests
-pandas
-folium
-streamlit-folium
+# DCC — Dispatch Command Center
+# Pinned dependencies for reproducible Railway deploys.
+# All versions verified to install together (pip check: no conflicts).
+#
+# NOTE ON VERSIONS:
+#  - streamlit 1.57.0: the app uses @st.fragment(run_every=...), which does NOT
+#    exist before the 1.4x line. The previous 1.39.0 pin would crash on startup.
+#  - pandas held at the 2.x line on purpose. pandas 3.0 is a major release with
+#    breaking changes; do not bump to 3.x without a full regression test.
+#  - streamlit-autorefresh intentionally NOT listed: the app moved to native
+#    st.fragment(run_every=) and no longer imports it.
+
+streamlit==1.57.0
+streamlit-folium==0.25.3
+folium==0.19.7
+pandas==2.2.3
+requests==2.32.5

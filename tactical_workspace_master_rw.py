@@ -5935,11 +5935,21 @@ def run_pod_tab(pod_name):
     #
     # Worst-case latency from IC click → dispatcher sees move: ~15s poll +
     # ~500ms (button-click rerun + auto_sync_checker st.rerun) = ~15.5s.
+    #
+    # ⚠️ POD-SCOPED KEY — run_pod_tab() is called once PER POD for admin/manager
+    # users (the loop over Blue/Green/Orange/Purple/Red). A single shared
+    # st.button key="_sync_pulse_hidden" therefore collided on the 2nd pod and
+    # raised StreamlitDuplicateElementKey, which aborted the rest of that pod
+    # tab's render — killing BOTH the re-route fragment and this poller. The key
+    # is now pod-scoped so each pod gets its own button. The CSS + JS selectors
+    # below stay on the `class*=` substring so they still match every variant
+    # (st-key-_sync_pulse_hidden_Blue, ..._Green, etc.); clicking any one of them
+    # triggers a full app rerun, which is all we need.
     st.markdown(
         "<style>div[class*='st-key-_sync_pulse_hidden']{display:none !important;height:0 !important;margin:0 !important;padding:0 !important;}</style>",
         unsafe_allow_html=True,
     )
-    if st.button("sync", key="_sync_pulse_hidden"):
+    if st.button("sync", key=f"_sync_pulse_hidden_{pod_name}"):
         pass  # No-op — the click itself is what we want; it triggers the rerun.
     _components.html(
         f"""

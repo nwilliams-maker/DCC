@@ -1838,13 +1838,19 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         except Exception as _bsm_e:
             _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 
-    try:
-        threading.Thread(target=_bg_reconcile, daemon=True).start()
-    except Exception as _t_e:
-        # If the thread can't start, fall back to inline so the sheet + Onfleet
-        # still reconcile (slower, but correct — never leaves a route un-archived).
-        _log_err("move_to_dispatch/bg-thread-start", _t_e)
-        _bg_reconcile()
+    # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):
+    # The daemon-thread version fails SILENTLY under Streamlit on Railway. The
+    # thread .start()s without error (so the except-fallback never fires), but
+    # the call site fires st.rerun() the instant move_to_dispatch returns —
+    # RerunException tears down the script-run context and the daemon thread is
+    # orphaned mid-PUT. Net effect: the reverted_ flag moves the route in the UI
+    # (looks done) but Onfleet never gets the unassign — Accepted-route tasks
+    # stay assigned to the contractor. This exact failure was documented and
+    # fixed once before ("SYNCHRONOUS parallel PUTs on the main thread") and got
+    # re-introduced. Run inline: the reverted_ flag set ABOVE already moved the
+    # route in the UI so the click still feels responsive — this just makes the
+    # Onfleet + sheet reconcile actually happen before the rerun.
+    _bg_reconcile()
 
     # Toast — completion-aware variant only when check_completed=True.
     if check_completed:
@@ -2267,6 +2273,100 @@ from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_
 
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _fn_fetch_onfleet_meta(task_ids_tuple):
+    """🌟 LEGACY-FN-ENRICHMENT helper (May 2026):
+    Pre-stopData FN sheet rows have no stop_data, so _fn_ghost_to_cluster's tail
+    logic crammed every task onto a single address with no client_company.
+    Fetch each task from Onfleet (state=1 under FN worker) to recover the real
+    destination + customFields. Cached 5 min per task_ids tuple so the FN tab
+    doesn't re-fetch every rerender. Returns:
+        { tid: { addr_full, addr_state, addr_zip, client_company, customer_type,
+                 boosted_standard, escalated, kiosk_id, venue_id, venue_name,
+                 location_in_venue, sio, task_type, is_digital, art_file }, ... }
+    Tasks that fail to fetch are omitted (caller falls back to locs).
+    """
+    if not task_ids_tuple:
+        return {}
+    try:
+        _auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
+    except Exception as _ae:
+        _log_err("_fn_fetch_onfleet_meta/auth", _ae)
+        return {}
+
+    def _fetch(tid):
+        try:
+            r = requests.get(f"https://onfleet.com/api/v2/tasks/{tid}", headers=_auth, timeout=5)
+            if r.status_code != 200:
+                return (tid, None)
+            t = r.json()
+            cfs = t.get('customFields') or []
+            meta = {
+                'client_company': '', 'campaign_name': '', 'customer_type': '',
+                'boosted_standard': '', 'kiosk_id': '', 'venue_id': '',
+                'venue_name': '', 'location_in_venue': '', 'sio': '',
+                'escalated': False, 'task_type': '', 'is_digital': False,
+            }
+            for f in cfs:
+                fn = str(f.get('name', '')).strip().lower()
+                fk = str(f.get('key', '')).strip().lower()
+                fv = str(f.get('value', '')).strip()
+                if fn in ('clientcompany', 'client company') or fk in ('clientcompany', 'client_company'):
+                    meta['client_company'] = fv
+                elif fn in ('campaignname', 'campaign name') or fk in ('campaignname', 'campaign_name'):
+                    meta['campaign_name'] = fv
+                elif fn in ('customer type', 'customertype') or fk in ('customertype', 'customer_type'):
+                    meta['customer_type'] = fv
+                elif fn in ('boosted standard', 'boostedstandard') or fk in ('boostedstandard', 'boosted_standard'):
+                    meta['boosted_standard'] = fv
+                elif fn in ('kioskid', 'kiosk id') or fk in ('kioskid', 'kiosk_id'):
+                    meta['kiosk_id'] = fv
+                elif fn in ('venueid', 'venue id') or fk in ('venueid', 'venue_id'):
+                    meta['venue_id'] = fv
+                elif fn in ('venuename', 'venue name') or fk in ('venuename', 'venue_name'):
+                    meta['venue_name'] = fv
+                elif fn in ('locationinvenue', 'location in venue') or fk in ('locationinvenue', 'location_in_venue'):
+                    meta['location_in_venue'] = fv
+                elif fn == 'sio' or fk == 'sio':
+                    meta['sio'] = fv
+                elif fn in ('task type', 'tasktype') or fk in ('tasktype', 'task_type'):
+                    meta['task_type'] = fv
+                elif 'escalation' in fn or 'escalation' in fk:
+                    if fv.lower() in ('1', '1.0', 'true', 'yes') or 'escalation' in fv.lower():
+                        meta['escalated'] = True
+            # Per existing convention: campaign name wins over client_company.
+            if meta['campaign_name']:
+                meta['client_company'] = meta['campaign_name']
+            dest = t.get('destination') or {}
+            addr_obj = dest.get('address') or {}
+            _num    = str(addr_obj.get('number', '') or '').strip()
+            _street = str(addr_obj.get('street', '') or '').strip()
+            _line1  = (f"{_num} {_street}").strip() or str(addr_obj.get('unparsed', '') or '').strip()
+            _city   = str(addr_obj.get('city', '') or '').strip()
+            _state  = str(addr_obj.get('state', '') or '').strip()
+            _zip    = str(addr_obj.get('postalCode', '') or '').strip()
+            meta['addr_full']  = ', '.join([p for p in (_line1, _city, _state, _zip) if p])
+            meta['addr_state'] = _state.upper()[:2]
+            meta['addr_zip']   = _zip
+            meta['art_file']   = extract_art_file(t.get('taskDetails', '') or t.get('notes', ''))
+            _tt = str(meta.get('task_type', '') or '').lower()
+            meta['is_digital'] = ('service' in _tt) or ('ins/rem' in _tt) or ('offline' in _tt)
+            return (tid, meta)
+        except Exception as _e:
+            _log_err(f"_fn_fetch_onfleet_meta task={tid}", _e)
+            return (tid, None)
+
+    out = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(10, max(1, len(task_ids_tuple)))) as _ex:
+            for _tid, _meta in _ex.map(_fetch, task_ids_tuple):
+                if _meta:
+                    out[_tid] = _meta
+    except Exception as _oe:
+        _log_err("_fn_fetch_onfleet_meta/pool", _oe)
+    return out
+
+
 def _fn_ghost_to_cluster(g):
     """Reconstruct a live-cluster-shaped dict from an FN sheet ghost.
 
@@ -2371,35 +2471,81 @@ def _fn_ghost_to_cluster(g):
                     'escalated':       bool(_cmp_entry.get('esc', False)),
                 })
 
-    # Tail: any real IDs left after stop_data exhaustion get distributed onto
-    # the first known address as generic rows. This happens when stop_data
-    # under-counts (older sheet rows without per-type breakdowns) — better
-    # than dropping IDs, which would break the cluster_hash invariant.
-    fallback_addr = addrs_seen[0] if addrs_seen else ''
-    if not fallback_addr:
-        # Truly empty stop_data — pull a stop from locs (pipe-delimited string
-        # whose first/last entries are the IC home pin, middle entries are stops).
+    # 🌟 LEGACY-FN-ENRICHMENT (May 2026 — v8):
+    # When stop_data didn't cover every task ID (most often: FN sheet rows that
+    # had no stop_data at all), enrich the remainder by fetching each task from
+    # Onfleet directly. Tasks at state=1 under the FN worker still carry their
+    # full customFields (clientCompany, kioskId, etc.) and destination address.
+    # This restores campaign-name visibility AND correct stop counts for legacy
+    # FN routes that were missing both.
+    if id_queue:
+        _enrich = _fn_fetch_onfleet_meta(tuple(id_queue))
+        if _enrich:
+            _consumed = []
+            for _tid in id_queue:
+                _m = _enrich.get(_tid)
+                if not _m: continue
+                _full = _m.get('addr_full') or ''
+                if not _full: continue
+                _tt_raw = (_m.get('task_type') or '').lower()
+                if 'install' in _tt_raw:                                   _label = 'Kiosk Install'
+                elif 'removal' in _tt_raw or 'remove kiosk' in _tt_raw:     _label = 'Kiosk Removal'
+                elif 'continuity' in _tt_raw or 'photo retake' in _tt_raw:  _label = 'Continuity'
+                elif 'service' in _tt_raw or 'ins/rem' in _tt_raw or 'offline' in _tt_raw: _label = 'Service'
+                elif 'new ad' in _tt_raw or 'art change' in _tt_raw or 'top' in _tt_raw or not _tt_raw: _label = 'New Ad'
+                elif 'default' in _tt_raw or 'pull down' in _tt_raw:        _label = 'Default'
+                else:                                                      _label = _tt_raw.title() or 'New Ad'
+                synthetic.append({
+                    'id':                _tid,
+                    'full':              _full,
+                    'state':             _m.get('addr_state') or (str(g.get('state','') or '').strip().upper()[:2]),
+                    'zip':               _m.get('addr_zip', ''),
+                    'venue_name':        _m.get('venue_name', ''),
+                    'venue_id':          _m.get('venue_id', ''),
+                    'kiosk_id':          _m.get('kiosk_id', ''),
+                    'location_in_venue': _m.get('location_in_venue', ''),
+                    'task_type':         _label,
+                    'client_company':    _m.get('client_company', ''),
+                    'is_digital':        bool(_m.get('is_digital', False)),
+                    'boosted_standard':  _m.get('boosted_standard', ''),
+                    'art_file':          _m.get('art_file', ''),
+                    'customer_type':     _m.get('customer_type', ''),
+                    'escalated':         bool(_m.get('escalated', False)),
+                })
+                if _full not in addrs_seen:
+                    addrs_seen.append(_full)
+                _consumed.append(_tid)
+            id_queue = [t for t in id_queue if t not in _consumed]
+
+    # Tail: any real IDs still left (Onfleet GET failed or task had no addr).
+    # Distribute across every stop address known for this route. Was previously
+    # cramming all leftovers onto addrs_seen[0] -> "1 Stops / N Tasks" for any
+    # legacy FN row whose Onfleet fetch also failed.
+    if id_queue:
         _raw_locs = [s.strip() for s in str(g.get('locs', '')).split('|') if s.strip()]
-        _stops_only = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
-        fallback_addr = _stops_only[0] if _stops_only else (g.get('city', '') or '')
-    while id_queue:
-        synthetic.append({
-            'id':              id_queue.pop(0),
-            'full':            fallback_addr,
-            'state':           str(g.get('state', '') or '').strip().upper()[:2],
-            'zip':             '',
-            'venue_name':      '',
-            'venue_id':        '',
-            'kiosk_id':        '',
-            'location_in_venue': '',
-            'task_type':       '',
-            'client_company':  '',
-            'is_digital':      False,
-            'boosted_standard': '',
-            'art_file':        '',
-            'customer_type':   '',
-            'escalated':       False,
-        })
+        _locs_stops = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
+        _tail_stops = _locs_stops if _locs_stops else (addrs_seen if addrs_seen else [(g.get('city', '') or 'Unknown')])
+        _tail_idx = 0
+        while id_queue:
+            _addr_here = _tail_stops[_tail_idx % len(_tail_stops)]
+            _tail_idx += 1
+            synthetic.append({
+                'id':              id_queue.pop(0),
+                'full':            _addr_here,
+                'state':           str(g.get('state', '') or '').strip().upper()[:2],
+                'zip':             '',
+                'venue_name':      '',
+                'venue_id':        '',
+                'kiosk_id':        '',
+                'location_in_venue': '',
+                'task_type':       '',
+                'client_company':  '',
+                'is_digital':      False,
+                'boosted_standard': '',
+                'art_file':        '',
+                'customer_type':   '',
+                'escalated':       False,
+            })
 
     inst_count  = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk install')
     remov_count = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk removal')

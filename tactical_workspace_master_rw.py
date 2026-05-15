@@ -8117,8 +8117,15 @@ def _render_global_tab_body():
     # 🚀 Opt B — Lazy-load the Global master map. The map was building all
     # 5 pods + ghosts on every Global view render; collapsed by default now.
     # Distinct label — see note in run_pod_tab; prevents a stale ghost expander.
-    with st.expander("🗺️ Global Master Route Map", expanded=False):
-        st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
+    #
+    # GUARD: skip the map entirely while a data pull is in flight. The
+    # trigger_pull block above ends in st.rerun(); during that loading pass the
+    # previous run's map expander is still mounted, and rendering another one
+    # here makes a SECOND "Global Master Route Map" flash on screen mid-load.
+    # Only draw the map on a settled (non-loading) pass.
+    if not st.session_state.get("trigger_pull"):
+        with st.expander("🗺️ Global Master Route Map", expanded=False):
+            st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
 
 

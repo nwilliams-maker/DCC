@@ -6728,7 +6728,10 @@ def run_pod_tab(pod_name):
     # defers the heavy Leaflet iframe + marker render until the dispatcher
     # clicks. Most operational interactions don't need the map, so this
     # removes ~100KB of HTML/JS from the default page weight.
-    with st.expander("🗺️ Master Route Map", expanded=False):
+    # NOTE: label includes the pod name — all three map expanders in this file
+    # must have DISTINCT labels, or Streamlit (which keys expanders by label on
+    # versions before 1.56) leaves a stale ghost copy after a tab switch.
+    with st.expander(f"🗺️ Master Route Map — {pod_name} Pod", expanded=False):
         # 🌟 THE FIX: Prevent IndexError if there are Ghost routes but no Live routes!
         map_center = cls[0]['center'] if cls else [39.8283, -98.5795]
         m = folium.Map(location=map_center, zoom_start=6 if cls else 4, tiles="cartodbpositron")
@@ -8113,7 +8116,8 @@ def _render_global_tab_body():
 
     # 🚀 Opt B — Lazy-load the Global master map. The map was building all
     # 5 pods + ghosts on every Global view render; collapsed by default now.
-    with st.expander("🗺️ Master Route Map", expanded=False):
+    # Distinct label — see note in run_pod_tab; prevents a stale ghost expander.
+    with st.expander("🗺️ Global Master Route Map", expanded=False):
         st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
 
@@ -8324,7 +8328,8 @@ with tabs[6]:
     else:
         # 4. 🗺️ MAP & LEGEND
         # 🚀 Opt B — Lazy-load the Digital pool map.
-        with st.expander("🗺️ Master Route Map", expanded=False):
+        # Distinct label — see note in run_pod_tab; prevents a stale ghost expander.
+        with st.expander("🗺️ Digital Pool Route Map", expanded=False):
             # 🌟 THE FIX: Safe coordinate extraction
             map_center_digi = global_digital[0]['center'] if global_digital else [39.8283, -98.5795]
             m_digi = folium.Map(location=map_center_digi, zoom_start=4, tiles="cartodbpositron")

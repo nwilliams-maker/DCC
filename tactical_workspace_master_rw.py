@@ -1993,7 +1993,11 @@ def auto_sync_checker(pod_name):
                     tid = tid.strip()
                     if not tid:
                         continue
-                    if tid in pod_tid_set:
+                    # saveRoute = the dispatcher's own dispatch action; the
+                    # session already reflects it via route_state, so it must
+                    # NOT trigger a rerun (was yanking the page on return from
+                    # the Gmail tab). Patch sent_db silently below regardless.
+                    if action != 'saveRoute' and tid in pod_tid_set:
                         affected_this_pod = True
                     rec = dict(sent_db_local.get(tid, {}))
                     rec['status'] = new_status
@@ -5984,8 +5988,18 @@ def run_pod_tab(pod_name):
                   return;
                 }}
                 if (j.version !== lastVer) {{
+                  // A saveRoute change is the dispatcher's OWN dispatch action
+                  // — the app already shows it via route_state="email_sent",
+                  // so pulsing a rerun for it just yanks the page out from
+                  // under them when they return from the "Open Gmail" tab.
+                  // Only rerun when a change actually needs to surface
+                  // (accept / decline / finalize / archive / FN-assign).
+                  var _chs = Array.isArray(j.changes) ? j.changes : [];
+                  var _needsRerun = (_chs.length === 0) || _chs.some(function (c) {{
+                    return c && c.a && c.a !== 'saveRoute';
+                  }});
                   lastVer = j.version;
-                  clickPulse();
+                  if (_needsRerun) clickPulse();
                 }}
               }})
               .catch(function () {{ /* silent — next tick will retry */ }})

@@ -261,3 +261,122 @@ def generate_combined_fn_upload(clusters: list):
     bytes_buf = io.BytesIO(buf.getvalue().encode('utf-8'))
     bytes_buf.seek(0)
     return bytes_buf, total_stops, included_hashes
+
+
+# ---------------------------------------------------------------------------
+# Assigned Provider — Field Nation provider name attached to a posted route
+# ---------------------------------------------------------------------------
+# May 16 2026 — Field Nation work orders get accepted on the FN platform by a
+# specific provider. Their name gets typed into DCC (per-route in the FN
+# Posted group) or pushed in bulk by a Chrome extension scraping FN.com.
+# Either way it lands in the FN sheet row's JSON payload as `fn_provider`,
+# survives reload, and travels with the route into Accepted via markFNAssigned.
+# Display: card title reads "🌐 FN: <name>" when set, "🌐 FN" otherwise.
+
+def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None):
+    """Fire-and-forget: writes a single route's Assigned Provider to the FN
+    sheet row's JSON payload (action=setFnProvider on the GAS side).
+
+    Background-threaded so the UI doesn't wait on the HTTP round-trip. Mirrors
+    the save_fn_to_sheet pattern.
+
+    Args:
+        gas_url: GAS Web App URL.
+        cluster_hash: the route's cluster_hash (already on the FN sheet row).
+        provider_name: free-form string from the dispatcher's input. Empty
+            string clears the provider.
+        session_state: optional Streamlit session_state for clearing any
+            sync-pending flag once the write returns.
+    """
+    cluster_hash = str(cluster_hash or "").strip()
+    provider_name = str(provider_name or "").strip()
+    if not cluster_hash:
+        return
+
+    def _worker():
+        try:
+            requests.post(
+                gas_url,
+                json={
+                    "action": "setFnProvider",
+                    "cluster_hash": cluster_hash,
+                    "provider_name": provider_name,
+                },
+                timeout=15,
+            )
+        except Exception as e:
+            print(f"[fn_utils.save_fn_provider] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        finally:
+            if session_state is not None and cluster_hash:
+                session_state.pop(f"_pending_fn_provider_{cluster_hash}", None)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def bulk_save_fn_providers_by_address(gas_url, address_provider_map):
+    """Fire-and-forget bulk version: takes a dict of {address: provider_name}
+    and POSTs to GAS, which matches each address against the stop addresses
+    on every Posted FN sheet row and updates the row's fn_provider.
+
+    Designed for the browser-extension path (Piece B): the extension scrapes
+    FN.com for {address: assigned_provider} and posts the whole map at once.
+
+    Args:
+        gas_url: GAS Web App URL.
+        address_provider_map: dict[str, str] — case-insensitive address keys.
+    """
+    if not isinstance(address_provider_map, dict) or not address_provider_map:
+        return
+
+    # Strip + normalize whitespace; drop empties.
+    clean_map = {}
+    for addr, name in address_provider_map.items():
+        a = str(addr or "").strip()
+        n = str(name or "").strip()
+        if a and n:
+            clean_map[a] = n
+    if not clean_map:
+        return
+
+    def _worker():
+        try:
+            requests.post(
+                gas_url,
+                json={
+                    "action": "bulkSetFnProvidersByAddress",
+                    "address_map": clean_map,
+                },
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"[fn_utils.bulk_save_fn_providers_by_address] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def extract_fn_provider(payload_or_dict):
+    """Pull the Assigned Provider name off an FN row's JSON payload or off a
+    cluster/ghost dict that's already been hydrated from one. Returns '' if
+    not set so callers can do a clean falsy check.
+
+    Args:
+        payload_or_dict: dict (parsed JSON payload or cluster/ghost record).
+
+    Returns:
+        str: provider name, or empty string.
+    """
+    if not isinstance(payload_or_dict, dict):
+        return ""
+    val = payload_or_dict.get("fn_provider", "")
+    return str(val or "").strip()
+
+
+def format_fn_card_title(provider_name):
+    """Render the FN portion of a card title: 'FN: <name>' if a provider is
+    set, plain 'FN' otherwise. Caller is responsible for the leading 🌐.
+
+    Kept tiny + pure so it can be reused anywhere the UI shows an FN-flagged
+    route (FN tab Posted group, Accepted tab, etc.).
+    """
+    name = str(provider_name or "").strip()
+    return f"FN: {name}" if name else "FN"

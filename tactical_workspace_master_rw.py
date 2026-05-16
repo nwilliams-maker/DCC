@@ -2189,7 +2189,7 @@ def instant_revoke_handler(cluster_hash, ic_name, payload_json, pod_name):
     # We now enable Onfleet scrubbing (State 0 check) immediately
     move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=payload_json)
     
-def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="", due_date=""):
+def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="", due_date="", cluster_hash=""):
     """Move OnFleet tasks to the Field Nation surface in two steps:
 
     1. Append into the FN team container (organizational grouping).
@@ -2288,6 +2288,24 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
                         _rid = "?"
                     _log_err("assign_tasks_to_fn_team/route_plan",
                              f"created route plan '{wo_name}' id={_rid} for {len(task_ids)} tasks")
+                    # 🟪 Persist routePlanId onto the FN sheet payload so
+                    # markFNAssigned can later PUT-rename it by ID. Without
+                    # this, the rename path silently no-ops (OnFleet's list
+                    # endpoint ignores date filters so name-based lookup is
+                    # unreliable). May 16 2026.
+                    if _rid and _rid != "?" and cluster_hash:
+                        try:
+                            requests.post(
+                                GAS_WEB_APP_URL,
+                                json={
+                                    "action": "setFnRoutePlanId",
+                                    "cluster_hash": cluster_hash,
+                                    "routePlanId": _rid,
+                                },
+                                timeout=10,
+                            )
+                        except Exception as _rpid_err:
+                            _log_err("assign_tasks_to_fn_team/setFnRoutePlanId", _rpid_err)
                 else:
                     _log_err("assign_tasks_to_fn_team/route_plan",
                              f"HTTP {_rp.status_code}: {_rp.text[:300]}")
@@ -5383,6 +5401,7 @@ text-decoration:none;">📨 Default Mail</a>
                         fn_worker_id=_fn_wid,
                         wo_name=fn_payload.get('wo', ''),
                         due_date=str(_fn_due),
+                        cluster_hash=cluster_hash,
                     )
             except Exception as _fn_team_e:
                 _log_err("fn_assign_sync", _fn_team_e)

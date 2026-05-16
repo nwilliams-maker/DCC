@@ -6423,29 +6423,42 @@ def run_pod_tab(pod_name):
     # Routes
     ready_count = len(ready)
     flagged_count = len(review)
-    
-    # 🌟 THE FIX: Combine active buckets (Excludes Accepted & Finalized)
-    active_cls = ready + review + sent + declined + field_nation + digital_ready
-    
-    # Tasks
-    tasks_static = sum(len(c['data']) for c in active_cls if not c.get('is_digital'))
-    tasks_digital = sum(len(c['data']) for c in active_cls if c.get('is_digital'))
+
+    # 🌟 May 16 2026 — SUPERCARD BUCKET RULES (Nick's spec):
+    # • Static Workload TASKS/STOPS counts non-digital work in Ready + Flagged
+    #   + Sent ONLY. Field Nation, Declined, Accepted, Finalized are excluded
+    #   so the dispatcher's "in-flight static workload" number stays accurate.
+    # • Digital Workload TASKS/STOPS counts digital work in those same active
+    #   buckets, PLUS the Digital Ready dispatch pool.
+    # • Field Nation gets its OWN supercard (routes + tasks) so its volume is
+    #   tracked separately from the static dispatch funnel.
+    _static_buckets = ready + review + sent
+
+    tasks_static = sum(len(c['data']) for c in _static_buckets if not c.get('is_digital'))
+    stops_static = sum(c['stops']      for c in _static_buckets if not c.get('is_digital'))
+    tasks_digital = sum(len(c['data']) for c in _static_buckets if c.get('is_digital'))
+    stops_digital = sum(c['stops']      for c in _static_buckets if c.get('is_digital'))
+
+    # Digital Ready pool is its own bucket — fold it into Digital totals.
+    tasks_digital += sum(len(c['data']) for c in digital_ready)
+    stops_digital += sum(c['stops']      for c in digital_ready)
+
+    # Field Nation — own supercard (routes + tasks).
+    fn_routes_count = len(field_nation)
+    fn_tasks = sum(len(c['data']) for c in field_nation)
 
     # 📊 Supercard-excluded buckets (visible in Awaiting Confirmation but not counted in TASKS card)
     _excluded_accepted = sum(len(c['data']) for c in accepted)
     _excluded_finalized = sum(len(c['data']) for c in finalized)
-    
-    # Stops
-    stops_static = sum(c['stops'] for c in active_cls if not c.get('is_digital'))
-    stops_digital = sum(c['stops'] for c in active_cls if c.get('is_digital'))
+    _excluded_declined = sum(len(c['data']) for c in declined)
     
     # Sent Records
     accepted_count = len(accepted) + len(pod_ghosts)
     declined_count = len(declined)
     total_sent = len(sent) + accepted_count + declined_count + len(field_nation)
 
-    # --- DASHBOARD SUPERCARDS (Standardized 4-Card Layout) ---
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1]) 
+    # --- DASHBOARD SUPERCARDS (5-Card Layout — May 16 2026: added Field Nation) ---
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
 
     with c1:
         # CARD 1: ROUTE STATUS (Ready | Flagged)
@@ -6502,7 +6515,25 @@ def run_pod_tab(pod_name):
         """, unsafe_allow_html=True)
 
     with c4:
-        # CARD 4: SENT RECORDS (Accepted | Declined)
+        # CARD 4: FIELD NATION (Routes | Tasks) — May 16 2026
+        st.markdown(f"""
+            <div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height: 120px;'>
+                <p style='margin:0 0 10px 0; font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>Field Nation</p>
+                <div style='display:flex; justify-content:space-around; align-items:center; gap:8px;'>
+                    <div style='background:{TB_YELLOW_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'>
+                        <p style='margin:0; font-size:9px; font-weight:800; color:#854d0e;'>ROUTES</p>
+                        <p style='margin:0; font-size:24px; font-weight:800; color:#854d0e;'>{fn_routes_count}</p>
+                    </div>
+                    <div style='background:{TB_YELLOW_FILL}; flex:1; padding:8px; border-radius:8px; text-align:center;'>
+                        <p style='margin:0; font-size:9px; font-weight:800; color:#854d0e;'>TASKS</p>
+                        <p style='margin:0; font-size:24px; font-weight:800; color:#854d0e;'>{fn_tasks}</p>
+                    </div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with c5:
+        # CARD 5: SENT RECORDS (Accepted | Declined)
         st.markdown(f"""
             <div class='dashboard-supercard' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:12px; padding:12px; height: 120px;'>
                 <p style='margin:0 0 10px 0; font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; text-align:center;'>All Sent: {total_sent}</p>
@@ -6533,7 +6564,7 @@ def run_pod_tab(pod_name):
             _team = _attr.get('skipped_wrong_team', 0)
             _oops = _attr.get('skipped_out_of_pod_states', 0)
             _pool = _attr.get('final_pool', 0)
-            _sup_total = tasks_static + tasks_digital
+            _sup_total = tasks_static + tasks_digital + fn_tasks  # Now includes FN tracked in its own card.
             st.markdown(f"""
 **Raw → Pool funnel (this pod's slice of the Onfleet pull)**
 
@@ -6548,19 +6579,19 @@ def run_pod_tab(pod_name):
 
 **Pool → Supercard math (across buckets)**
 
-| Bucket | Tasks | In supercard? |
-|---|---:|---|
-| Ready | {sum(len(c['data']) for c in ready)} | ✅ |
-| Flagged (review) | {sum(len(c['data']) for c in review)} | ✅ |
-| Sent | {sum(len(c['data']) for c in sent)} | ✅ |
-| Declined | {sum(len(c['data']) for c in declined)} | ✅ |
-| Field Nation | {sum(len(c['data']) for c in field_nation)} | ✅ |
-| Digital Ready | {sum(len(c['data']) for c in digital_ready)} | ✅ |
-| Accepted | {_excluded_accepted} | ❌ excluded |
-| Finalized | {_excluded_finalized} | ❌ excluded |
+| Bucket | Tasks | Static card? | Digital card? | FN card? |
+|---|---:|---|---|---|
+| Ready | {sum(len(c['data']) for c in ready)} | ✅ (if non-digital) | ✅ (if digital) | — |
+| Flagged (review) | {sum(len(c['data']) for c in review)} | ✅ (if non-digital) | ✅ (if digital) | — |
+| Sent | {sum(len(c['data']) for c in sent)} | ✅ (if non-digital) | ✅ (if digital) | — |
+| Digital Ready | {sum(len(c['data']) for c in digital_ready)} | — | ✅ | — |
+| Field Nation | {sum(len(c['data']) for c in field_nation)} | ❌ | — | ✅ |
+| Declined | {_excluded_declined} | ❌ excluded | ❌ excluded | — |
+| Accepted | {_excluded_accepted} | ❌ excluded | ❌ excluded | — |
+| Finalized | {_excluded_finalized} | ❌ excluded | ❌ excluded | — |
 
-**Supercard TASKS total: {_sup_total}**  (static {tasks_static} + digital {tasks_digital})
-— excludes {_excluded_accepted + _excluded_finalized} accepted+finalized tasks that are still in Onfleet.
+**Static TASKS: {tasks_static} · Digital TASKS: {tasks_digital} · Field Nation TASKS: {fn_tasks}** (FN tracked separately per May 16 2026 spec).
+— excludes {_excluded_declined + _excluded_accepted + _excluded_finalized} declined+accepted+finalized tasks.
             """)
 
             # 📍 Stop-address breakdown for every excluded route so the dispatcher

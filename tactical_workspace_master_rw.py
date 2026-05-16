@@ -7138,82 +7138,40 @@ def run_pod_tab(pod_name):
                         use_container_width=True,
                     )
 
-                # ── BULK ACTION ROW 2: Mark Posted + Revert ─────────────────
-                _post_cols = st.columns(2)
-                with _post_cols[0]:
-                    if _sel_pending:
-                        if st.button(
-                            f"📤 Mark Posted · {len(_sel_pending)}",
-                            key=f"fn_post_btn_{pod_name}",
-                            use_container_width=True,
-                            type="secondary",
-                        ):
-                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                            for _h in _sel_pending:
-                                _fn_posted_dict[_h] = _ts
-                            st.session_state['_fn_posted'] = _fn_posted_dict
-                            try:
-                                _hashes_csv = ",".join(_sel_pending)
-                                threading.Thread(
-                                    target=lambda: requests.post(
-                                        GAS_WEB_APP_URL,
-                                        json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
-                                        timeout=15,
-                                    ),
-                                    daemon=True,
-                                ).start()
-                            except Exception as _fpe:
-                                _log_err("markFNPosted/pod", _fpe)
-                            st.session_state[_fn_select_key] = []
-                            st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
-                            st.rerun()
-                    else:
-                        st.button(
-                            "📤 Mark Posted · 0",
-                            key=f"fn_post_btn_empty_{pod_name}",
-                            use_container_width=True,
-                            disabled=True,
-                        )
-                with _post_cols[1]:
-                    if _sel_revertable:
-                        if st.button(
-                            f"↩️ Revert to Pending · {len(_sel_revertable)}",
-                            key=f"fn_revert_bulk_{pod_name}",
-                            use_container_width=True,
-                            type="secondary",
-                        ):
-                            # Optimistic clear so the UI flips back to Pending immediately.
-                            for _h in _sel_revertable:
-                                _fn_posted_dict.pop(_h, None)
-                                _fn_provider_dict.pop(_h, None)
-                                _fn_assigned_dict.pop(_h, None)
-                                _fn_exported.pop(_h, None)
-                            st.session_state['_fn_posted'] = _fn_posted_dict
-                            st.session_state['_fn_provider'] = _fn_provider_dict
-                            st.session_state['_fn_assigned'] = _fn_assigned_dict
-                            st.session_state['_fn_exported'] = _fn_exported
-                            try:
-                                _hashes_csv = ",".join(_sel_revertable)
-                                threading.Thread(
-                                    target=lambda: requests.post(
-                                        GAS_WEB_APP_URL,
-                                        json={"action": "bulkRevertFnState", "cluster_hash": _hashes_csv},
-                                        timeout=20,
-                                    ),
-                                    daemon=True,
-                                ).start()
-                            except Exception as _fre:
-                                _log_err("bulkRevertFnState/pod", _fre)
-                            st.session_state[_fn_select_key] = []
-                            st.toast(f"↩️ Reverted {len(_sel_revertable)} route(s) to Pending.")
-                            st.rerun()
-                    else:
-                        st.button(
-                            "↩️ Revert to Pending · 0",
-                            key=f"fn_revert_bulk_empty_{pod_name}",
-                            use_container_width=True,
-                            disabled=True,
-                        )
+                # ── BULK ACTION ROW 2: Mark Posted (full-width) ─────────────
+                if _sel_pending:
+                    if st.button(
+                        f"📤 Mark Posted · {len(_sel_pending)}",
+                        key=f"fn_post_btn_{pod_name}",
+                        use_container_width=True,
+                        type="secondary",
+                    ):
+                        _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                        for _h in _sel_pending:
+                            _fn_posted_dict[_h] = _ts
+                        st.session_state['_fn_posted'] = _fn_posted_dict
+                        try:
+                            _hashes_csv = ",".join(_sel_pending)
+                            threading.Thread(
+                                target=lambda: requests.post(
+                                    GAS_WEB_APP_URL,
+                                    json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                    timeout=15,
+                                ),
+                                daemon=True,
+                            ).start()
+                        except Exception as _fpe:
+                            _log_err("markFNPosted/pod", _fpe)
+                        st.session_state[_fn_select_key] = []
+                        st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
+                        st.rerun()
+                else:
+                    st.button(
+                        "📤 Mark Posted · 0",
+                        key=f"fn_post_btn_empty_{pod_name}",
+                        use_container_width=True,
+                        disabled=True,
+                    )
 
                 # ── BULK ACTION ROW 3: Move Assigned → Accepted ─────────────
                 # Mirrors the per-cluster button but parallelized across the

@@ -234,6 +234,33 @@ def _fetch_onfleet_open_tasks_cached():
 
 st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
 
+# ── COMPACT-BUTTON CSS (global — May 16 2026) ────────────────────────────────
+# Streamlit 1.39 has no `st.button(size="small")`. The default 38px-tall buttons
+# eat too much vertical space, especially in the FN tab's bulk-action row and
+# in every popover's confirm/cancel. This compacts all .stButton, stDownloadButton,
+# and stLinkButton across the app to ~26px tall with 12.5px font. No JS — pure
+# CSS, applied once per page load.
+st.markdown("""
+<style>
+.stButton > button,
+.stDownloadButton > button,
+.stLinkButton > a {
+    padding: 0.2rem 0.6rem !important;
+    font-size: 0.78rem !important;
+    min-height: 28px !important;
+    line-height: 1.15 !important;
+    font-weight: 600 !important;
+}
+/* Multiselect chip rows can shrink a touch too so the FN selection list
+   doesn't dominate the panel after a bulk-select. */
+.stMultiSelect [data-baseweb="tag"] {
+    font-size: 0.72rem !important;
+    padding: 0.05rem 0.4rem !important;
+    height: 22px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ============================================================================
 # 🔄 DEPLOY-RECOVERY WATCHER — silent auto-recovery from Railway redeploys
 # ============================================================================
@@ -6962,43 +6989,39 @@ def run_pod_tab(pod_name):
                 if _fn_select_key not in st.session_state:
                     st.session_state[_fn_select_key] = []
 
+                # Short per-route label for the multiselect chip list.
                 def _fn_label_for(h):
                     _c = _fn_route_lookup.get(h, {})
                     _prov = (_fn_provider_dict.get(h) or '').strip()
                     if h in _fn_assigned_hashes:
-                        _section = '🌐 Assigned'
+                        _tag = '🌐'
                     elif h in _fn_posted_hashes:
-                        _section = '📤 Posted'
+                        _tag = '📤'
                     else:
-                        _section = '📋 Pending'
-                    _prov_part = f" — FN: {_prov}" if _prov else ''
-                    _exp_part = f" · exported {_fn_exported[h]}" if h in _fn_exported else ''
-                    return (
-                        f"[{_section}] {_c.get('city','?')}, {_c.get('state','?')} — "
-                        f"{_c.get('stops',0)} stops · {len(_c.get('data',[]))} tasks{_prov_part}{_exp_part}"
-                    )
+                        _tag = '📋'
+                    _prov_part = f" · {_prov}" if _prov else ''
+                    return f"{_tag} {_c.get('city','?')}, {_c.get('state','?')} · {_c.get('stops',0)}st{_prov_part}"
 
-                # ── BULK-SELECT BANNER + SECTION TOGGLES ──────────────────
+                # ── COMPACT BULK-SELECT BAR ─────────────────────────────────
+                # One-line title, no helper subtitle (it was bossy and ate vertical
+                # real estate). The buttons below are self-explanatory.
                 st.markdown(
                     "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
-                    "padding:8px 12px;margin:6px 0;'>"
-                    "<div style='font-size:9px;font-weight:900;color:#854d0e;text-transform:uppercase;letter-spacing:0.08em;'>"
-                    "📦 Bulk Select & Act</div>"
-                    "<div style='font-size:11px;color:#475569;'>Click a section button to select every route in that bucket, then apply any bulk action below. Selecting is no longer one-by-one.</div>"
-                    "</div>",
+                    "padding:4px 10px;margin:6px 0;font-size:10px;font-weight:900;color:#854d0e;"
+                    "text-transform:uppercase;letter-spacing:0.08em;'>📦 Bulk Select & Act</div>",
                     unsafe_allow_html=True,
                 )
 
-                # Section-scoped "Select all" buttons. on_click callbacks mutate the
-                # multiselect's session_state BEFORE the widget re-renders, which is the
-                # only safe way to pre-populate a Streamlit multiselect.
+                # Section-scoped "Select all" callbacks (mutate widget state pre-render).
                 def _fn_set_selection(_hashes):
                     st.session_state[_fn_select_key] = list(_hashes)
 
-                _sel_cols = st.columns(5)
+                # Compact section toggles. Shorter labels + slimmer Clear column so
+                # nothing wraps. Format: "Label · N" so the count is on the same line.
+                _sel_cols = st.columns([1, 1, 1, 1, 0.7])
                 with _sel_cols[0]:
                     st.button(
-                        f"✓ All ({len(_fn_all_hashes)})",
+                        f"All · {len(_fn_all_hashes)}",
                         key=f"fn_sel_all_{pod_name}",
                         use_container_width=True,
                         on_click=_fn_set_selection,
@@ -7007,7 +7030,7 @@ def run_pod_tab(pod_name):
                     )
                 with _sel_cols[1]:
                     st.button(
-                        f"📋 Pending ({len(_fn_pending_hashes)})",
+                        f"Pending · {len(_fn_pending_hashes)}",
                         key=f"fn_sel_pending_{pod_name}",
                         use_container_width=True,
                         on_click=_fn_set_selection,
@@ -7016,7 +7039,7 @@ def run_pod_tab(pod_name):
                     )
                 with _sel_cols[2]:
                     st.button(
-                        f"📤 Posted ({len(_fn_posted_hashes)})",
+                        f"Posted · {len(_fn_posted_hashes)}",
                         key=f"fn_sel_posted_{pod_name}",
                         use_container_width=True,
                         on_click=_fn_set_selection,
@@ -7025,7 +7048,7 @@ def run_pod_tab(pod_name):
                     )
                 with _sel_cols[3]:
                     st.button(
-                        f"🌐 Assigned ({len(_fn_assigned_hashes)})",
+                        f"Assigned · {len(_fn_assigned_hashes)}",
                         key=f"fn_sel_assigned_{pod_name}",
                         use_container_width=True,
                         on_click=_fn_set_selection,
@@ -7034,7 +7057,7 @@ def run_pod_tab(pod_name):
                     )
                 with _sel_cols[4]:
                     st.button(
-                        "✗ Clear",
+                        "Clear",
                         key=f"fn_sel_clear_{pod_name}",
                         use_container_width=True,
                         on_click=_fn_set_selection,
@@ -7047,24 +7070,24 @@ def run_pod_tab(pod_name):
                     format_func=_fn_label_for,
                     key=_fn_select_key,
                     label_visibility="collapsed",
-                    placeholder="Use the buttons above to bulk-select, or type here to add/remove individually...",
+                    placeholder="Section buttons above bulk-select. Type here to fine-tune.",
                 )
                 _fn_selected = st.session_state.get(_fn_select_key, []) or []
 
-                # Per-section subsets for context-aware bulk actions
+                # Per-section subsets for context-aware bulk actions.
                 _sel_pending = [h for h in _fn_selected if h in _fn_pending_hashes]
                 _sel_posted = [h for h in _fn_selected if h in _fn_posted_hashes]
                 _sel_assigned = [h for h in _fn_selected if h in _fn_assigned_hashes]
-                _sel_revertable = _sel_posted + _sel_assigned  # Anything past Pending can be reverted
+                _sel_revertable = _sel_posted + _sel_assigned
 
                 st.caption(
-                    f"Selected: {len(_fn_selected)} route(s)  ·  "
-                    f"📋 {len(_sel_pending)} Pending  ·  "
-                    f"📤 {len(_sel_posted)} Posted  ·  "
-                    f"🌐 {len(_sel_assigned)} Assigned"
+                    f":gray[Selected **{len(_fn_selected)}** — "
+                    f"📋 {len(_sel_pending)} · 📤 {len(_sel_posted)} · 🌐 {len(_sel_assigned)}]"
                 )
 
-                # ── BULK ACTION ROW 1: Combined CSV  +  Open FN link ───────
+                # ── BULK ACTION ROW 1: Combined CSV + Open FN link ──────────
+                # Disabled buttons just show "Combined CSV · 0" instead of a wordy
+                # "(none selected)" suffix — the count IS the empty-state signal.
                 _action_cols = st.columns(2)
                 with _action_cols[0]:
                     if _fn_selected:
@@ -7082,14 +7105,14 @@ def run_pod_tab(pod_name):
                             _log_err("fn_combined", _fe)
                         if _fn_combined_buf is None:
                             st.button(
-                                f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)",
+                                f"📥 Combined CSV · {len(_fn_selected)} (no stops)",
                                 disabled=True,
                                 use_container_width=True,
                                 key=f"fn_dl_disabled_{pod_name}",
                             )
                         else:
                             if st.download_button(
-                                label=f"📥 Download Combined CSV ({len(_fn_selected)} · {_fn_combined_stops} stops)",
+                                label=f"📥 Combined CSV · {len(_fn_selected)} routes · {_fn_combined_stops} stops",
                                 data=_fn_combined_buf,
                                 file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
                                 mime="text/csv",
@@ -7103,7 +7126,7 @@ def run_pod_tab(pod_name):
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
                         st.button(
-                            "📥 Download Combined CSV (none selected)",
+                            "📥 Combined CSV · 0",
                             disabled=True,
                             use_container_width=True,
                             key=f"fn_dl_empty_{pod_name}",
@@ -7115,12 +7138,12 @@ def run_pod_tab(pod_name):
                         use_container_width=True,
                     )
 
-                # ── BULK ACTION ROW 2: Post to FN  +  Revert to Pending ────
+                # ── BULK ACTION ROW 2: Mark Posted + Revert ─────────────────
                 _post_cols = st.columns(2)
                 with _post_cols[0]:
                     if _sel_pending:
                         if st.button(
-                            f"📤 Mark Posted to FN ({len(_sel_pending)} pending)",
+                            f"📤 Mark Posted · {len(_sel_pending)}",
                             key=f"fn_post_btn_{pod_name}",
                             use_container_width=True,
                             type="secondary",
@@ -7146,7 +7169,7 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "📤 Mark Posted to FN (no pending selected)",
+                            "📤 Mark Posted · 0",
                             key=f"fn_post_btn_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
@@ -7154,7 +7177,7 @@ def run_pod_tab(pod_name):
                 with _post_cols[1]:
                     if _sel_revertable:
                         if st.button(
-                            f"↩️ Revert to Pending ({len(_sel_revertable)})",
+                            f"↩️ Revert to Pending · {len(_sel_revertable)}",
                             key=f"fn_revert_bulk_{pod_name}",
                             use_container_width=True,
                             type="secondary",
@@ -7169,7 +7192,6 @@ def run_pod_tab(pod_name):
                             st.session_state['_fn_provider'] = _fn_provider_dict
                             st.session_state['_fn_assigned'] = _fn_assigned_dict
                             st.session_state['_fn_exported'] = _fn_exported
-                            # Persist via GAS (background — UI doesn't wait).
                             try:
                                 _hashes_csv = ",".join(_sel_revertable)
                                 threading.Thread(
@@ -7187,20 +7209,18 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "↩️ Revert to Pending (no posted/assigned selected)",
+                            "↩️ Revert to Pending · 0",
                             key=f"fn_revert_bulk_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
                         )
 
-                # ── BULK ACTION ROW 3: Assigned FN Rep → Move to Accepted ──
-                # Mirrors the per-cluster button inside render_dispatch but operates
-                # over every Assigned hash in the selection, firing markFNAssigned in
-                # parallel. Each success moves the route from FN tab to Accepted on
-                # the next render (and the session-state writes flip it instantly).
+                # ── BULK ACTION ROW 3: Move Assigned → Accepted ─────────────
+                # Mirrors the per-cluster button but parallelized across the
+                # Assigned subset of the selection.
                 if _sel_assigned:
                     if st.button(
-                        f"📢 Assigned FN Rep — Move to Accepted ({len(_sel_assigned)} assigned)",
+                        f"📢 Move to Accepted · {len(_sel_assigned)}",
                         key=f"fn_assigned_bulk_{pod_name}",
                         use_container_width=True,
                         type="primary",
@@ -7225,8 +7245,6 @@ def run_pod_tab(pod_name):
                                 if _success:
                                     _ok += 1
                                     _fn_assigned_dict[_h] = _ts_now
-                                    # Mirror per-cluster session-state writes so the
-                                    # route flips to Accepted on the very next render.
                                     st.session_state[f"contractor_{_h}"] = "Field Nation"
                                     st.session_state.pop(f"route_state_{_h}", None)
                                     st.session_state[f"reverted_{_h}"] = True
@@ -7237,7 +7255,7 @@ def run_pod_tab(pod_name):
                         fetch_sent_records_from_sheet.clear()
                         st.session_state[_fn_select_key] = []
                         if _fail == 0:
-                            st.toast(f"✅ {_ok} route(s) marked Assigned FN Rep — moved to Accepted.")
+                            st.toast(f"✅ {_ok} route(s) moved to Accepted.")
                         elif _ok == 0:
                             st.error(f"All {_fail} GAS calls failed. Check logs.")
                         else:
@@ -7245,7 +7263,7 @@ def run_pod_tab(pod_name):
                         st.rerun()
                 else:
                     st.button(
-                        "📢 Assigned FN Rep — Move to Accepted (no assigned selected)",
+                        "📢 Move to Accepted · 0",
                         key=f"fn_assigned_bulk_empty_{pod_name}",
                         use_container_width=True,
                         disabled=True,

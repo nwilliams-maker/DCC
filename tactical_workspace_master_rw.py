@@ -140,7 +140,20 @@ def _fetch_onfleet_open_tasks_cached():
         "c - priority nationals", "cvs kiosk removal", "digital routes",
         "n - national campaigns",
     ]
-    teams_res = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
+    # Onfleet's /teams normally returns a list of team dicts. On auth failure,
+    # rate limit, or transient error it can return a dict like {"message": "...",
+    # "code": "..."} — iterating a dict yields string keys, which then explode
+    # downstream on t.get(), surfacing as "Onfleet API Error: 'str' object has
+    # no attribute 'get'". Coerce defensively + skip non-dict items so the call
+    # site can never hit that traceback. (May 15 2026.)
+    _teams_raw = requests.get("https://onfleet.com/api/v2/teams", headers=headers, timeout=15).json()
+    if not isinstance(_teams_raw, list):
+        # Common alternate shapes: {"teams": [...]} wrapper, or an error envelope.
+        if isinstance(_teams_raw, dict) and isinstance(_teams_raw.get('teams'), list):
+            _teams_raw = _teams_raw['teams']
+        else:
+            raise RuntimeError(f"Onfleet /teams returned non-list payload: {str(_teams_raw)[:200]}")
+    teams_res = [t for t in _teams_raw if isinstance(t, dict)]
     target_team_ids = [t['id'] for t in teams_res if any(appr in str(t.get('name', '')).lower() for appr in APPROVED_TEAMS)]
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]

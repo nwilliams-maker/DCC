@@ -1998,6 +1998,23 @@ def auto_sync_checker(pod_name):
                     continue  # skip the generic patch loop below
                 elif action == 'markFNAssigned':
                     new_status = 'accepted'
+                elif action in (
+                    'setFnProvider',
+                    'bulkSetFnProviders',
+                    'bulkSetFnProvidersByAddress',
+                    'bulkSetFnProvidersByVenueId',
+                ):
+                    # 🌐 FN-provider mutation (manual text input OR the Chrome
+                    # extension scraping FN.com). These rewrite the FN sheet
+                    # row's JSON payload's fn_provider field, which the FN tab
+                    # title-render path reads from. The change record carries
+                    # no taskIds (FN provider writes hit many routes), so we
+                    # can't pod-filter — invalidate the sheet cache and force
+                    # a rerun in EVERY pod tab so the new names show up
+                    # without a hard refresh. (May 16 2026.)
+                    fetch_sent_records_from_sheet.clear()
+                    affected_this_pod = True
+                    continue
                 elif action == 'saveRoute':
                     new_status = 'sent'
                 else:

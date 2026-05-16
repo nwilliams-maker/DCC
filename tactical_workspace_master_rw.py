@@ -5871,8 +5871,14 @@ def make_venue_details(data):
     return "".join(rows)
 
 def make_venue_details_ghost(locs_list, stop_data=None):
-    """Expandable accordion rows for ghost routes. Uses rich stop_data if available."""
-    # Build lookup by address from stop_data
+    """Expandable accordion rows for ghost routes. Uses rich stop_data if available.
+
+    May 16 2026 — upgraded to mirror make_venue_details' per-stop header pills
+    and campaign-row task-type badges so FN routes in Accepted/Declined/
+    Finalized show the SAME breakdown dispatchers see on Ready/Flagged. The
+    underlying stop_data captures campaigns + per-task-type counts at save
+    time; we just have to render them out here.
+    """
     sd_map = {}
     if stop_data:
         for sd in stop_data:
@@ -5893,42 +5899,88 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         if venue and not venue_prefix:
             venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>"
 
-        # Build icon summary
-        icon_parts = []
-        if sd.get('n_ad', 0) > 0: icon_parts.append("🆕")
-        if sd.get('c_ad', 0) > 0: icon_parts.append("🔄")
-        if sd.get('d_ad', 0) > 0: icon_parts.append("⚪")
-        if sd.get('inst', 0) > 0: icon_parts.append(f"🛠️ {sd['inst']}")
-        if sd.get('remov', 0) > 0: icon_parts.append(f"🗑️ {sd['remov']}")
-        icon_html = f" <span style='font-size:12px;'>{' '.join(icon_parts)}</span>" if icon_parts else ""
-        esc_html = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗</span>" if sd.get('esc') else ""
+        # Per-stop counts (defensive — older sheet rows may be missing keys).
+        _inst    = int(sd.get('inst', 0) or 0)
+        _remov   = int(sd.get('remov', 0) or 0)
+        _n_ad    = int(sd.get('n_ad', 0) or 0)
+        _c_ad    = int(sd.get('c_ad', 0) or 0)
+        _d_ad    = int(sd.get('d_ad', 0) or 0)
+        _t_count = int(sd.get('t_count', 0) or 0) or (_inst + _remov + _n_ad + _c_ad + _d_ad)
+        _stop_bs = str(sd.get('boostedStandard', '') or '').lower()
+        _boost   = 1 if ('boosted' in _stop_bs and 'local plus' not in _stop_bs) else 0
+        _lplus   = 1 if ('local plus' in _stop_bs) else 0
+        _esc     = 1 if sd.get('esc') else 0
 
-        t_pill = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{sd['t_count']} Tasks</span>" if sd.get('t_count') else ""
+        # Header pills — match the live version's layout.
+        k_tag        = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {_inst} Kiosk</span>" if _inst > 0 else ""
+        remov_tag    = f" <span style='color:#9333ea;font-weight:800;font-size:10px;'>🗑️ {_remov}</span>" if _remov > 0 else ""
+        boost_tag    = f" <span style='color:#dc2626;font-weight:800;font-size:10px;'>🔥</span>" if _boost else ""
+        lplus_tag    = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐</span>" if _lplus else ""
+        esc_tag      = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗</span>" if _esc else ""
+        t_pill       = f" <span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{_t_count} Tasks</span>" if _t_count else ""
 
-        # Build campaign expansion
-        camps = sd.get('campaigns', [])
+        # Campaign rows: for each campaign at this stop, render a row with the
+        # best available task-type badge. Since stop_data doesn't pair campaigns
+        # with task types 1:1, we fall back to the stop-level dominant type.
+        def _stop_tt_badge():
+            if _n_ad: return "🆕 New Ad"
+            if _c_ad: return "🔄 Continuity"
+            if _d_ad: return "⚪ Default"
+            if _inst: return "🛠️ Install"
+            if _remov: return "🗑️ Removal"
+            return ""
+
+        camps = sd.get('campaigns', []) or []
         camp_rows = []
         seen = set()
+        _default_badge = _stop_tt_badge()
         for cp in camps:
-            cname = cp.get('name', '')
+            cname = (cp.get('name', '') or '').strip()
             if not cname: continue
+            tt_badge = _default_badge
             badges = ""
-            if cp.get('esc'): badges += " ❗"
-            bs = cp.get('bs', '')
-            if 'local plus' in bs: badges += " ⭐"
-            elif 'boosted' in bs: badges += " 🔥"
-            row = f"<div style='font-size:10px;color:#64748b;padding-left:4px;margin-top:2px;'>• {cname}{badges}</div>"
+            if cp.get('esc'): badges += " <span style='color:#dc2626;font-weight:800;'>❗</span>"
+            bs = (cp.get('bs', '') or '').lower()
+            if 'local plus' in bs: badges += " <span style='color:#ca8a04;font-weight:800;'>⭐</span>"
+            elif 'boosted' in bs: badges += " <span style='color:#dc2626;font-weight:800;'>🔥</span>"
+            tt_html = f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>" if tt_badge else ""
+            row = (
+                f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
+                f"• <span style='color:#0f172a;font-weight:600;'>{cname}</span>"
+                f"{tt_html}{badges}"
+                f"</div>"
+            )
             if row not in seen:
                 seen.add(row)
                 camp_rows.append(row)
 
-        camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else                      f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No campaign data.</div>"
+        # When no campaigns survive (legacy FN rows w/o stopData campaigns),
+        # fall back to a task-type tally — guarantees the accordion ALWAYS
+        # reveals useful detail.
+        if not camp_rows:
+            tt_lines = []
+            if _inst:  tt_lines.append(f"🛠️ Install &times; {_inst}")
+            if _remov: tt_lines.append(f"🗑️ Removal &times; {_remov}")
+            if _n_ad:  tt_lines.append(f"🆕 New Ad &times; {_n_ad}")
+            if _c_ad:  tt_lines.append(f"🔄 Continuity &times; {_c_ad}")
+            if _d_ad:  tt_lines.append(f"⚪ Default &times; {_d_ad}")
+            if tt_lines:
+                _body = "".join(
+                    f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>• <span style='font-weight:700;color:#0f172a;'>{_ln}</span></div>"
+                    for _ln in tt_lines
+                )
+                camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{_body}</div>"
+            else:
+                camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
+        else:
+            camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>"
 
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;font-size:12px;'>{addr}</span>{esc_html}{t_pill}{icon_html}"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{addr}</span>"
+            f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
     return "".join(rows)
@@ -8834,6 +8886,31 @@ with tabs[6]:
                                         _dflv.append(f"{_v} — {tk['full']}" if _v else tk['full'])
                                 _dfl_venues = venue_section(make_venue_details(c['data']))
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_dfl_venues}</div>""", unsafe_allow_html=True)
+                        with btn_col:
+                            if not _is_dispatch_associate():
+                                with st.popover("↩️"):
+                                    st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                    if st.button("🚨 Yes, Remove", key=f"rev_d_fin_{cluster_hash}", type="primary", use_container_width=True):
+                                        move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": "Global_Digital", "cluster_data": c, "check_completed": True})
+                                        st.rerun()
+                    else:
+                        g = item
+                        g_ic_name = g.get('contractor_name', 'Unknown')
+                        ghost_hash = g.get('hash', f"ghost_d_fin_{i}")
+                        wo_display = g.get('wo', g_ic_name)
+                        comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                        stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                        _gdfk_total = g.get('kCnt', 0) or 0
+                        _gdfk_pill = f" | 🛠️ {_gdfk_total} Kiosk" if _gdfk_total > 0 else ""
+                        exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                        with exp_col:
+                            with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gdfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                                raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                                if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                                else: task_locs = raw_locs
+                                u_locs = list(dict.fromkeys(task_locs))
+                                _gdfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                                st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gdfin_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
                             if not _is_dispatch_associate():
                                 with st.popover("↩️"):

@@ -2003,15 +2003,16 @@ def auto_sync_checker(pod_name):
                     'bulkSetFnProviders',
                     'bulkSetFnProvidersByAddress',
                     'bulkSetFnProvidersByVenueId',
+                    'bulkRevertFnState',
                 ):
-                    # 🌐 FN-provider mutation (manual text input OR the Chrome
-                    # extension scraping FN.com). These rewrite the FN sheet
-                    # row's JSON payload's fn_provider field, which the FN tab
-                    # title-render path reads from. The change record carries
-                    # no taskIds (FN provider writes hit many routes), so we
-                    # can't pod-filter — invalidate the sheet cache and force
-                    # a rerun in EVERY pod tab so the new names show up
-                    # without a hard refresh. (May 16 2026.)
+                    # 🌐 FN-state mutation. Provider writes (text input + Chrome
+                    # extension scraping FN.com) and bulk reverts (Pending/Posted/
+                    # Assigned → Pending) all rewrite the FN sheet row's JSON
+                    # payload — fn_provider, fn_posted_ts, assigned_to_fn, etc.
+                    # The change record carries no taskIds (these writes hit many
+                    # routes), so we can't pod-filter — invalidate the sheet
+                    # cache and force a rerun in EVERY pod tab so the new state
+                    # shows up without a hard refresh. (May 16 2026.)
                     fetch_sent_records_from_sheet.clear()
                     affected_this_pod = True
                     continue
@@ -6922,49 +6923,151 @@ def run_pod_tab(pod_name):
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
 
-                # 📦 COMBINED CSV section — multi-select FN routes and download a single
-                # CSV with all their stops. Routes that have been included in a download
-                # get a checkmark in their expander label. They\'re still in the FN tab
-                # (so you can still click "Assigned FN Rep" per route) but visually flagged
-                # so you don\'t re-export them by accident.
+                # 🌐 FN TAB — 3-section model (May 16 2026):
+                #   Pending  = no fn_posted_ts (not yet posted to FN)
+                #   Posted   = fn_posted_ts set, but fn_provider not yet filled
+                #   Assigned = fn_provider filled (ready to move to Accepted)
+                # Selecting one-by-one was tedious, so we replaced the bare multiselect
+                # with section-scoped "Select all" buttons that bulk-populate it.
+                # All four bulk actions (CSV / Mark Posted / Assigned → Accepted /
+                # Revert to Pending) operate on the same selection but each filters
+                # to the routes whose state makes the action meaningful.
                 _fn_exported = st.session_state.setdefault('_fn_exported', {})
-                _fn_route_lookup = {}  # hash -> cluster
-                _fn_options = []
+                _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+                _fn_provider_dict = st.session_state.setdefault('_fn_provider', {})
+                _fn_assigned_dict = st.session_state.setdefault('_fn_assigned', {})
+
+                # Partition routes into Pending / Posted / Assigned
+                _fn_route_lookup = {}    # hash -> cluster
+                _fn_pending_hashes = []
+                _fn_posted_hashes = []
+                _fn_assigned_hashes = []
                 for _fc in sorted_fn:
                     _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
                     if not _fc_tids:
                         continue
                     _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
                     _fn_route_lookup[_fc_hash] = _fc
-                    _fn_options.append(_fc_hash)
+                    _has_provider = bool((_fn_provider_dict.get(_fc_hash) or '').strip())
+                    _is_posted = _fc_hash in _fn_posted_dict
+                    if _has_provider:
+                        _fn_assigned_hashes.append(_fc_hash)
+                    elif _is_posted:
+                        _fn_posted_hashes.append(_fc_hash)
+                    else:
+                        _fn_pending_hashes.append(_fc_hash)
+                _fn_all_hashes = _fn_pending_hashes + _fn_posted_hashes + _fn_assigned_hashes
+
                 _fn_select_key = f"fn_combined_select_{pod_name}"
-                _fn_label_for = lambda h: (
-                    f"{'✓ ' if h in _fn_exported else ''}{_fn_route_lookup[h].get('city','?')}, {_fn_route_lookup[h].get('state','?')} "
-                    f"— {_fn_route_lookup[h].get('stops',0)} stops · {len(_fn_route_lookup[h].get('data',[]))} tasks"
-                    + (f" · exported {_fn_exported[h]}" if h in _fn_exported else "")
-                )
+                if _fn_select_key not in st.session_state:
+                    st.session_state[_fn_select_key] = []
+
+                def _fn_label_for(h):
+                    _c = _fn_route_lookup.get(h, {})
+                    _prov = (_fn_provider_dict.get(h) or '').strip()
+                    if h in _fn_assigned_hashes:
+                        _section = '🌐 Assigned'
+                    elif h in _fn_posted_hashes:
+                        _section = '📤 Posted'
+                    else:
+                        _section = '📋 Pending'
+                    _prov_part = f" — FN: {_prov}" if _prov else ''
+                    _exp_part = f" · exported {_fn_exported[h]}" if h in _fn_exported else ''
+                    return (
+                        f"[{_section}] {_c.get('city','?')}, {_c.get('state','?')} — "
+                        f"{_c.get('stops',0)} stops · {len(_c.get('data',[]))} tasks{_prov_part}{_exp_part}"
+                    )
+
+                # ── BULK-SELECT BANNER + SECTION TOGGLES ──────────────────
                 st.markdown(
                     "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
                     "padding:8px 12px;margin:6px 0;'>"
                     "<div style='font-size:9px;font-weight:900;color:#854d0e;text-transform:uppercase;letter-spacing:0.08em;'>"
-                    "📦 Combined FN CSV</div>"
-                    "<div style='font-size:11px;color:#475569;'>Select multiple FN routes, download a single CSV with every stop. ✓ marks routes already exported.</div>"
+                    "📦 Bulk Select & Act</div>"
+                    "<div style='font-size:11px;color:#475569;'>Click a section button to select every route in that bucket, then apply any bulk action below. Selecting is no longer one-by-one.</div>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
+
+                # Section-scoped "Select all" buttons. on_click callbacks mutate the
+                # multiselect's session_state BEFORE the widget re-renders, which is the
+                # only safe way to pre-populate a Streamlit multiselect.
+                def _fn_set_selection(_hashes):
+                    st.session_state[_fn_select_key] = list(_hashes)
+
+                _sel_cols = st.columns(5)
+                with _sel_cols[0]:
+                    st.button(
+                        f"✓ All ({len(_fn_all_hashes)})",
+                        key=f"fn_sel_all_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_all_hashes,),
+                        disabled=not _fn_all_hashes,
+                    )
+                with _sel_cols[1]:
+                    st.button(
+                        f"📋 Pending ({len(_fn_pending_hashes)})",
+                        key=f"fn_sel_pending_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_pending_hashes,),
+                        disabled=not _fn_pending_hashes,
+                    )
+                with _sel_cols[2]:
+                    st.button(
+                        f"📤 Posted ({len(_fn_posted_hashes)})",
+                        key=f"fn_sel_posted_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_posted_hashes,),
+                        disabled=not _fn_posted_hashes,
+                    )
+                with _sel_cols[3]:
+                    st.button(
+                        f"🌐 Assigned ({len(_fn_assigned_hashes)})",
+                        key=f"fn_sel_assigned_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_assigned_hashes,),
+                        disabled=not _fn_assigned_hashes,
+                    )
+                with _sel_cols[4]:
+                    st.button(
+                        "✗ Clear",
+                        key=f"fn_sel_clear_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=([],),
+                    )
+
                 st.multiselect(
-                    "Select FN routes for combined CSV",
-                    options=_fn_options,
+                    "Selected FN routes",
+                    options=_fn_all_hashes,
                     format_func=_fn_label_for,
                     key=_fn_select_key,
                     label_visibility="collapsed",
-                    placeholder="Select FN routes to include in the combined CSV...",
+                    placeholder="Use the buttons above to bulk-select, or type here to add/remove individually...",
                 )
                 _fn_selected = st.session_state.get(_fn_select_key, []) or []
-                if True:
+
+                # Per-section subsets for context-aware bulk actions
+                _sel_pending = [h for h in _fn_selected if h in _fn_pending_hashes]
+                _sel_posted = [h for h in _fn_selected if h in _fn_posted_hashes]
+                _sel_assigned = [h for h in _fn_selected if h in _fn_assigned_hashes]
+                _sel_revertable = _sel_posted + _sel_assigned  # Anything past Pending can be reverted
+
+                st.caption(
+                    f"Selected: {len(_fn_selected)} route(s)  ·  "
+                    f"📋 {len(_sel_pending)} Pending  ·  "
+                    f"📤 {len(_sel_posted)} Posted  ·  "
+                    f"🌐 {len(_sel_assigned)} Assigned"
+                )
+
+                # ── BULK ACTION ROW 1: Combined CSV  +  Open FN link ───────
+                _action_cols = st.columns(2)
+                with _action_cols[0]:
                     if _fn_selected:
-                        # Build clusters annotated with their hash so generate_combined_fn_upload
-                        # can echo back which were included.
                         _fn_to_export = []
                         for _h in _fn_selected:
                             _cluster = _fn_route_lookup.get(_h)
@@ -6978,15 +7081,19 @@ def run_pod_tab(pod_name):
                             _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
                             _log_err("fn_combined", _fe)
                         if _fn_combined_buf is None:
-                            st.button(f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)", disabled=True, use_container_width=True, key=f"fn_dl_disabled_{pod_name}")
+                            st.button(
+                                f"📥 Download Combined CSV ({len(_fn_selected)} routes — no kiosk stops)",
+                                disabled=True,
+                                use_container_width=True,
+                                key=f"fn_dl_disabled_{pod_name}",
+                            )
                         else:
                             if st.download_button(
-                                label=f"📥 Download Combined CSV ({len(_fn_selected)} routes · {_fn_combined_stops} stops)",
+                                label=f"📥 Download Combined CSV ({len(_fn_selected)} · {_fn_combined_stops} stops)",
                                 data=_fn_combined_buf,
                                 file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
                                 mime="text/csv",
                                 key=f"fn_dl_combined_{pod_name}",
-                                type="primary",
                                 use_container_width=True,
                             ):
                                 _ts = datetime.now().strftime('%m/%d %I:%M %p')
@@ -6995,41 +7102,35 @@ def run_pod_tab(pod_name):
                                 st.session_state['_fn_exported'] = _fn_exported
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
-                        st.button("📥 Download Combined CSV (none selected)", disabled=True, use_container_width=True, key=f"fn_dl_empty_{pod_name}")
-
-                # 📤 POSTED TO FIELD NATION — same multiselect drives this button.
-                # Moves each selected route into the "Sent" section below within
-                # this FN tab. Tracking is session-scoped (st.session_state['_fn_posted']
-                # keyed by cluster hash → timestamp) — no GAS write, since per the
-                # ownership model 1 Associate owns the FN tab and there's no
-                # cross-contamination with other surfaces.
-                _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
-                _fn_post_left, _fn_post_right = st.columns(2)
-                with _fn_post_left:
+                        st.button(
+                            "📥 Download Combined CSV (none selected)",
+                            disabled=True,
+                            use_container_width=True,
+                            key=f"fn_dl_empty_{pod_name}",
+                        )
+                with _action_cols[1]:
                     st.link_button(
-                        "🌐 Post to Field Nation",
+                        "🌐 Open Field Nation",
                         url="https://app.fieldnation.com/projects",
                         use_container_width=True,
                     )
-                with _fn_post_right:
-                    if _fn_selected:
-                        _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
+
+                # ── BULK ACTION ROW 2: Post to FN  +  Revert to Pending ────
+                _post_cols = st.columns(2)
+                with _post_cols[0]:
+                    if _sel_pending:
                         if st.button(
-                            f"📤 Posted! ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
+                            f"📤 Mark Posted to FN ({len(_sel_pending)} pending)",
                             key=f"fn_post_btn_{pod_name}",
                             use_container_width=True,
                             type="secondary",
-                            disabled=(len(_newly_posting) == 0),
                         ):
                             _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                            for _h in _fn_selected:
+                            for _h in _sel_pending:
                                 _fn_posted_dict[_h] = _ts
                             st.session_state['_fn_posted'] = _fn_posted_dict
-                            # 📤 Fire-and-forget GAS write so the Sent group survives
-                            # reloads and is shared across Associate sessions. Background
-                            # thread — UI doesn't wait. Single POST batches all hashes.
                             try:
-                                _hashes_csv = ",".join(_fn_selected)
+                                _hashes_csv = ",".join(_sel_pending)
                                 threading.Thread(
                                     target=lambda: requests.post(
                                         GAS_WEB_APP_URL,
@@ -7040,32 +7141,69 @@ def run_pod_tab(pod_name):
                                 ).start()
                             except Exception as _fpe:
                                 _log_err("markFNPosted/pod", _fpe)
-                            st.toast(f"📤 Marked {len(_newly_posting)} route(s) as Posted to Field Nation.")
+                            st.session_state[_fn_select_key] = []
+                            st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
                             st.rerun()
                     else:
                         st.button(
-                            "📤 Posted! (none selected)",
+                            "📤 Mark Posted to FN (no pending selected)",
                             key=f"fn_post_btn_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
                         )
+                with _post_cols[1]:
+                    if _sel_revertable:
+                        if st.button(
+                            f"↩️ Revert to Pending ({len(_sel_revertable)})",
+                            key=f"fn_revert_bulk_{pod_name}",
+                            use_container_width=True,
+                            type="secondary",
+                        ):
+                            # Optimistic clear so the UI flips back to Pending immediately.
+                            for _h in _sel_revertable:
+                                _fn_posted_dict.pop(_h, None)
+                                _fn_provider_dict.pop(_h, None)
+                                _fn_assigned_dict.pop(_h, None)
+                                _fn_exported.pop(_h, None)
+                            st.session_state['_fn_posted'] = _fn_posted_dict
+                            st.session_state['_fn_provider'] = _fn_provider_dict
+                            st.session_state['_fn_assigned'] = _fn_assigned_dict
+                            st.session_state['_fn_exported'] = _fn_exported
+                            # Persist via GAS (background — UI doesn't wait).
+                            try:
+                                _hashes_csv = ",".join(_sel_revertable)
+                                threading.Thread(
+                                    target=lambda: requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "bulkRevertFnState", "cluster_hash": _hashes_csv},
+                                        timeout=20,
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            except Exception as _fre:
+                                _log_err("bulkRevertFnState/pod", _fre)
+                            st.session_state[_fn_select_key] = []
+                            st.toast(f"↩️ Reverted {len(_sel_revertable)} route(s) to Pending.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "↩️ Revert to Pending (no posted/assigned selected)",
+                            key=f"fn_revert_bulk_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
+                        )
 
-                # 📢 ASSIGNED FN REP (BULK) — May 2026:
-                # Mirrors the per-cluster button inside render_dispatch (line ~4935)
-                # but operates over every hash in the multiselect, firing
-                # markFNAssigned in parallel via ThreadPoolExecutor. Each successful
-                # GAS call moves that route from the FN tab into Accepted on the
-                # next rerender. Mirrors the per-cluster session-state writes so
-                # the route hops to Accepted instantly (no wait for sheet readback).
-                _fn_assigned_dict = st.session_state.setdefault('_fn_assigned', {})
-                if _fn_selected:
-                    _newly_assigning = [_h for _h in _fn_selected if _h not in _fn_assigned_dict]
+                # ── BULK ACTION ROW 3: Assigned FN Rep → Move to Accepted ──
+                # Mirrors the per-cluster button inside render_dispatch but operates
+                # over every Assigned hash in the selection, firing markFNAssigned in
+                # parallel. Each success moves the route from FN tab to Accepted on
+                # the next render (and the session-state writes flip it instantly).
+                if _sel_assigned:
                     if st.button(
-                        f"📢 Assigned FN Rep — Move to Accepted ({len(_newly_assigning)} new · {len(_fn_selected)} selected)",
+                        f"📢 Assigned FN Rep — Move to Accepted ({len(_sel_assigned)} assigned)",
                         key=f"fn_assigned_bulk_{pod_name}",
                         use_container_width=True,
                         type="primary",
-                        disabled=(len(_newly_assigning) == 0),
                     ):
                         _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
                         def _fire_assigned(_h):
@@ -7080,9 +7218,9 @@ def run_pod_tab(pod_name):
                                 return (_h, False, str(_ex))
                         _ok = 0
                         _fail = 0
-                        with st.spinner(f"Marking {len(_newly_assigning)} route(s) as Assigned FN Rep..."):
-                            with ThreadPoolExecutor(max_workers=min(8, max(1, len(_newly_assigning)))) as _ex:
-                                _results = list(_ex.map(_fire_assigned, _newly_assigning))
+                        with st.spinner(f"Marking {len(_sel_assigned)} route(s) as Assigned FN Rep..."):
+                            with ThreadPoolExecutor(max_workers=min(8, max(1, len(_sel_assigned)))) as _ex:
+                                _results = list(_ex.map(_fire_assigned, _sel_assigned))
                             for _h, _success, _err in _results:
                                 if _success:
                                     _ok += 1
@@ -7097,6 +7235,7 @@ def run_pod_tab(pod_name):
                                     _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
                         st.session_state['_fn_assigned'] = _fn_assigned_dict
                         fetch_sent_records_from_sheet.clear()
+                        st.session_state[_fn_select_key] = []
                         if _fail == 0:
                             st.toast(f"✅ {_ok} route(s) marked Assigned FN Rep — moved to Accepted.")
                         elif _ok == 0:
@@ -7106,7 +7245,7 @@ def run_pod_tab(pod_name):
                         st.rerun()
                 else:
                     st.button(
-                        "📢 Assigned FN Rep — Move to Accepted (none selected)",
+                        "📢 Assigned FN Rep — Move to Accepted (no assigned selected)",
                         key=f"fn_assigned_bulk_empty_{pod_name}",
                         use_container_width=True,
                         disabled=True,
@@ -7114,56 +7253,68 @@ def run_pod_tab(pod_name):
 
                 st.divider()
 
-                # Partition the FN routes into Pending (not yet posted) and Sent (posted).
-                # Render Pending first, then Sent — each with its own banner header.
-                _fn_pending_list, _fn_sent_list = [], []
-                for _c in sorted_fn:
-                    _ch = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in _c.get('data', [])])).encode()).hexdigest()
-                    (_fn_sent_list if _ch in _fn_posted_dict else _fn_pending_list).append(_c)
-                _fn_ordered = _fn_pending_list + _fn_sent_list
+                # Render the 3 buckets in order: Pending → Posted → Assigned.
+                # Each gets its own banner; section transitions reset the state header.
+                _fn_pending_list  = [_fn_route_lookup[h] for h in _fn_pending_hashes]
+                _fn_posted_list   = [_fn_route_lookup[h] for h in _fn_posted_hashes]
+                _fn_assigned_list = [_fn_route_lookup[h] for h in _fn_assigned_hashes]
+                _fn_ordered = _fn_pending_list + _fn_posted_list + _fn_assigned_list
 
-                if _fn_pending_list:
+                def _fn_section_banner(_label, _count, _bg, _border, _fg, _emoji, _margin_top="6px"):
                     st.markdown(
-                        "<div style='background:#fffbeb; border-left:3px solid #f59e0b; "
-                        "padding:6px 12px; margin:6px 0 4px 0; border-radius:6px;'>"
-                        f"<span style='font-size:11px; font-weight:900; color:#92400e; "
-                        "text-transform:uppercase; letter-spacing:0.08em;'>📋 Pending Post — "
-                        f"{len(_fn_pending_list)} route(s)</span></div>",
+                        f"<div style='background:{_bg}; border-left:3px solid {_border}; "
+                        f"padding:6px 12px; margin:{_margin_top} 0 4px 0; border-radius:6px;'>"
+                        f"<span style='font-size:11px; font-weight:900; color:{_fg}; "
+                        f"text-transform:uppercase; letter-spacing:0.08em;'>{_emoji} {_label} · "
+                        f"{_count} route(s)</span></div>",
                         unsafe_allow_html=True,
                     )
 
+                if _fn_pending_list:
+                    _fn_section_banner("Pending Post", len(_fn_pending_list), "#fffbeb", "#f59e0b", "#92400e", "📋")
+
                 current_state = None
-                _entered_sent_zone = False
+                _last_section = 'pending' if _fn_pending_list else ('posted' if _fn_posted_list else 'assigned')
+                _seen_posted_banner = False
+                _seen_assigned_banner = False
                 for i, c in enumerate(_fn_ordered):
-                    # Inject the "Sent" banner at the boundary between pending and sent.
-                    if (not _entered_sent_zone) and i == len(_fn_pending_list) and _fn_sent_list:
-                        st.markdown(
-                            "<div style='background:#ecfdf5; border-left:3px solid #10b981; "
-                            "padding:6px 12px; margin:14px 0 4px 0; border-radius:6px;'>"
-                            f"<span style='font-size:11px; font-weight:900; color:#065f46; "
-                            "text-transform:uppercase; letter-spacing:0.08em;'>📤 Posted! · "
-                            f"{len(_fn_sent_list)} route(s)</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                        current_state = None  # reset so the first state-header re-renders inside the Sent zone
-                        _entered_sent_zone = True
+                    _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+                    # Determine which section this route lives in.
+                    if _fn_h_for_badge in _fn_assigned_hashes:
+                        _this_section = 'assigned'
+                    elif _fn_h_for_badge in _fn_posted_hashes:
+                        _this_section = 'posted'
+                    else:
+                        _this_section = 'pending'
+
+                    # Section banner transitions (fired at the first row of each new section).
+                    if _this_section == 'posted' and not _seen_posted_banner:
+                        _fn_section_banner("Posted to FN — awaiting Provider", len(_fn_posted_list), "#ecfdf5", "#10b981", "#065f46", "📤", _margin_top="14px")
+                        _seen_posted_banner = True
+                        current_state = None
+                    elif _this_section == 'assigned' and not _seen_assigned_banner:
+                        _fn_section_banner("Assigned — ready to move to Accepted", len(_fn_assigned_list), "#dbeafe", "#3b82f6", "#1e40af", "🌐", _margin_top="14px")
+                        _seen_assigned_banner = True
+                        current_state = None
+                    _last_section = _this_section
+
                     if c['state'] != current_state:
                         current_state = c['state']
                         st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
-                    
+
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     digi_pill = " 🔌" if c.get('is_digital') else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
                     remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if c.get('remov_count', 0) > 0 else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    
-                    _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+
                     _fn_exp_check = "✓ " if _fn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
+                    _fn_sel_check = "☑️ " if _fn_h_for_badge in _fn_selected else ""
                     # 🌐 Inject Assigned Provider into title: "🌐 FN: Jane" or "🌐 FN"
                     _fn_prov_for_title = st.session_state.get('_fn_provider', {}).get(_fn_h_for_badge, '')
                     _fn_label = format_fn_card_title(_fn_prov_for_title)
-                    with st.expander(_fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    with st.expander(_fn_sel_check + _fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -7186,12 +7337,14 @@ def run_pod_tab(pod_name):
     {_fn_venues}
 </div>""", unsafe_allow_html=True)
 
-                        # 🌐 ASSIGNED PROVIDER input — only for Posted routes (i.e. those
-                        # already in the Sent zone of this loop). Pending routes don't have
-                        # a provider yet because they haven't been posted to FN. Saves via
-                        # background thread to GAS setFnProvider; survives reload and travels
-                        # with the route into Accepted when markFNAssigned fires.
-                        if i >= len(_fn_pending_list):
+                        # 🌐 ASSIGNED PROVIDER input — shown for Posted AND Assigned
+                        # routes (Pending hasn't been posted yet so no provider yet).
+                        # Editing here can also promote a Posted route to Assigned or
+                        # clear an Assigned route back to Posted by emptying the field.
+                        # Saves via background thread to GAS setFnProvider; survives
+                        # reload and travels with the route into Accepted when
+                        # markFNAssigned fires.
+                        if _this_section in ('posted', 'assigned'):
                             _fnprov_curr = st.session_state.get('_fn_provider', {}).get(_fn_hash, '')
                             _fnprov_key = f"fn_prov_input_{pod_name}_{_fn_hash}"
                             def _on_fn_prov_change(_h=_fn_hash, _key=_fnprov_key):

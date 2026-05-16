@@ -2263,7 +2263,7 @@ def revoke_field_nation(cluster_hash, pod_name):
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
-from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet
+from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet, save_fn_provider, extract_fn_provider, format_fn_card_title
 
 
 
@@ -2579,6 +2579,10 @@ def _cached_fetch_sent_records_from_sheet():
         # Merged into st.session_state['_fn_posted'] at end-of-function so any
         # local additions made between this read and the next GAS sync survive.
         fn_posted_dict = {}
+        # 🌐 FN-Provider hydration: cluster_hash → Assigned Provider name (Associate-
+        # entered or extension-pushed) so the card title can render "🌐 FN: <name>"
+        # instead of bare "🌐 FN". Same lifecycle as fn_posted_dict.
+        fn_provider_dict = {}
         # 📜 HISTORY DB: per-task event list, in chronological order across every
         # sheet tab a task ever appeared in. Used by render_dispatch to show "declined by X",
         # "removed from Field Nation on Y", etc. on Ready cards so dispatchers see the
@@ -2626,6 +2630,11 @@ def _cached_fetch_sent_records_from_sheet():
                                         fn_posted_dict[_fp_hash] = _fp_dt.strftime('%m/%d %I:%M %p')
                                     except Exception:
                                         fn_posted_dict[_fp_hash] = str(_fp_ts_raw)
+                                # 🌐 Also harvest fn_provider (Assigned Provider name).
+                                # Survives reload + travels to Accepted via markFNAssigned.
+                                _fp_provider = extract_fn_provider(p)
+                                if _fp_hash and _fp_provider:
+                                    fn_provider_dict[_fp_hash] = _fp_provider
 
                             # 1. Live Task Matching
                             for tid in tids:
@@ -2651,6 +2660,18 @@ def _cached_fetch_sent_records_from_sheet():
                                         "raw_ts": dt_obj,
                                     })
                             
+                            # 🌐 Accepted FN routes (post-markFNAssigned) — harvest provider
+                            # from the new sheet row too so the Accepted tab title can render
+                            # "🌐 FN: <name>". The payload's assigned_to_fn flag is the marker.
+                            try:
+                                if p.get('assigned_to_fn'):
+                                    _afp_provider = extract_fn_provider(p)
+                                    _afp_hash = p.get('cluster_hash')
+                                    if _afp_hash and _afp_provider:
+                                        fn_provider_dict[_afp_hash] = _afp_provider
+                            except Exception:
+                                pass
+
                             # 🌟 THE FIX: Omni-Ghost Engine - Capture Sent routes too!
                             # May 4 2026 — added 'field_nation' so FN-sheet rows also produce
                             # ghost entries. Required because once "Assign to Field Nation" pushes
@@ -2819,6 +2840,10 @@ def _cached_fetch_sent_records_from_sheet():
             ghost_routes['_fn_posted'] = fn_posted_dict
         except Exception as _fpe:
             _log_err("fn_posted_attach", _fpe)
+        try:
+            ghost_routes['_fn_provider'] = fn_provider_dict
+        except Exception as _fpv:
+            _log_err("fn_provider_attach", _fpv)
         return sent_dict, ghost_routes, _archived_wos, history_db
     except Exception as e:
         st.error(f"Failed to fetch portal records: {e}")
@@ -2851,6 +2876,18 @@ def fetch_sent_records_from_sheet():
             st.session_state['_fn_posted'] = _ss_fp
     except Exception as _fpe:
         _log_err("fn_posted_hydrate_wrapper", _fpe)
+    # 🌐 Same hydration pattern for _fn_provider: cache-hit-safe merge into
+    # session_state so the Assigned Provider name survives reloads.
+    try:
+        _fpv_from_sheet = (ghost_routes or {}).get('_fn_provider', {}) or {}
+        if _fpv_from_sheet:
+            _ss_fpv = st.session_state.get('_fn_provider', {}) or {}
+            for _h, _name in _fpv_from_sheet.items():
+                # Sheet value wins on conflict — it's the source of truth.
+                _ss_fpv[_h] = _name
+            st.session_state['_fn_provider'] = _ss_fpv
+    except Exception as _fpv:
+        _log_err("fn_provider_hydrate_wrapper", _fpv)
     return sent_dict, ghost_routes, archived_wos, history_db
 
 
@@ -7041,7 +7078,10 @@ def run_pod_tab(pod_name):
                     
                     _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
                     _fn_exp_check = "✓ " if _fn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
-                    with st.expander(_fn_exp_check + f"🌐 FN:{digi_pill} {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    # 🌐 Inject Assigned Provider into title: "🌐 FN: Jane" or "🌐 FN"
+                    _fn_prov_for_title = st.session_state.get('_fn_provider', {}).get(_fn_h_for_badge, '')
+                    _fn_label = format_fn_card_title(_fn_prov_for_title)
+                    with st.expander(_fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
@@ -7063,6 +7103,28 @@ def run_pod_tab(pod_name):
     </div>
     {_fn_venues}
 </div>""", unsafe_allow_html=True)
+
+                        # 🌐 ASSIGNED PROVIDER input — only for Posted routes (i.e. those
+                        # already in the Sent zone of this loop). Pending routes don't have
+                        # a provider yet because they haven't been posted to FN. Saves via
+                        # background thread to GAS setFnProvider; survives reload and travels
+                        # with the route into Accepted when markFNAssigned fires.
+                        if i >= len(_fn_pending_list):
+                            _fnprov_curr = st.session_state.get('_fn_provider', {}).get(_fn_hash, '')
+                            _fnprov_key = f"fn_prov_input_{pod_name}_{_fn_hash}"
+                            def _on_fn_prov_change(_h=_fn_hash, _key=_fnprov_key):
+                                _val = (st.session_state.get(_key, '') or '').strip()
+                                _dict = st.session_state.setdefault('_fn_provider', {})
+                                _dict[_h] = _val
+                                save_fn_provider(GAS_WEB_APP_URL, _h, _val, st.session_state)
+                            st.text_input(
+                                "🌐 Assigned Provider (Field Nation)",
+                                value=_fnprov_curr,
+                                key=_fnprov_key,
+                                on_change=_on_fn_prov_change,
+                                placeholder="Type the FN provider's name once they accept",
+                                help="Saves automatically. Appears as 'FN: <name>' in the card title and travels with the route to Accepted.",
+                            )
 
                         render_dispatch(i+5000, c, pod_name)
                     
@@ -7275,7 +7337,11 @@ def run_pod_tab(pod_name):
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        _acc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
+                        if ic_name == "Field Nation":
+                            _acc_fn_prov = st.session_state.get('_fn_provider', {}).get(cluster_hash, '')
+                            _acc_fn_badge = f"🌐 {format_fn_card_title(_acc_fn_prov)} | "
+                        else:
+                            _acc_fn_badge = ""
                         with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:

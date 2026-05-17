@@ -5666,7 +5666,12 @@ text-decoration:none;">📨 Default Mail</a>
         if st.button("📢 Assigned FN Rep (Move to Accepted)", key=f"posted_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
             with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
                 try:
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "cluster_hash": cluster_hash}, timeout=25).json()
+                    # 90s timeout: markFNAssigned does (1) OnFleet routePlan
+                    # rename, (2) per-task metadata + worker re-PUT, (3) per-
+                    # stop Monday lookups + WO/installer mutations. An 11-stop
+                    # route can fire ~120+ HTTP calls server-side; the old 25s
+                    # cap timed out on bigger routes. (May 17 2026.)
+                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "cluster_hash": cluster_hash}, timeout=90).json()
                     if res.get("success"):
                         # Local state: route moves to Accepted (treated as already accepted by the FN rep).
                         # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened
@@ -7404,7 +7409,7 @@ def run_pod_tab(pod_name):
                                 _r = requests.post(
                                     GAS_WEB_APP_URL,
                                     json={"action": "markFNAssigned", "cluster_hash": _h},
-                                    timeout=25,
+                                    timeout=90,  # see comment on per-route call above
                                 ).json()
                                 return (_h, bool(_r.get("success")), _r.get("error", ""))
                             except Exception as _ex:

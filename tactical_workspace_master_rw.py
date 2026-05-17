@@ -2474,11 +2474,32 @@ def _fn_ghost_to_cluster(g):
     for _sd in (g.get('stop_data') or []):
         _a = (_sd.get('addr', '') or '').strip()
         if _a: _sd_by_addr[_a] = _sd
+    # Per-stop campaign cycle counter so multiple tasks at the same address
+    # round-robin through that stop's campaigns (matches the main fanout
+    # loop's behavior at line 2430 — keeps multi-campaign stops surfacing
+    # every name, not just the first).
+    _fb_cycle = {}
     _rr_idx = 0
     while id_queue:
         _addr = _all_stops[_rr_idx % len(_all_stops)]
         _rr_idx += 1
         _sd = _sd_by_addr.get(_addr, {}) or {}
+        # Pull this stop's campaigns and pick the next one (round-robin).
+        _stop_camps = [
+            _cp for _cp in (_sd.get('campaigns') or [])
+            if isinstance(_cp, dict) and (_cp.get('name') or '').strip()
+        ]
+        if _stop_camps:
+            _ci = _fb_cycle.get(_addr, 0)
+            _fb_cycle[_addr] = _ci + 1
+            _cmp_entry = _stop_camps[_ci % len(_stop_camps)]
+            _cmp_name  = str(_cmp_entry.get('name', '') or '').strip()
+            _cmp_esc   = bool(_cmp_entry.get('esc', False))
+            _cmp_bs    = str(_cmp_entry.get('bs', '') or '').strip()
+        else:
+            _cmp_name  = ''
+            _cmp_esc   = False
+            _cmp_bs    = str(_sd.get('boostedStandard', '') or '').strip()
         synthetic.append({
             'id':              id_queue.pop(0),
             'full':            _addr,
@@ -2489,12 +2510,12 @@ def _fn_ghost_to_cluster(g):
             'kiosk_id':        str(_sd.get('kioskId', '') or '').strip(),
             'location_in_venue': str(_sd.get('locationInVenue', '') or '').strip(),
             'task_type':       '',
-            'client_company':  '',
+            'client_company':  _cmp_name,
             'is_digital':      False,
-            'boosted_standard': str(_sd.get('boostedStandard', '') or '').strip(),
+            'boosted_standard': _cmp_bs,
             'art_file':        str(_sd.get('artFile', '') or '').strip(),
             'customer_type':   str(_sd.get('customerType', '') or '').strip(),
-            'escalated':       False,
+            'escalated':       _cmp_esc,
         })
 
     inst_count  = sum(1 for t in synthetic if str(t.get('task_type','')).lower() == 'kiosk install')

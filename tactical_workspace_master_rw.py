@@ -7309,7 +7309,10 @@ def run_pod_tab(pod_name):
                     # 🌐 Inject Assigned Provider into title: "🌐 FN: Jane" or "🌐 FN"
                     _fn_prov_for_title = st.session_state.get('_fn_provider', {}).get(_fn_h_for_badge, '')
                     _fn_label = format_fn_card_title(_fn_prov_for_title)
-                    with st.expander(_fn_sel_check + _fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    # FN cards expanded by default — Nick: "for each Field Nation
+                    # card it needs to show the full location list with the entire
+                    # campaign name breakdown including the emojis" (May 17 2026).
+                    with st.expander(_fn_sel_check + _fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=True):
                         # 🌟 Guarantee route_state is set before render so FN card shows
                         _fn_task_ids = [str(t['id']).strip() for t in c['data']]
                         _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()

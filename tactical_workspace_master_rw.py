@@ -5466,6 +5466,35 @@ text-decoration:none;">📨 Default Mail</a>
     BORDER_COLOR = "#FACC15"
 
     if route_state == "field_nation":
+        # 🐛 DIAGNOSTIC: when ?debug=fn is on the URL, dump the actual
+        # cluster['data'] task dicts so we can SEE what client_company /
+        # campaign / task-type fields the renderer is being handed. Solves
+        # the "campaigns missing on FN cards but present in Ready" mystery
+        # one row at a time. (May 17 2026.)
+        if st.query_params.get("debug") == "fn":
+            with st.expander(f"🐛 FN data debug — {cluster_hash[:8]}", expanded=False):
+                _dbg_addrs = {}
+                for _t in cluster.get('data', []):
+                    _ad = _t.get('full', '')
+                    _dbg_addrs.setdefault(_ad, []).append({
+                        'id': _t.get('id', ''),
+                        'client_company': _t.get('client_company', ''),
+                        'task_type': _t.get('task_type', ''),
+                        'venue_name': _t.get('venue_name', ''),
+                        'boosted_standard': _t.get('boosted_standard', ''),
+                        'escalated': _t.get('escalated', False),
+                    })
+                st.caption(f"Total tasks in cluster['data']: {len(cluster.get('data', []))}")
+                st.caption(f"Cluster is FN ghost pseudo: {cluster.get('_is_fn_ghost_pseudo', False)}")
+                for _a, _tasks in _dbg_addrs.items():
+                    st.markdown(f"**{_a}** ({len(_tasks)} tasks)")
+                    _n_with_cmp = sum(1 for _t in _tasks if _t['client_company'])
+                    st.text(f"  with client_company: {_n_with_cmp}/{len(_tasks)}")
+                    for _t in _tasks[:4]:
+                        st.text(f"    id={_t['id']}  cmp='{_t['client_company']}'  tt='{_t['task_type']}'  venue='{_t['venue_name']}'")
+                    if len(_tasks) > 4:
+                        st.text(f"    … +{len(_tasks)-4} more")
+
         # ── ROUTE STOPS (FN routes) ─────────────────────────────────────
         # May 17 2026 — Nick: "I want the original look of the ready cards
         # with campaign names to transition to Field Nation tabs". Renders

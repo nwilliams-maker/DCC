@@ -2447,33 +2447,53 @@ def _fn_ghost_to_cluster(g):
                     'escalated':       bool(_cmp_entry.get('esc', False)),
                 })
 
-    # Tail: any real IDs left after stop_data exhaustion get distributed onto
-    # the first known address as generic rows. This happens when stop_data
-    # under-counts (older sheet rows without per-type breakdowns) — better
-    # than dropping IDs, which would break the cluster_hash invariant.
-    fallback_addr = addrs_seen[0] if addrs_seen else ''
-    if not fallback_addr:
-        # Truly empty stop_data — pull a stop from locs (pipe-delimited string
-        # whose first/last entries are the IC home pin, middle entries are stops).
-        _raw_locs = [s.strip() for s in str(g.get('locs', '')).split('|') if s.strip()]
-        _stops_only = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
-        fallback_addr = _stops_only[0] if _stops_only else (g.get('city', '') or '')
+    # Tail: any real IDs left after stop_data exhaustion get ROUND-ROBINED
+    # across every known address — not dumped onto a single first-address as
+    # we used to. Older FN sheet rows (pre-2026-05-04) often saved stop_data
+    # with addresses but zero per-type counts (inst/remov/n_ad/c_ad/d_ad all
+    # 0), so the fanout loop above consumes zero IDs and the entire queue
+    # spills here. Dumping all 20 IDs onto addrs_seen[0] collapsed an N-stop
+    # route into a 1-stop card with "20 Tasks" pinned to the first venue —
+    # the exact bug Nick caught on a Folsom FN ghost (May 17 2026).
+    #
+    # Build the canonical stop list from BOTH stop_data addresses and the
+    # locs pipe-string (which always reflects the original dispatch order +
+    # count, with the IC home pin at index 0 and N-1).
+    _raw_locs = [s.strip() for s in str(g.get('locs', '')).split('|') if s.strip()]
+    _stops_from_locs = _raw_locs[1:-1] if len(_raw_locs) >= 3 else _raw_locs
+    _all_stops = []
+    for _a in (addrs_seen + _stops_from_locs):
+        _a = (_a or '').strip()
+        if _a and _a not in _all_stops:
+            _all_stops.append(_a)
+    if not _all_stops:
+        _all_stops = [(g.get('city', '') or '')]
+    # Pre-build a lookup so fallback rows can still grab venue/IDs from the
+    # matching stop_data entry when available.
+    _sd_by_addr = {}
+    for _sd in (g.get('stop_data') or []):
+        _a = (_sd.get('addr', '') or '').strip()
+        if _a: _sd_by_addr[_a] = _sd
+    _rr_idx = 0
     while id_queue:
+        _addr = _all_stops[_rr_idx % len(_all_stops)]
+        _rr_idx += 1
+        _sd = _sd_by_addr.get(_addr, {}) or {}
         synthetic.append({
             'id':              id_queue.pop(0),
-            'full':            fallback_addr,
+            'full':            _addr,
             'state':           str(g.get('state', '') or '').strip().upper()[:2],
             'zip':             '',
-            'venue_name':      '',
-            'venue_id':        '',
-            'kiosk_id':        '',
-            'location_in_venue': '',
+            'venue_name':      _sd.get('venue', '') or '',
+            'venue_id':        str(_sd.get('venueId', '') or '').strip(),
+            'kiosk_id':        str(_sd.get('kioskId', '') or '').strip(),
+            'location_in_venue': str(_sd.get('locationInVenue', '') or '').strip(),
             'task_type':       '',
             'client_company':  '',
             'is_digital':      False,
-            'boosted_standard': '',
-            'art_file':        '',
-            'customer_type':   '',
+            'boosted_standard': str(_sd.get('boostedStandard', '') or '').strip(),
+            'art_file':        str(_sd.get('artFile', '') or '').strip(),
+            'customer_type':   str(_sd.get('customerType', '') or '').strip(),
             'escalated':       False,
         })
 

@@ -4826,25 +4826,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 camp_rows.append(row)
             camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else ""
             _icon_html = f"<span style='font-size:13px;margin-left:6px;'>{pill_str}</span>" if pill_str else ""
-            # Per-stop campaign-name list — always visible inside the summary.
-            # (May 17 2026 — uniformity with FN/Sent/Accepted cards via the
-            # same pattern in make_venue_details.)
-            _rd_seen_cmps = []
-            for _t in loc_tasks:
-                _c = str(_t.get('client_company','') or '').strip()
-                if _c and _c not in _rd_seen_cmps:
-                    _rd_seen_cmps.append(_c)
-            _rd_cmp_html = (
-                f"<div style='font-size:10px;color:#475569;width:100%;padding:2px 0 0 22px;line-height:1.3;'>"
-                f"<span style='color:#94a3b8;font-weight:700;'>Campaigns:</span> "
-                f"{' · '.join(_rd_seen_cmps)}</div>"
-            ) if _rd_seen_cmps else ""
             _dispatch_rows.append(
                 f"<details class='fn-loc-row'>"
                 f"<summary class='fn-loc-summary'>"
                 f"<span class='fn-chevron'>›</span>"
                 f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{display_addr}</span>{k_tag_html}{digi_ins_html}{boost_html}{lplus_html}{esc_inline} &nbsp;{task_pill}{_icon_html}"
-                f"{_rd_cmp_html}"
                 f"</summary>{camp_block}</details>"
             )
 
@@ -5439,6 +5425,113 @@ text-decoration:none;">📨 Default Mail</a>
     BORDER_COLOR = "#FACC15"
 
     if route_state == "field_nation":
+        # ── ROUTE STOPS (FN routes) ─────────────────────────────────────
+        # May 17 2026 — Nick: "I want the original look of the ready cards
+        # with campaign names to transition to Field Nation tabs". Renders
+        # the SAME per-stop accordion structure Ready/Flagged uses (including
+        # campaign-row drill-down inside each <details>), so the FN tab card
+        # shows venue / kiosk pill / task-type icons / boosted / esc pills /
+        # tasks count, plus a campaign-list expansion identical to what
+        # dispatchers see in Ready. Builds rows inline (mirrors render_dispatch
+        # lines ~4737-4837) instead of calling make_venue_details so we get
+        # the exact pill order + display_addr "+" prefix behavior.
+        _fn_dispatch_rows = []
+        for _addr, _metrics in stop_metrics.items():
+            _ip = []
+            if _metrics['n_ad']    > 0: _ip.append("🆕")
+            if _metrics['c_ad']    > 0: _ip.append("🔄")
+            if _metrics['d_ad']    > 0: _ip.append("⚪")
+            if _metrics['remov']   > 0: _ip.append(f"🗑️ {_metrics['remov']}")
+            if _metrics['custom']:      _ip.append("📋")
+            if _metrics['digi_off']> 0: _ip.append("📵")
+            if _metrics['digi_srv']> 0: _ip.append("⚙️")
+            _pill_str = " ".join(_ip)
+            _k_html  = f" <span style='color:#16a34a;font-weight:800;font-size:10px;'>🛠️ {_metrics['inst']} Kiosk</span>" if _metrics['inst'] > 0 else ""
+            _di_html = f" <span style='color:#0f766e;font-weight:800;font-size:10px;'>🔧 {_metrics['digi_ins']} Ins/Rem</span>" if _metrics['digi_ins'] > 0 else ""
+            _bo_html = f" <span style='color:#dc2626;font-weight:800;font-size:10px;'>🔥 {_metrics['boost_cnt']}</span>" if _metrics.get('boost_cnt', 0) > 0 else ""
+            _lp_html = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐ {_metrics['lplus_cnt']}</span>" if _metrics.get('lplus_cnt', 0) > 0 else ""
+            _esc_n   = sum(1 for _t in cluster['data'] if _t.get('full') == _addr and _t.get('escalated'))
+            _esc_html= f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {_esc_n}</span>" if _esc_n > 0 else ""
+            _da      = f"+ {_addr}" if _metrics.get('is_new') else _addr
+            _vp      = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{_metrics['venue_name']} — </span>" if _metrics.get('venue_name') else ""
+            _tp      = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{_metrics['t_count']} Tasks</span>"
+            _ih      = f"<span style='font-size:13px;margin-left:6px;'>{_pill_str}</span>" if _pill_str else ""
+            # Campaign rows in expansion — same aggregation Ready uses.
+            from collections import defaultdict as _dd
+            _loc_tasks = [_t for _t in cluster['data'] if _t.get('full') == _addr]
+            _cg = _dd(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
+            for _t in _loc_tasks:
+                _cm = _t.get('client_company', '')
+                if not _cm: continue
+                _tt = str(_t.get('task_type', '')).lower()
+                if _t.get('is_digital'):
+                    if 'offline' in _tt: _tb = "📵 Offline"
+                    elif 'ins/re' in _tt: _tb = "🔧 Ins/Rem"
+                    else: _tb = "⚙️ Service"
+                elif 'install' in _tt: _tb = "🛠️ Install"
+                elif any(x in _tt for x in ['kiosk removal', 'remove kiosk']): _tb = "🗑️ Removal"
+                elif any(x in _tt for x in ['continuity', 'photo retake', 'swap']): _tb = "🔄 Continuity"
+                elif any(x in _tt for x in ['default', 'pull down']): _tb = "⚪ Default"
+                elif any(x in _tt for x in ['new ad', 'art change', 'top']) or not _tt: _tb = "🆕 New Ad"
+                else: _tb = f"📋 {_tt.title()}"
+                _key = (_cm, _tb)
+                _grp = _cg[_key]
+                _grp['cmp'] = _cm
+                _grp['tt_badge'] = _tb
+                _grp['count'] += 1
+                if _t.get('escalated'): _grp['esc'] += 1
+                _bs = str(_t.get('boosted_standard', '')).lower()
+                if 'local plus' in _bs: _grp['lplus'] += 1
+                elif 'boosted' in _bs: _grp['boost'] += 1
+            _crows = []
+            for (_cm, _tb), _grp in _cg.items():
+                _cnt = _grp['count']
+                _cs = f" <span style='color:#94a3b8;font-weight:600;'>× {_cnt}</span>" if _cnt > 1 else ""
+                _ep = f" <span style='color:#dc2626;font-weight:800;'>❗ {_grp['esc']}</span>" if _grp['esc'] > 0 else ""
+                _bp = f" <span style='color:#dc2626;font-weight:800;'>🔥 {_grp['boost']}</span>" if _grp['boost'] > 0 else ""
+                _lp = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {_grp['lplus']}</span>" if _grp['lplus'] > 0 else ""
+                _crows.append(
+                    f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
+                    f"• <span style='color:#0f172a;font-weight:600;'>{_cm}</span>"
+                    f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{_tb}</span>"
+                    f"{_cs}{_ep}{_bp}{_lp}</div>"
+                )
+            # Fallback to task-type tally when client_company is empty across
+            # all tasks (older FN ghosts pre-2026-05-04).
+            if _crows:
+                _cb = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(_crows)}</div>"
+            else:
+                _ttl = []
+                if _metrics['inst']:     _ttl.append(f"🛠️ Install &times; {_metrics['inst']}")
+                if _metrics['remov']:    _ttl.append(f"🗑️ Removal &times; {_metrics['remov']}")
+                if _metrics['n_ad']:     _ttl.append(f"🆕 New Ad &times; {_metrics['n_ad']}")
+                if _metrics['c_ad']:     _ttl.append(f"🔄 Continuity &times; {_metrics['c_ad']}")
+                if _metrics['d_ad']:     _ttl.append(f"⚪ Default &times; {_metrics['d_ad']}")
+                if _metrics['digi_ins']: _ttl.append(f"🔧 Ins/Rem &times; {_metrics['digi_ins']}")
+                if _metrics['digi_off']: _ttl.append(f"📵 Offline &times; {_metrics['digi_off']}")
+                if _metrics['digi_srv']: _ttl.append(f"⚙️ Service &times; {_metrics['digi_srv']}")
+                for _lbl, _n in _metrics['custom'].items():
+                    _ttl.append(f"📋 {_lbl} &times; {_n}")
+                _body = "".join(
+                    f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>• <span style='font-weight:700;color:#0f172a;'>{_ln}</span></div>"
+                    for _ln in _ttl
+                )
+                _cb = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{_body}</div>" if _ttl else ""
+            _fn_dispatch_rows.append(
+                f"<details class='fn-loc-row'>"
+                f"<summary class='fn-loc-summary'>"
+                f"<span class='fn-chevron'>›</span>"
+                f"{_vp}<span style='font-weight:700;color:#0f172a;'>{_da}</span>{_k_html}{_di_html}{_bo_html}{_lp_html}{_esc_html} &nbsp;{_tp}{_ih}"
+                f"</summary>{_cb}</details>"
+            )
+        st.markdown(
+            f"{VENUE_SECTION_CSS}<div style='background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:8px;'>"
+            f"<div style='background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:6px 12px;'>"
+            f"<span style='font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;'>Route Stops</span></div>"
+            f"<div style='padding:2px 8px 4px 8px;'>{''.join(_fn_dispatch_rows)}</div></div>",
+            unsafe_allow_html=True,
+        )
+
         st.info("💡 Route is currently tracked in the Field Nation tab.")
 
         # 🌟 FIELD NATION BUTTONS
@@ -5879,24 +5972,6 @@ def make_venue_details(data):
         if digi_srv > 0: _icon_parts.append("⚙️")
         _icon_html  = f" <span style='font-size:13px;margin-left:6px;'>{' '.join(_icon_parts)}</span>" if _icon_parts else ""
 
-        # Per-stop campaign-name list — comma-separated unique client_company
-        # values across this stop's tasks. Shown directly under the summary
-        # line so dispatchers see WHICH campaigns this venue is running
-        # without having to expand the accordion. Insertion order preserved.
-        # (May 17 2026 — Nick: "Include the Campaign Names for each location.")
-        _seen_cmps = []
-        for _t in loc_tasks:
-            _cmp = str(_t.get('client_company','') or '').strip()
-            if _cmp and _cmp not in _seen_cmps:
-                _seen_cmps.append(_cmp)
-        # width:100% inside the flex-wrap summary forces this line to wrap to
-        # its own row so it stays readable next to the pills above.
-        _cmp_html = (
-            f"<div style='font-size:10px;color:#475569;width:100%;padding:2px 0 0 22px;line-height:1.3;'>"
-            f"<span style='color:#94a3b8;font-weight:700;'>Campaigns:</span> "
-            f"{' · '.join(_seen_cmps)}</div>"
-        ) if _seen_cmps else ""
-
         venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>" if venue else ""
 
         # Campaign expansion: aggregate by (campaign, task type) so multiple tasks for
@@ -5981,7 +6056,6 @@ def make_venue_details(data):
             f"<span class='fn-chevron'>›</span>"
             f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
-            f"{_cmp_html}"
             f"</summary>{camp_block}</details>"
         )
     return "".join(rows)
@@ -6091,26 +6165,12 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         else:
             camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>"
 
-        # Per-stop campaign-name list — mirrors live make_venue_details.
-        # Ghost rows pull from stop_data.campaigns[*].name. (May 17 2026.)
-        _g_seen_cmps = []
-        for _cp in camps:
-            _cn = str(_cp.get('name','') or '').strip()
-            if _cn and _cn not in _g_seen_cmps:
-                _g_seen_cmps.append(_cn)
-        _g_cmp_html = (
-            f"<div style='font-size:10px;color:#475569;width:100%;padding:2px 0 0 22px;line-height:1.3;'>"
-            f"<span style='color:#94a3b8;font-weight:700;'>Campaigns:</span> "
-            f"{' · '.join(_g_seen_cmps)}</div>"
-        ) if _g_seen_cmps else ""
-
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
             f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{addr}</span>"
             f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
-            f"{_g_cmp_html}"
             f"</summary>{camp_block}</details>"
         )
     return "".join(rows)
@@ -7382,21 +7442,12 @@ def run_pod_tab(pod_name):
                         if not st.session_state.get(f"route_state_{_fn_hash}"):
                             st.session_state[f"route_state_{_fn_hash}"] = "field_nation"
 
-                        # ── FN LOCATION SUMMARY CARD ──────────────────────────────
-                        _fn_stops, _fn_tasks = len(set(t['full'] for t in c['data'])), len(c['data'])
-                        _fn_venues = venue_section(make_venue_details(c['data']))
-                        st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
-    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
-        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
-    </div>
-    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{_fn_stops} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {_fn_tasks} Tasks</span></div></div>
-        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Status</div>
-        <div style="font-size:13px; font-weight:700; color:#854d0e;">Field Nation</div></div>
-    </div>
-    {_fn_venues}
-</div>""", unsafe_allow_html=True)
+                        # NOTE (May 17 2026): render_dispatch now renders the
+                        # full Route Stops card (per-stop accordions + campaign
+                        # rows) for FN routes inside its is_fn branch, matching
+                        # Ready/Flagged exactly. The old custom "Route Summary"
+                        # card lived here — it's been removed so the FN card
+                        # uses the same canonical breakdown as Ready.
 
                         # 🌐 ASSIGNED PROVIDER input — shown for Posted AND Assigned
                         # routes (Pending hasn't been posted yet so no provider yet).

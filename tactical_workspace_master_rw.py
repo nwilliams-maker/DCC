@@ -3338,7 +3338,7 @@ def process_digital_pool(master_bar=None):
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
         # 🛡️ DOUBLE-ROUTING GUARD: skip tasks already assigned to a worker.
-        if c_type == 'WORKER' or t.get('worker'):
+        if c_type == 'WORKER':
             continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids: continue
 

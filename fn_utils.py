@@ -52,7 +52,13 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
 
     def _worker():
         try:
-            requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload}, timeout=15)
+            # May 18 2026 — bumped 15 → 90s. saveToFieldNation now does an inline
+            # Monday placeholder push (find by address + 2 mutations per matched
+            # item) on top of the FN sheet append, so multi-stop routes can take
+            # 30–60s server-side. The thread is fire-and-forget so the user isn't
+            # blocked either way, but the longer timeout means we'll actually see
+            # errors via stderr instead of silently dropping the connection mid-push.
+            requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload}, timeout=90)
         except Exception as e:
             print(f"[fn_utils.save_fn_to_sheet] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
@@ -217,20 +223,29 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
 def generate_combined_fn_upload(clusters: list):
     """
     Generates ONE Field Nation mass upload CSV containing rows from every cluster
-    in `clusters`. Each cluster's stops contribute their own row(s); headers appear
-    once at the top.
+    in `clusters`, DEDUPED BY ADDRESS — so the same venue posted across multiple
+    DCC routes lands on FN.com as a single WO with combined kiosk slots instead
+    of N duplicate WOs for the same location.
 
     Apr 27 2026 — added so the dispatcher can batch-export multiple FN routes into
     a single upload instead of downloading and stitching together N separate CSVs.
 
+    May 17 2026 — Nick: "the field nation published routes are duplicated and I
+    need them all combined into 1 work order per location address". Rewritten to
+    group tasks by `full` address ACROSS all clusters (not per-cluster like
+    before). Same address from 4 different routes → 1 CSV row → 1 FN WO.
+    The Bundle column is dropped in this mode since cross-cluster dedupe makes
+    the per-cluster bundle index meaningless.
+
     Args:
-        clusters: list of cluster dicts (same shape as generate_fn_upload\'s `cluster`).
+        clusters: list of cluster dicts (same shape as generate_fn_upload's `cluster`).
 
     Returns:
         (BytesIO buffer, int total_stop_count, list[str] cluster_hashes_included).
         cluster_hashes_included only contains the hashes of clusters that actually
-        contributed rows — clusters with no kiosk-eligible stops are silently skipped
-        but their hashes still appear so the caller can mark them as exported.
+        contributed at least one task — clusters with zero kiosk-eligible tasks
+        are silently skipped but their hashes still appear so the caller can mark
+        them as exported.
     """
     start_date, end_date = _fn_window()
     if not start_date:
@@ -239,21 +254,95 @@ def generate_combined_fn_upload(clusters: list):
         start_date = _fmt_fn_date(_t + timedelta(days=2))
         end_date   = _fmt_fn_date(_t + timedelta(days=14))
 
+    # Aggregate every task from every cluster, keyed by `full` address.
+    # Dedupe within each address by `location_in_venue` so the same kiosk
+    # slot doesn't get listed twice when two routes both included it.
+    addr_tasks: dict = {}        # addr → list[task dict]
+    addr_city_state: dict = {}   # addr → (city, state) for fallback header build
+    included_hashes: list = []
+    for cluster in (clusters or []):
+        ch = cluster.get('_cluster_hash') or cluster.get('cluster_hash') or ''
+        included_hashes.append(ch)
+        c_city  = cluster.get('city', '')
+        c_state = cluster.get('state', '')
+        for t in cluster.get('data', []):
+            addr = t.get('full', '')
+            if not addr:
+                continue
+            bucket = addr_tasks.setdefault(addr, [])
+            addr_city_state.setdefault(addr, (c_city, c_state))
+            loc_in_venue = (t.get('location_in_venue', '') or '').strip()
+            existing_locs = [(x.get('location_in_venue', '') or '').strip() for x in bucket]
+            if loc_in_venue not in existing_locs:
+                bucket.append(t)
+
+    if not addr_tasks:
+        return None, 0, included_hashes
+
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(_fn_csv_headers())
 
     total_stops = 0
-    included_hashes = []
-    # Number each cluster 1, 2, 3, ... so every row carries its parent route\'s
-    # bundle index. Sort by Bundle in the final spreadsheet to group them back.
-    for _bundle_idx, cluster in enumerate(clusters or [], start=1):
-        rows = list(_fn_stop_rows(cluster, start_date, end_date, bundle_number=_bundle_idx))
-        ch = cluster.get('_cluster_hash') or cluster.get('cluster_hash') or ''
-        included_hashes.append(ch)
-        if rows:
-            writer.writerows(rows)
-            total_stops += len(rows)
+    for addr, tasks in addr_tasks.items():
+        if not tasks:
+            continue
+        parts    = [p.strip() for p in addr.split(",")]
+        c_city, c_state = addr_city_state.get(addr, ('', ''))
+        street   = parts[0] if len(parts) > 0 else addr
+        city     = parts[1] if len(parts) > 1 else c_city
+        state    = parts[2].strip().upper() if len(parts) > 2 else c_state
+        zip_code = tasks[0].get('zip', parts[3].strip() if len(parts) > 3 else '')
+
+        venue_name = next((t.get('venue_name', '') for t in tasks if t.get('venue_name')), 'Terraboost Media')
+        manager    = FN_STATE_MANAGER.get(state, '')
+
+        base_row = [
+            "",  # Bundle column — blank in cross-cluster dedupe mode (the
+                 # original per-cluster bundle number is meaningless once
+                 # the same address pools tasks from multiple routes).
+            venue_name,
+            street,
+            city,
+            state,
+            zip_code,
+            "US",
+            "Complete work anytime over a date range",
+            start_date,
+            "8:00 AM",
+            end_date,
+            "5:00 PM",
+            "Fixed",
+            PAY_PER_STOP,
+            1.0,
+            PAY_PER_STOP,
+            manager,
+            "",
+        ]
+
+        custom_cols = []
+        for slot_idx, task in enumerate(tasks[:5], 1):
+            task_type    = str(task.get('task_type', 'Kiosk Install')).strip()
+            loc_in_venue = str(task.get('location_in_venue', '')).strip()
+            client       = str(task.get('client_company', '') or '').strip() or 'Terraboost Media'
+            venue_id     = str(task.get('venue_id', '')).strip()
+            combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
+
+            custom_cols.append(client)
+            if slot_idx == 1:
+                custom_cols.append(venue_id)
+            custom_cols.append(combined_loc)
+
+        # Pad empty slots up to 5.
+        filled = len(tasks[:5])
+        for slot_idx in range(filled + 1, 6):
+            custom_cols.append("")
+            if slot_idx == 1:
+                custom_cols.append("")
+            custom_cols.append("")
+
+        writer.writerow(base_row + custom_cols)
+        total_stops += 1
 
     if total_stops == 0:
         return None, 0, included_hashes

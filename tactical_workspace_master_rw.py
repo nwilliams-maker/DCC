@@ -5320,27 +5320,40 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
-                # Desktop: fire popup via height=0 script (not blocked by browser)
+                # Desktop: fire popup via height=0 script (not blocked by browser).
+                # This IS the "Generate Link & Open Gmail" behavior — the click both
+                # generates the link AND opens Gmail in a new tab on desktop.
                 st.components.v1.html(f"<script>if(window.screen.width>768){{window.open('{gmail_url}','_blank');}}</script>", height=0)
-                # Show a visible link unconditionally — desktop users hit by popup blockers
-                # used to get nothing; mobile users use the mailto. Now both have a fallback.
+                # Stash the mailto: URL so the "Default Mail" button persists across
+                # reruns (was previously rendered inline inside this click block and
+                # vanished as soon as st.rerun() fired — second-generate bug).
+                # The persistent render block is below the GENERATE button — it picks
+                # this up and renders the button whenever route_state == "email_sent".
                 _mailto = f"mailto:{ic.get('email','')}?subject={subject_line}&body={body_content}"
-                st.markdown(f"""<div style="display:flex;gap:8px;margin:6px 0;">
-<a href="{gmail_url}" target="_blank"
-style="flex:1;text-align:center;background:#633094;color:white;
-padding:12px;border-radius:10px;font-weight:800;font-size:14px;
-text-decoration:none;">📧 Open Gmail</a>
-<a href="{_mailto}"
+                st.session_state[f"_persisted_mailto_{cluster_hash}"] = _mailto
+                time.sleep(1)
+                _link_ph.empty()
+                st.rerun()
+
+    # 📨 PERSISTENT DEFAULT MAIL BUTTON
+    # Renders below the GENERATE button whenever the route is in email_sent state
+    # and we have a stashed mailto: URL. Sits outside the if-button click block so
+    # it survives reruns — fixes the "second-generate doesn't show Default Mail"
+    # bug where the button only appeared during the one rerun that processed the
+    # click and then vanished. Disappears automatically if the route moves to
+    # field_nation or is revoked back to pending (route_state changes).
+    if route_state == "email_sent" and not is_fn:
+        _persisted_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
+        if _persisted_mailto:
+            st.markdown(f"""<div style="display:flex;margin:6px 0;">
+<a href="{_persisted_mailto}"
 style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
-                time.sleep(1)
-                _link_ph.empty()
-                st.rerun()
-    
+
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
-    
+
     if route_state != "email_sent":
         # 🌟 UNIQUE KEY
         fn_checked = st.checkbox("🌐 Assign to Field Nation", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")

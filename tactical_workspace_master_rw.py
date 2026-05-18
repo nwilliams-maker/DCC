@@ -1966,6 +1966,23 @@ def auto_sync_checker(pod_name):
     # is set. The next poll (60s later) catches up.
     if st.session_state.get('_loading_overlay') is not None or st.session_state.get('_loading_pod'):
         return
+    # 🛡️ POST-INIT COOLDOWN (May 18 2026). After ANY init/sync, give the
+    # dispatcher 90 seconds of quiet page time before the auto-sync is
+    # allowed to fire an app-scope rerun again. This kills the "page keeps
+    # flickering / reverting" issue that admin testers were hitting — when
+    # init completes and clears the overlay, the very next 60s tick was
+    # firing st.rerun(scope="app") immediately and tearing the page apart.
+    # The patched sent_db state is still updated in memory below; the only
+    # thing the cooldown skips is the visual rerun.
+    _last_app_rerun_ts = st.session_state.get('_auto_sync_last_app_rerun_ts')
+    _cooldown_active = False
+    if _last_app_rerun_ts is not None:
+        try:
+            _elapsed = (datetime.now() - _last_app_rerun_ts).total_seconds()
+            if _elapsed < 90:
+                _cooldown_active = True
+        except Exception:
+            pass
     pod_clusters = st.session_state.get(f"clusters_{pod_name}", [])
     if not pod_clusters:
         return
@@ -2093,9 +2110,14 @@ def auto_sync_checker(pod_name):
             # already clears reverted_ when a patch genuinely changes a route's
             # status, and the dispatch flow clears it on re-send, so this block was
             # both redundant and harmful.
-            if affected_this_pod:
-                st.rerun(scope="app")
-            # Other pods affected → don't rerun this session, just record state.
+            # 🛑 NO APP-RERUN (May 18 2026 — final fix per Nick).
+            # The page must stay stable. sent_db is already patched in memory
+            # above — accept/decline events will surface on the dispatcher's
+            # next interaction with the page (any click, fragment tick, etc.).
+            # The previously-firing st.rerun(scope="app") was tearing pages
+            # apart whenever any change landed, which is unacceptable in admin
+            # multi-pod view. Each route card / awaiting panel is already its
+            # own @st.fragment; they re-render on user click, not on poll.
             return
 
         # Slow path fallback: change buffer empty (older GAS, lost properties,
@@ -2136,16 +2158,11 @@ def auto_sync_checker(pod_name):
             st.session_state[last_fp_key] = new_fp
             st.session_state.sent_db = fresh_sent_db
             st.session_state['archived_wos'] = _archived_wos
-            # 🛑 REMOVED (May 14 2026) — same bug as the fast-path block above.
-            # This slow-path loop cleared reverted_<hash> for any cluster still
-            # appearing in the freshly-pulled sheet, which is exactly the state a
-            # just-re-routed route is in until its background archive write lands.
-            # Result: re-route from the Accepted/Declined/Finalized tabs never
-            # "stuck" — the route bounced straight back. A reverted route that is
-            # still in the sheet SHOULD stay suppressed; that's the whole point of
-            # the flag. It gets cleared legitimately by the dispatch/re-send flow
-            # and by the run_pod_tab merge loop on a real status change.
-            st.rerun(scope="app")
+            # 🛑 NO APP-RERUN (May 18 2026 — final fix per Nick).
+            # The fresh sent_db is now in session_state; route cards and
+            # Awaiting panels are individual @st.fragment instances that
+            # re-render on user interaction. App-level rerun was tearing
+            # pages apart — explicitly removed here.
 
     except Exception as e:
         _log_err("auto_sync_checker", e)
@@ -3708,6 +3725,10 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             _excluded_team_set = set(_onfleet_data.get('excluded_team_ids') or [])
             if _fn_team_id_local:
                 _excluded_team_set.add(_fn_team_id_local)
+            # 🐛 DIAGNOSTIC — break down what's being dropped at the team gate.
+            # Maps team_id -> count of dropped tasks. Surfaced in the attrition
+            # expander so we can identify any team we still need to add or exclude.
+            _dropped_by_team = {}
             for t in all_tasks:
                 # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
                 # "Start at driver address" / "End at driver's address" tasks for native
@@ -3760,6 +3781,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 # through; only explicitly-blacklisted teams get dropped.
                 if c_type == 'TEAM' and container.get('team') in _excluded_team_set:
                     _skipped_wrong_team += 1
+                    _dt_id = container.get('team')
+                    _dropped_by_team[_dt_id] = _dropped_by_team.get(_dt_id, 0) + 1
                     continue
 
                 addr = t.get('destination', {}).get('address', {})
@@ -6525,18 +6548,14 @@ def run_pod_tab(pod_name):
                   return;
                 }}
                 if (j.version !== lastVer) {{
-                  // A saveRoute change is the dispatcher's OWN dispatch action
-                  // — the app already shows it via route_state="email_sent",
-                  // so pulsing a rerun for it just yanks the page out from
-                  // under them when they return from the "Open Gmail" tab.
-                  // Only rerun when a change actually needs to surface
-                  // (accept / decline / finalize / archive / FN-assign).
-                  var _chs = Array.isArray(j.changes) ? j.changes : [];
-                  var _needsRerun = (_chs.length === 0) || _chs.some(function (c) {{
-                    return c && c.a && c.a !== 'saveRoute';
-                  }});
+                  // 🛑 NO PAGE RERUN (May 18 2026 — Nick).
+                  // Just record the new version so subsequent polls don't
+                  // re-trigger. Do NOT call clickPulse() — that fires an
+                  // app-level rerun that tears the page apart. Each route
+                  // card / awaiting panel is its own @st.fragment and will
+                  // re-render on the dispatcher's next click, picking up
+                  // any sent_db changes the next time the script runs.
                   lastVer = j.version;
-                  if (_needsRerun) clickPulse();
                 }}
               }})
               .catch(function () {{ /* silent — next tick will retry */ }})
@@ -6708,6 +6727,10 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_overlay', None)
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
+        # Seed the auto_sync_checker cooldown so the next 90s of polls don't
+        # fire an app-scope rerun that yanks the page out from under us. The
+        # dispatcher just synced; nothing else needs to interrupt them.
+        st.session_state['_auto_sync_last_app_rerun_ts'] = datetime.now()
         # Removed st.rerun() (May 18 2026) — admin view runs run_pod_tab for
         # every pod in sequence; the rerun made each pod's sync trigger a
         # full page refresh, so admins watching the dashboard saw 5 refreshes
@@ -6762,6 +6785,10 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_overlay', None)
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
+        # Seed the auto_sync_checker cooldown (90s of quiet) — keeps the
+        # page from snapping back into a sync rerun moments after init
+        # completes, which was the "page reverts to Initialize Data" issue.
+        st.session_state['_auto_sync_last_app_rerun_ts'] = datetime.now()
         # Removed st.rerun() (May 18 2026) — see the matching removal in the
         # Check-New-Tasks block above. Forcing a rerun here caused admin view
         # to refresh the whole page after every pod's init completed (5 pods =

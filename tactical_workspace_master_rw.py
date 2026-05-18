@@ -6783,14 +6783,12 @@ def run_pod_tab(pod_name):
     # cluster's task_ids overlap with _awaiting_tids AND the existing routing
     # rules would have dropped it into Ready or Review, we skip it instead.
     _awaiting_tids = set()
+    # (1) sent_db — explicitly include field_nation status (added May 18 2026
+    #     after FN routes showed up duplicated in Ready alongside the FN tab).
     for _tid, _rec in sent_db.items():
-        if str(_rec.get('status', '')).lower() in ('sent', 'accepted', 'declined', 'finalized'):
+        if str(_rec.get('status', '')).lower() in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
             _awaiting_tids.add(str(_tid).strip())
-    # Also include task IDs from every ghost route in this pod that's NOT in
-    # the dispatcher's "intentionally revoked" set. Ghosts represent saved
-    # rows for this pod (Sent/Accepted/Declined/Finalized/Field-Nation); their
-    # task IDs are the source of truth for what's already committed even when
-    # sent_db hasn't caught up.
+    # (2) ghost_db for THIS pod — task IDs from any non-revoked ghost route.
     for _g in ghost_db.get(pod_name, []):
         _g_hash = _g.get('hash') or ''
         if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
@@ -6799,6 +6797,23 @@ def run_pod_tab(pod_name):
             _gt = str(_gt).strip()
             if _gt:
                 _awaiting_tids.add(_gt)
+    # (3) ghost_db across ALL pods — defensive sweep. FN routes that were
+    #     posted from one pod can have their tasks belong to another pod's
+    #     state-list (a cross-pod FN scenario). Without this, a task could
+    #     appear in Pod-A's FN tab as a ghost AND in Pod-B's Ready as a live
+    #     cluster. We dedup conservatively here: any non-revoked ghost in any
+    #     pod's bucket adds its task IDs.
+    for _other_pod, _other_ghosts in (ghost_db or {}).items():
+        if _other_pod == pod_name or not isinstance(_other_ghosts, list):
+            continue
+        for _g in _other_ghosts:
+            _g_hash = _g.get('hash') or ''
+            if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
+                continue
+            for _gt in (_g.get('task_ids') or []):
+                _gt = str(_gt).strip()
+                if _gt:
+                    _awaiting_tids.add(_gt)
     # Also include task IDs from every LIVE cluster in `cls` whose session-state
     # route_state pins it to a non-Ready bucket (field_nation, email_sent,
     # finalized). These clusters didn't land in ghost_db (they're still live

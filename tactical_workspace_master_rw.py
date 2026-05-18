@@ -6490,6 +6490,20 @@ def run_pod_tab(pod_name):
             st.session_state[_auto_init_key] = _ai_attempts + 1
             init_clicked = True
 
+    # 🛡️ AUTO-SYNC ON FIRST POD OPEN
+    # When a dispatcher first opens their pod in a session, auto-fire the
+    # same "Check New Tasks" smart sync the button does — so they see fresh
+    # tasks instead of stale ones. Without this, a dispatcher logging back
+    # in could see their Ready queue and assume their workload's cleared
+    # when new tasks have actually come in since the last sync.
+    # Fires once per session per pod, tracked via _auto_sync_done flag.
+    # Only fires when pod is already initialized (so we don't double-fire
+    # on top of a fresh Initialize, which already pulls everything).
+    _auto_sync_key = f"_auto_sync_done_{pod_name}"
+    if is_initialized and not sync_clicked and not st.session_state.get(_auto_sync_key):
+        st.session_state[_auto_sync_key] = True
+        sync_clicked = True
+
     # 🌟 Check New Tasks: same full-width overlay as Initialize so the dispatcher
     # sees the spin-card + timer instead of a bare progress bar while smart_sync_pod runs.
     if is_initialized and sync_clicked:

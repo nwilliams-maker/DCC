@@ -1952,6 +1952,14 @@ def auto_sync_checker(pod_name):
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
     until a user interaction (zooming the map, clicking somewhere, etc.) forced
     a rerender."""
+    # 🛡️ INIT-IN-PROGRESS GUARD (May 18 2026). Don't fire st.rerun(scope="app")
+    # while any pod is still initializing — admin view loads 5 pods sequentially,
+    # and a mid-init poll that triggers an app rerun restarts the whole page
+    # mid-stream. The loading overlay sets `_loading_overlay` / `_loading_pod`
+    # while process_pod / smart_sync_pod are running; bail out cleanly if either
+    # is set. The next poll (60s later) catches up.
+    if st.session_state.get('_loading_overlay') is not None or st.session_state.get('_loading_pod'):
+        return
     pod_clusters = st.session_state.get(f"clusters_{pod_name}", [])
     if not pod_clusters:
         return

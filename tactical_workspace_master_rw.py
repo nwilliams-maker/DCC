@@ -3706,19 +3706,30 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 container = t.get('container', {})
                 c_type = str(container.get('type', '')).upper()
 
-                # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
-                # already-assigned tasks through (container=WORKER or worker field set on task).
-                # Skip them explicitly so the supercard count + cluster pool only reflects
-                # tasks actually available to dispatch. Without this, dispatchers can see
-                # phantom availability and accidentally re-dispatch a task to a second IC.
-                # Reverted May 18 2026 from the earlier relaxation — relaxing the
-                # `t.get('worker')` clause caused duplicate clusters: just-dispatched tasks
-                # with stale worker references re-appeared in Ready alongside their Awaiting
-                # cluster. The real fix for missing Ready/Flagged routes was adding the
-                # per-pod "POD: <color>" teams to APPROVED_TEAMS, not loosening this guard.
-                if c_type == 'WORKER' or t.get('worker'):
+                # 🛡️ DOUBLE-ROUTING GUARD — conditional version (May 18 2026 v3).
+                # Two competing requirements collided today:
+                #   (a) Pure-strict (skip on `c_type=='WORKER' or t.get('worker')`)
+                #       hides 170+ unassigned-in-OnFleet tasks that have stale
+                #       worker-id refs (deleted workers, FN placeholder leftovers,
+                #       post-revoke orphans). Dispatcher loses access to real work.
+                #   (b) Pure-loose (skip only on `c_type=='WORKER'`) leaks
+                #       just-dispatched tasks back into Ready as duplicates of
+                #       their Awaiting/FN cluster.
+                # The fix: skip on `c_type=='WORKER'` always. ALSO skip if the
+                # task has a worker reference AND fresh_sent_db confirms it as
+                # dispatched (status in sent/accepted/declined/finalized/field_nation).
+                # If the worker ref is stale (task not in sent_db), let it through —
+                # the dispatcher needs to see it. The downstream `_awaiting_tids`
+                # dedup guard catches any leakage the conditional misses.
+                _t_id = str(t.get('id', '')).strip()
+                if c_type == 'WORKER':
                     _skipped_assigned += 1
                     continue
+                if t.get('worker') and _t_id in fresh_sent_db:
+                    _sb_stat = str(fresh_sent_db[_t_id].get('status', '')).lower()
+                    if _sb_stat in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
+                        _skipped_assigned += 1
+                        continue
 
                 if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
                     _skipped_wrong_team += 1
@@ -5830,14 +5841,19 @@ def smart_sync_pod(pod_name):
 
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
-        # 🛡️ DOUBLE-ROUTING GUARD: skip already-assigned tasks (Onfleet's state=0 filter
-        # sometimes leaks WORKER-container tasks). Prevents Smart Sync from pulling in
-        # tasks that another dispatcher (or auto-assign) already gave to a worker.
-        # Reverted May 18 2026 from the earlier relaxation — see process_pod's matching
-        # comment. Loosening this caused duplicate clusters (just-dispatched tasks
-        # re-appearing in Ready alongside their Awaiting cluster).
-        if c_type == 'WORKER' or t.get('worker'):
+        # 🛡️ DOUBLE-ROUTING GUARD — conditional version (May 18 2026 v3).
+        # Matches process_pod's smart filter: hard-skip on container=WORKER,
+        # also skip if worker ref exists AND fresh_sent_db confirms dispatch.
+        # Let stale-worker-ref-but-no-sent_db-record tasks through (they're
+        # the 170 unassigned tasks Nick was missing). The bucketing dedup
+        # downstream catches any duplicates that slip in.
+        _t_id_ss = str(t.get('id', '')).strip()
+        if c_type == 'WORKER':
             continue
+        if t.get('worker') and _t_id_ss in fresh_sent_db:
+            _sb_stat_ss = str(fresh_sent_db[_t_id_ss].get('status', '')).lower()
+            if _sb_stat_ss in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
+                continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids:
             continue
 
@@ -6657,7 +6673,11 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_overlay', None)
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
-        st.rerun()
+        # Removed st.rerun() (May 18 2026) — admin view runs run_pod_tab for
+        # every pod in sequence; the rerun made each pod's sync trigger a
+        # full page refresh, so admins watching the dashboard saw 5 refreshes
+        # in a row while data loaded. session_state is already updated; just
+        # let the script continue and render the post-sync dashboard inline.
 
     # 🌟 FULL-WIDTH LOADING UI — outside columns so bar spans the page
     if not is_initialized and init_clicked:
@@ -6707,7 +6727,11 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_overlay', None)
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
-        st.rerun()
+        # Removed st.rerun() (May 18 2026) — see the matching removal in the
+        # Check-New-Tasks block above. Forcing a rerun here caused admin view
+        # to refresh the whole page after every pod's init completed (5 pods =
+        # 5 full-page flickers). clusters_{pod} is already in session_state;
+        # let the script render the rest of the pod tab inline.
 
     # 🌟 THE FIX: Remove the early return and safely default to an empty list
     # Load cluster data safely so the Supercards can render 0's

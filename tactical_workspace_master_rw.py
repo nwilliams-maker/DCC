@@ -6789,8 +6789,9 @@ def run_pod_tab(pod_name):
             _awaiting_tids.add(str(_tid).strip())
     # Also include task IDs from every ghost route in this pod that's NOT in
     # the dispatcher's "intentionally revoked" set. Ghosts represent saved
-    # rows for this pod; their task IDs are the source of truth for what's
-    # in Awaiting even when sent_db hasn't caught up.
+    # rows for this pod (Sent/Accepted/Declined/Finalized/Field-Nation); their
+    # task IDs are the source of truth for what's already committed even when
+    # sent_db hasn't caught up.
     for _g in ghost_db.get(pod_name, []):
         _g_hash = _g.get('hash') or ''
         if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
@@ -6798,6 +6799,26 @@ def run_pod_tab(pod_name):
         for _gt in (_g.get('task_ids') or []):
             _gt = str(_gt).strip()
             if _gt:
+                _awaiting_tids.add(_gt)
+    # Also include task IDs from every LIVE cluster in `cls` whose session-state
+    # route_state pins it to a non-Ready bucket (field_nation, email_sent,
+    # finalized). These clusters didn't land in ghost_db (they're still live
+    # in clusters_{pod}) but they ARE definitively committed to Awaiting/FN, so
+    # any OTHER cluster with overlapping task IDs that ends up in Ready/Flagged
+    # is a duplicate that must be suppressed. Fixes the case Nick reported: an
+    # FN-tab route's tasks showing simultaneously in Ready after a re-initialize
+    # rebuilt clusters_{pod} without preserving the route_state on the second
+    # copy of the cluster.
+    for _c in cls:
+        _c_tids = [str(_t['id']).strip() for _t in _c.get('data', []) if _t.get('id')]
+        if not _c_tids:
+            continue
+        _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
+        if st.session_state.get(f"reverted_{_c_hash}", False):
+            continue
+        _c_route_state = st.session_state.get(f"route_state_{_c_hash}")
+        if _c_route_state in ('field_nation', 'email_sent', 'finalized'):
+            for _gt in _c_tids:
                 _awaiting_tids.add(_gt)
 
     for c in cls:

@@ -139,6 +139,11 @@ def _fetch_onfleet_open_tasks_cached():
         "a - escalation", "b - boosted campaigns", "b - local campaigns",
         "c - priority nationals", "cvs kiosk removal", "digital routes",
         "n - national campaigns",
+        # May 18 2026 — added per-pod teams in OnFleet ("POD: Blue", "POD: Green",
+        # "POD: Orange", "POD: Purple", "POD: Red"). Tasks in these teams were
+        # silently dropped at the approved-team filter, vanishing from
+        # Ready/Flagged buckets. Match is case-insensitive substring.
+        "pod: blue", "pod: green", "pod: orange", "pod: purple", "pod: red",
     ]
     # Onfleet's /teams normally returns a list of team dicts. On auth failure,
     # rate limit, or transient error it can return a dict like {"message": "...",

@@ -4371,6 +4371,19 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     
 # --- DISPATCH RENDERING ---
 @st.fragment
+# 🧩 FRAGMENT-SCOPED RERUN (May 18 2026)
+# Wrapping render_dispatch as a fragment means the `st.rerun()` calls inside
+# the click handlers (Generate Link, FN checkbox, finalize, re-route, etc.)
+# default to scope="fragment" in Streamlit 1.39 — re-rendering ONLY this one
+# route card instead of the whole pod tab. Previously the post-email-generate
+# rerun forced the entire page (supercards, every cluster card, sidebar) to
+# rebuild, which felt jarring. Now: just the card flips from "GENERATE LINK"
+# to "RESEND" and the persistent Default Mail button appears, nothing else
+# re-renders. Other state changes (session_state writes for sent_db, etc.)
+# persist across fragments and are picked up by the supercards on the next
+# auto_sync_checker tick (every 60s) or any other app-scoped interaction.
+# Calls that explicitly need a full-page rerun still use st.rerun(scope="app").
+@st.fragment
 def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # Capture current state identifiers (cluster_hash is computed from the ORIGINAL data
     # and stays constant through preview — keeps session-state continuity intact).

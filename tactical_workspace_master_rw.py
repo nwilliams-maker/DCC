@@ -5824,10 +5824,15 @@ def smart_sync_pod(pod_name):
 
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
-        # 🛡️ DOUBLE-ROUTING GUARD: skip already-assigned tasks (Onfleet's state=0 filter
-        # sometimes leaks WORKER-container tasks). Prevents Smart Sync from pulling in
-        # tasks that another dispatcher (or auto-assign) already gave to a worker.
-        if c_type == 'WORKER' or t.get('worker'):
+        # 🛡️ DOUBLE-ROUTING GUARD: only skip if container.type == 'WORKER'
+        # (task is actively in a worker's queue = real IC has it). Do NOT skip
+        # on t.get('worker') alone — that field can be a stale/orphan reference
+        # (deleted worker, post-revoke ghost, FN placeholder leftover) on tasks
+        # whose container is back to TEAM/ORG and state=0, meaning they're
+        # genuinely available to dispatch. Matches the same relaxation applied
+        # to process_pod on May 18 2026 so Smart Sync and Initialize don't
+        # disagree about what's available.
+        if c_type == 'WORKER':
             continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids:
             continue
@@ -6003,7 +6008,27 @@ def smart_sync_pod(pod_name):
     _replay_bundles(pod_name)
     st.session_state['_worker_counts'] = fetch_worker_task_counts()
     _bar.empty()
-    st.toast(f"✅ {len(new_pool)} new task(s) merged into {pod_name} routes.")
+    # Break down the merged tasks by bucket so the dispatcher knows WHERE the
+    # new tasks landed — many of these are in Sent/Accepted (auto-fetched by
+    # sync, not "new Ready work"). The bare "X merged" count was confusing:
+    # dispatchers expected X new Ready routes but most were already-dispatched
+    # tasks the sync caught up on. (May 18 2026.)
+    if new_pool:
+        _ready_n = 0
+        _sent_n = 0
+        for _t in new_pool:
+            _rec = fresh_sent_db.get(str(_t['id']).strip())
+            if _rec and str(_rec.get('status', '')).lower() in ('sent', 'accepted', 'declined', 'finalized'):
+                _sent_n += 1
+            else:
+                _ready_n += 1
+        _parts = []
+        if _ready_n: _parts.append(f"{_ready_n} new Ready")
+        if _sent_n:  _parts.append(f"{_sent_n} already dispatched")
+        _label = ' + '.join(_parts) or f"{len(new_pool)} task(s)"
+        st.toast(f"✅ {_label} synced to {pod_name} Pod.")
+    else:
+        st.toast(f"✅ {pod_name} Pod already in sync — no new tasks.")
 
 
 def make_venue_details(data):
@@ -6526,19 +6551,60 @@ def run_pod_tab(pod_name):
             st.session_state[_auto_init_key] = _ai_attempts + 1
             init_clicked = True
 
-    # 🛡️ AUTO-SYNC ON FIRST POD OPEN
-    # When a dispatcher first opens their pod in a session, auto-fire the
-    # same "Check New Tasks" smart sync the button does — so they see fresh
-    # tasks instead of stale ones. Without this, a dispatcher logging back
-    # in could see their Ready queue and assume their workload's cleared
-    # when new tasks have actually come in since the last sync.
-    # Fires once per session per pod, tracked via _auto_sync_done flag.
-    # Only fires when pod is already initialized (so we don't double-fire
-    # on top of a fresh Initialize, which already pulls everything).
+    # 🛡️ AUTO-SYNC ON FIRST POD OPEN — DEFERRED VIA JS (May 18 2026 v2)
+    # The earlier version of this block (sync_clicked=True synchronously) caused
+    # a brutal UX flow: page sign-in → 60s blank → faded "Initialize Data" →
+    # premature "No new tasks found" toast → eventually dashboard renders →
+    # contradicting "63 new tasks merged" toast → page sometimes evaporates.
+    # Root cause: forcing sync_clicked=True before any dashboard content has
+    # been rendered means smart_sync_pod runs DURING the user's first paint,
+    # blocking everything else.
+    # New approach: render the dashboard normally on first load, then a tiny
+    # JS snippet (injected near the end of run_pod_tab) clicks the "Check New
+    # Tasks" button 8s after the dashboard is visible. The toast that fires
+    # then arrives AFTER the user can see the real state, so its count is
+    # actually meaningful instead of contradicting an earlier fire-too-early
+    # message. Uses sessionStorage so it only fires once per browser session
+    # per pod — manual Check New Tasks clicks ALSO set the flag, so the
+    # auto-trigger never double-fires on top of a user click.
+    # (The python-side _auto_sync_done_{pod} flag below is preserved as a
+    # cheap idempotency guard so any leftover edge-case can't double-fire.)
     _auto_sync_key = f"_auto_sync_done_{pod_name}"
-    if is_initialized and not sync_clicked and not st.session_state.get(_auto_sync_key):
+    if is_initialized and not st.session_state.get(_auto_sync_key):
+        # Mark fired immediately so a Streamlit rerun cycle can't queue two
+        # JS-clicks. The actual click is deferred to the JS snippet below.
         st.session_state[_auto_sync_key] = True
-        sync_clicked = True
+        _components.html(
+            f"""
+            <script>
+            (function() {{
+              var KEY = "_dccAutoSyncDone_{pod_name}";
+              try {{
+                if (parent.sessionStorage.getItem(KEY) === "1") return;
+              }} catch(_) {{}}
+              // Wait 8s so the dispatcher sees the dashboard's real state FIRST.
+              // Then click the "Check New Tasks" button to fire smart_sync_pod.
+              // The toast that follows will reflect what actually changed
+              // (instead of arriving before the dashboard renders and saying
+              // "No new tasks" against an empty in-memory cluster set).
+              parent.setTimeout(function() {{
+                try {{
+                  // Look for the "Check New Tasks" button by its pod-scoped key.
+                  // Key pattern: st-key-reopt_{pod_name}
+                  var btn = parent.document.querySelector(
+                    '[class*="st-key-reopt_{pod_name}"] button'
+                  );
+                  if (btn) {{
+                    btn.click();
+                    try {{ parent.sessionStorage.setItem(KEY, "1"); }} catch(_) {{}}
+                  }}
+                }} catch(_) {{ /* swallow — next session can retry */ }}
+              }}, 8000);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
 
     # 🌟 Check New Tasks: same full-width overlay as Initialize so the dispatcher
     # sees the spin-card + timer instead of a bare progress bar while smart_sync_pod runs.
@@ -9214,10 +9280,8 @@ with tabs[6]:
                         
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            _gins_cnt = g.get('digi_ins', 0) or 0
-                        _gins_pill = f" | 🔧 {_gins_cnt} Ins/Rem" if _gins_cnt > 0 else ""
-                        _dgacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
-                        with st.expander(_dgacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}"):
+                            _dgacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
+                            with st.expander(_dgacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}"):
                                 raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                                 if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                                 else: task_locs = raw_locs

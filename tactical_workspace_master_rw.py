@@ -6760,6 +6760,26 @@ def run_pod_tab(pod_name):
     ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
     live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
 
+    # 🛡️ AWAITING-CONFIRMATION DEDUP GUARD (May 18 2026)
+    # A task ID must never appear in BOTH the Awaiting column (Sent/Accepted/
+    # Declined/Finalized) AND the main Dispatch column (Ready/Flagged) at the
+    # same time. Build a set of every task_id that sent_db reports as actively
+    # dispatched; when the cluster loop below decides where to put a cluster,
+    # if the cluster's task_ids overlap with this set AND the existing routing
+    # rules would have dropped it into Ready or Review (Flagged), we skip it
+    # instead. The cluster representing the same work in the Awaiting column
+    # is the authoritative one.
+    # Root cause this fixes: today's relaxation of the OnFleet "worker" filter
+    # (only-skip-on-container=WORKER, allow tasks with a stale `worker` field
+    # reference through) opened a path where freshly-pulled OnFleet tasks for
+    # already-dispatched IDs land in NEW clusters that don't share their
+    # cluster_hash with the original Awaiting cluster. Without this dedup,
+    # the same kiosk shows up in both columns. With it, only Awaiting wins.
+    _awaiting_tids = set()
+    for _tid, _rec in sent_db.items():
+        if str(_rec.get('status', '')).lower() in ('sent', 'accepted', 'declined', 'finalized'):
+            _awaiting_tids.add(str(_tid).strip())
+
     for c in cls:
         # 🌟 FIX: Skip empty routes that were trimmed to 0 stops
         if not c.get('data') or len(c.get('data')) == 0:
@@ -6825,9 +6845,18 @@ def run_pod_tab(pod_name):
         # 🌟 Handle Local Session State (Instant UI Moves)
         elif route_state == "email_sent" and not is_reverted:
             sent.append(c) #
-        elif route_state == "field_nation": 
+        elif route_state == "field_nation":
             field_nation.append(c) #
         else:
+            # 🛡️ AWAITING-CONFIRMATION DEDUP (May 18 2026)
+            # A cluster's task_ids must not overlap with any task in the
+            # Awaiting column (sent/accepted/declined/finalized) UNLESS the
+            # dispatcher explicitly revoked it (is_reverted=True). If they
+            # overlap AND we're falling through to Ready/Review, the
+            # Awaiting cluster owns those tasks — skip rendering here so
+            # the same kiosk doesn't appear in both columns.
+            if not is_reverted and any(tid in _awaiting_tids for tid in task_ids):
+                continue
             # Fallback to calculated status
             if c.get('status') == 'Ready': ready.append(c) #
             else: review.append(c) #

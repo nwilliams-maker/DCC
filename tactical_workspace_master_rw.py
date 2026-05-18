@@ -1951,8 +1951,14 @@ def render_sync_age():
     )
 
 
-@st.fragment(run_every=60)
+@st.fragment
 def auto_sync_checker(pod_name):
+    # 🛑 NO `run_every` (May 18 2026 — Nick's hard rule "stop refreshing").
+    # Previously this was @st.fragment(run_every=60) — the 60s tick was the
+    # last surviving source of visible "running" indicator activity on an
+    # otherwise idle dashboard. The fragment now executes only on its
+    # parent's first run; thereafter it re-runs only via user interaction.
+    # sent_db patches are still applied on-demand whenever the page reruns.
     """Polls every 60s. Sync_version short-circuit means the heavy sheet fetch only runs when something ACTUALLY changed — between events, polls are tiny version probes. Uses GAS push-style change events to patch sent_db in-memory — no sheet fetch when accept/decline/archive happens. Falls back to full fetch only when the change buffer is empty or stale. Refreshes the sheet cache and triggers a rerun whenever
     any sheet content changed — not just Accepted/Declined status flips. Previously
     new routes appearing in Saved_Routes (or comp/due updates) wouldn't reflect
@@ -7210,8 +7216,10 @@ def run_pod_tab(pod_name):
     # Only Admin / Manager see the attrition diagnostic. Dispatchers and
     # Associates don't need the funnel breakdown — it's a debugging surface.
     _attr = st.session_state.get(f'_attrition_{pod_name}')
-    _attr_priv = _is_admin_or_manager()
-    if _attr and _attr_priv:
+    # Task attrition expander — visible to dispatchers, admins, and managers.
+    # Hidden from FN Associates (tier='guest') since they only work the FN tab.
+    # (May 18 2026 — Nick: "for all dispatchers only".)
+    if _attr and not _is_dispatch_associate():
         with st.expander(f"📊 Task attrition — {pod_name} Pod", expanded=False):
             _raw = _attr.get('raw_fetched', 0)
             _ded = _attr.get('after_dedup', 0)

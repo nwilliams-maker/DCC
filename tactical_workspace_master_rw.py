@@ -3338,7 +3338,7 @@ def process_digital_pool(master_bar=None):
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
         # 🛡️ DOUBLE-ROUTING GUARD: skip tasks already assigned to a worker.
-        if c_type == 'WORKER':
+        if c_type == 'WORKER' or t.get('worker'):
             continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids: continue
 
@@ -3702,11 +3702,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 c_type = str(container.get('type', '')).upper()
 
                 # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
-                # already-assigned tasks through (container=WORKER or worker field set on task).
-                # Skip them explicitly so the supercard count + cluster pool only reflects
-                # tasks actually available to dispatch. Without this, dispatchers can see
-                # phantom availability and accidentally re-dispatch a task to a second IC.
-                if c_type == 'WORKER' or t.get('worker'):
+                # already-actively-assigned tasks through. Only skip if container.type ==
+                # 'WORKER' (task is actively in a worker's queue = real IC has it).
+                # DON'T skip on t.get('worker') alone — that field can be a stale/orphan
+                # reference (deleted worker, post-revoke ghost, FN placeholder leftover)
+                # on tasks whose container is back to TEAM/ORGANIZATION and state=0,
+                # meaning they're genuinely available to dispatch. (May 18 2026 — Nick
+                # reported routes missing from Ready/Flagged; the worker-field clause
+                # was filtering legitimate tasks out.)
+                if c_type == 'WORKER':
                     _skipped_assigned += 1
                     continue
 

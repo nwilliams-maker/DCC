@@ -3874,7 +3874,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 anc_status = anc.get('db_status', 'ready')
                 anc_wo = anc.get('wo', 'none')
             
-                # Set radius strictly based on type
+                # Set radius strictly based on type.
+                # May 18 2026 — bumped down 35 → 25 for static routes after Nick
+                # showed SF Bay Area clusters merging Peninsula + East Bay + Pleasanton
+                # into one route. 25mi matches the digital radius AND the smart-sync
+                # merge radius below (CLUSTER_RADIUS = 25), so cluster geometry now
+                # stays consistent across the three clustering paths.
                 route_radius = 25
             
                 candidates = []; rem = []
@@ -5947,7 +5952,7 @@ def smart_sync_pod(pod_name):
 
     _tick(0.7, f"📦 Merging {len(new_pool)} new tasks...")
 
-    CLUSTER_RADIUS = 20  # miles
+    CLUSTER_RADIUS = 25  # miles
 
     unmatched = []
     for new_task in new_pool:
@@ -6760,25 +6765,40 @@ def run_pod_tab(pod_name):
     ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
     live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
 
-    # 🛡️ AWAITING-CONFIRMATION DEDUP GUARD (May 18 2026)
+    # 🛡️ AWAITING-CONFIRMATION DEDUP GUARD (May 18 2026 — v2 strengthened)
     # A task ID must never appear in BOTH the Awaiting column (Sent/Accepted/
     # Declined/Finalized) AND the main Dispatch column (Ready/Flagged) at the
-    # same time. Build a set of every task_id that sent_db reports as actively
-    # dispatched; when the cluster loop below decides where to put a cluster,
-    # if the cluster's task_ids overlap with this set AND the existing routing
-    # rules would have dropped it into Ready or Review (Flagged), we skip it
-    # instead. The cluster representing the same work in the Awaiting column
-    # is the authoritative one.
-    # Root cause this fixes: today's relaxation of the OnFleet "worker" filter
-    # (only-skip-on-container=WORKER, allow tasks with a stale `worker` field
-    # reference through) opened a path where freshly-pulled OnFleet tasks for
-    # already-dispatched IDs land in NEW clusters that don't share their
-    # cluster_hash with the original Awaiting cluster. Without this dedup,
-    # the same kiosk shows up in both columns. With it, only Awaiting wins.
+    # same time. Build a set of every task_id that's currently represented in
+    # Awaiting — from BOTH sources:
+    #   (1) sent_db — live patch state from auto_sync_checker (accept/decline
+    #       events, etc.) plus the read of Saved_Routes
+    #   (2) ghost_db — task_ids embedded in the Saved_Routes JSON payload
+    # The two sources can disagree briefly post-dispatch: a fresh sheet row
+    # may make it into ghost_db's payload-parse before sent_db is rebuilt from
+    # the row's task-ID column, or vice-versa. Without including ghost task
+    # IDs, a freshly-dispatched route's Awaiting card renders correctly but
+    # the same tasks ALSO re-appear in Ready (sheet_match=None lookup misses
+    # the just-saved row). Confirmed live: "Anthony Smith-05182026-1" (3 stops
+    # Arlington/Mukilteo WA) showed in both columns until this guard.
+    # When the cluster loop below decides where to put a cluster, if the
+    # cluster's task_ids overlap with _awaiting_tids AND the existing routing
+    # rules would have dropped it into Ready or Review, we skip it instead.
     _awaiting_tids = set()
     for _tid, _rec in sent_db.items():
         if str(_rec.get('status', '')).lower() in ('sent', 'accepted', 'declined', 'finalized'):
             _awaiting_tids.add(str(_tid).strip())
+    # Also include task IDs from every ghost route in this pod that's NOT in
+    # the dispatcher's "intentionally revoked" set. Ghosts represent saved
+    # rows for this pod; their task IDs are the source of truth for what's
+    # in Awaiting even when sent_db hasn't caught up.
+    for _g in ghost_db.get(pod_name, []):
+        _g_hash = _g.get('hash') or ''
+        if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
+            continue  # Dispatcher explicitly revoked — let the route flow back to Ready
+        for _gt in (_g.get('task_ids') or []):
+            _gt = str(_gt).strip()
+            if _gt:
+                _awaiting_tids.add(_gt)
 
     for c in cls:
         # 🌟 FIX: Skip empty routes that were trimmed to 0 stops
@@ -6823,8 +6843,13 @@ def run_pod_tab(pod_name):
         
         # --- 🚦 THE NEW DIGITAL FLOW ---
         if c.get('is_digital') and not sheet_match and route_state != "email_sent" and not is_reverted:
+            # 🛡️ DEDUP guard — same logic as the Ready/Review fallback below.
+            # `not sheet_match` here means no task is in sent_db, but ghost_db
+            # might still have these tasks (post-dispatch timing window).
+            if any(tid in _awaiting_tids for tid in task_ids):
+                continue
             digital_ready.append(c)
-            continue 
+            continue
 
         # --- PRIORITY: LIVE DATABASE OVERRIDES LOCAL STATE ---
         # 🌟 THE FIX: If we just clicked Finalize, override the Google Sheet instantly!

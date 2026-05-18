@@ -163,6 +163,11 @@ def _fetch_onfleet_open_tasks_cached():
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
     fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
+    # 🚫 Excluded teams — never include tasks in these team pools in any pod's
+    # Ready/Flagged. Match is case-insensitive substring on team name.
+    # Add more substrings here as Nick identifies more teams to exclude.
+    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team']
+    excluded_team_ids = [t['id'] for t in teams_res if any(ex in str(t.get('name', '')).lower() for ex in _EXCLUDED_TEAM_SUBSTRINGS)]
 
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
     # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out
@@ -231,6 +236,7 @@ def _fetch_onfleet_open_tasks_cached():
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
         'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
+        'excluded_team_ids': excluded_team_ids,
         'fn_worker_id': fn_worker_id,
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
@@ -3695,6 +3701,13 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             _skipped_no_state_cf = 0
             _skipped_wrong_team = 0
             _skipped_out_of_pod_states = 0
+            # 🌐 Excluded teams — FN team (handled via ghost path so showing in
+            # Ready/Flagged would double-render) + explicitly-blacklisted teams
+            # like "ZZZ Test Team" (substring matched in _fetch_onfleet_open_tasks_cached).
+            _fn_team_id_local = _onfleet_data.get('fn_team_id')
+            _excluded_team_set = set(_onfleet_data.get('excluded_team_ids') or [])
+            if _fn_team_id_local:
+                _excluded_team_set.add(_fn_team_id_local)
             for t in all_tasks:
                 # 🚫 DRIVER-HOME PSEUDO-TASK GUARD: Onfleet auto-generates
                 # "Start at driver address" / "End at driver's address" tasks for native
@@ -3739,7 +3752,13 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                         _skipped_assigned += 1
                         continue
 
-                if c_type == 'TEAM' and container.get('team') not in target_team_ids: 
+                # 🌐 ORG-container ("Unassigned" in OnFleet UI) → always include.
+                # TEAM-container → include unless team is in _excluded_team_set
+                # (currently FN team + "ZZZ Test Team").
+                # May 18 2026 — switched from APPROVED_TEAMS allow-list to a
+                # deny-list so the Unassigned area + arbitrary team pools flow
+                # through; only explicitly-blacklisted teams get dropped.
+                if c_type == 'TEAM' and container.get('team') in _excluded_team_set:
                     _skipped_wrong_team += 1
                     continue
 
@@ -5815,6 +5834,10 @@ def smart_sync_pod(pod_name):
     target_team_ids    = _onfleet_data['target_team_ids']
     esc_team_ids       = _onfleet_data['esc_team_ids']
     cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
+    _fn_team_id_local  = _onfleet_data.get('fn_team_id')
+    _excluded_team_set = set(_onfleet_data.get('excluded_team_ids') or [])
+    if _fn_team_id_local:
+        _excluded_team_set.add(_fn_team_id_local)
     all_tasks_raw      = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("smart_sync_pod", f"hit pagination cap (200 pages)")
@@ -5862,7 +5885,11 @@ def smart_sync_pod(pod_name):
             _sb_stat_ss = str(fresh_sent_db[_t_id_ss].get('status', '')).lower()
             if _sb_stat_ss in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
                 continue
-        if c_type == 'TEAM' and container.get('team') not in target_team_ids:
+        # ORG-container ("Unassigned" in OnFleet UI) → include. TEAM-container
+        # → include unless the team is in _excluded_team_set (FN team + any
+        # explicitly-blacklisted teams like "ZZZ Test Team").
+        # Matches the May 18 2026 deny-list change in process_pod.
+        if c_type == 'TEAM' and container.get('team') in _excluded_team_set:
             continue
 
         addr = t.get('destination', {}).get('address', {})

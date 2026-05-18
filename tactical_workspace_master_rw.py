@@ -3875,7 +3875,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 anc_wo = anc.get('wo', 'none')
             
                 # Set radius strictly based on type
-                route_radius = 25 if anc_is_digital else 35
+                route_radius = 25
             
                 candidates = []; rem = []
                 for t in pool:
@@ -5947,7 +5947,7 @@ def smart_sync_pod(pod_name):
 
     _tick(0.7, f"📦 Merging {len(new_pool)} new tasks...")
 
-    CLUSTER_RADIUS = 25  # miles
+    CLUSTER_RADIUS = 20  # miles
 
     unmatched = []
     for new_task in new_pool:

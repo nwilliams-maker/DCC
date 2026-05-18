@@ -6548,28 +6548,12 @@ def run_pod_tab(pod_name):
                   return;
                 }}
                 if (j.version !== lastVer) {{
-                  // Version bumped. Most changes (accept/decline/etc.) we
-                  // patch silently in-memory and surface on the dispatcher's
-                  // next click — calling clickPulse() on every bump fired
-                  // an app-level rerun that tore the page apart.
-                  // EXCEPTION: if it's been >5 min since our last forced
-                  // sync, click Check New Tasks once so newly-imported
-                  // OnFleet tasks actually appear in Ready/Flagged. This
-                  // is the auto-pickup-without-manual-click behavior Nick
-                  // asked for, gated to once per 5 min so the page stays
-                  // stable in between.
+                  // 🛑 NO AUTO-RERUN OF ANY KIND (May 18 2026 — Nick's hard
+                  // rule). Record the new version silently so we don't keep
+                  // re-triggering. New tasks / accept-decline events surface
+                  // only when the dispatcher clicks "Check New Tasks" or
+                  // interacts with the page in any other way.
                   lastVer = j.version;
-                  var nowMs = Date.now();
-                  var lastForced = parent._dccLastForcedSync || 0;
-                  if (nowMs - lastForced > 300000) {{
-                    parent._dccLastForcedSync = nowMs;
-                    try {{
-                      var pbtn = parent.document.querySelector(
-                        '[class*="st-key-reopt_"] button'
-                      );
-                      if (pbtn) pbtn.click();
-                    }} catch (_) {{}}
-                  }}
                 }}
               }})
               .catch(function () {{ /* silent — next tick will retry */ }})

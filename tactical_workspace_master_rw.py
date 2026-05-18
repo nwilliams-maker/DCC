@@ -3707,15 +3707,16 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 c_type = str(container.get('type', '')).upper()
 
                 # 🛡️ DOUBLE-ROUTING GUARD: Onfleet's `state=0` URL filter sometimes leaks
-                # already-actively-assigned tasks through. Only skip if container.type ==
-                # 'WORKER' (task is actively in a worker's queue = real IC has it).
-                # DON'T skip on t.get('worker') alone — that field can be a stale/orphan
-                # reference (deleted worker, post-revoke ghost, FN placeholder leftover)
-                # on tasks whose container is back to TEAM/ORGANIZATION and state=0,
-                # meaning they're genuinely available to dispatch. (May 18 2026 — Nick
-                # reported routes missing from Ready/Flagged; the worker-field clause
-                # was filtering legitimate tasks out.)
-                if c_type == 'WORKER':
+                # already-assigned tasks through (container=WORKER or worker field set on task).
+                # Skip them explicitly so the supercard count + cluster pool only reflects
+                # tasks actually available to dispatch. Without this, dispatchers can see
+                # phantom availability and accidentally re-dispatch a task to a second IC.
+                # Reverted May 18 2026 from the earlier relaxation — relaxing the
+                # `t.get('worker')` clause caused duplicate clusters: just-dispatched tasks
+                # with stale worker references re-appeared in Ready alongside their Awaiting
+                # cluster. The real fix for missing Ready/Flagged routes was adding the
+                # per-pod "POD: <color>" teams to APPROVED_TEAMS, not loosening this guard.
+                if c_type == 'WORKER' or t.get('worker'):
                     _skipped_assigned += 1
                     continue
 
@@ -5829,15 +5830,13 @@ def smart_sync_pod(pod_name):
 
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
-        # 🛡️ DOUBLE-ROUTING GUARD: only skip if container.type == 'WORKER'
-        # (task is actively in a worker's queue = real IC has it). Do NOT skip
-        # on t.get('worker') alone — that field can be a stale/orphan reference
-        # (deleted worker, post-revoke ghost, FN placeholder leftover) on tasks
-        # whose container is back to TEAM/ORG and state=0, meaning they're
-        # genuinely available to dispatch. Matches the same relaxation applied
-        # to process_pod on May 18 2026 so Smart Sync and Initialize don't
-        # disagree about what's available.
-        if c_type == 'WORKER':
+        # 🛡️ DOUBLE-ROUTING GUARD: skip already-assigned tasks (Onfleet's state=0 filter
+        # sometimes leaks WORKER-container tasks). Prevents Smart Sync from pulling in
+        # tasks that another dispatcher (or auto-assign) already gave to a worker.
+        # Reverted May 18 2026 from the earlier relaxation — see process_pod's matching
+        # comment. Loosening this caused duplicate clusters (just-dispatched tasks
+        # re-appearing in Ready alongside their Awaiting cluster).
+        if c_type == 'WORKER' or t.get('worker'):
             continue
         if c_type == 'TEAM' and container.get('team') not in target_team_ids:
             continue

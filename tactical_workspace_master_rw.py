@@ -6886,55 +6886,12 @@ def run_pod_tab(pod_name):
             _gt = str(_gt).strip()
             if _gt:
                 _awaiting_tids.add(_gt)
-    # (3) ghost_db across ALL pods — defensive sweep. FN routes that were
-    #     posted from one pod can have their tasks belong to another pod's
-    #     state-list (a cross-pod FN scenario). Without this, a task could
-    #     appear in Pod-A's FN tab as a ghost AND in Pod-B's Ready as a live
-    #     cluster. We dedup conservatively here: any non-revoked ghost in any
-    #     pod's bucket adds its task IDs.
-    for _other_pod, _other_ghosts in (ghost_db or {}).items():
-        if _other_pod == pod_name or not isinstance(_other_ghosts, list):
-            continue
-        for _g in _other_ghosts:
-            _g_hash = _g.get('hash') or ''
-            if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
-                continue
-            for _gt in (_g.get('task_ids') or []):
-                _gt = str(_gt).strip()
-                if _gt:
-                    _awaiting_tids.add(_gt)
-    # 🛡️ ADDRESS-LEVEL SECONDARY DEDUP (May 18 2026 — Nick reported same
-    # WO# in Accepted with same addresses appearing as a Ready route card).
-    # When OnFleet creates NEW tasks at an already-dispatched kiosk (e.g., a
-    # new continuity batch for the next visit), they have FRESH task IDs that
-    # don't match anything in sent_db/ghost_db — so task-ID dedup misses them.
-    # Address-based dedup catches that: extract stop addresses from every
-    # non-revoked ghost (parse locs's pipe-delimited stops, drop home bookends),
-    # normalize whitespace+case, and skip any Ready cluster whose stops all
-    # fall inside this set.
-    def _norm_addr(s):
-        return ' '.join(str(s or '').split()).strip().lower()
-    _awaiting_addrs = set()
-    def _collect_ghost_addrs(_g):
-        _raw = str(_g.get('locs') or '').split('|')
-        _stops = _raw[1:-1] if len(_raw) >= 3 else _raw
-        for _s in _stops:
-            _ns = _norm_addr(_s)
-            if _ns:
-                _awaiting_addrs.add(_ns)
-    for _g in ghost_db.get(pod_name, []):
-        _g_hash = _g.get('hash') or ''
-        if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
-            continue
-        _collect_ghost_addrs(_g)
-    for _other_pod, _other_ghosts in (ghost_db or {}).items():
-        if _other_pod == pod_name or not isinstance(_other_ghosts, list):
-            continue
-        for _g in _other_ghosts:
-            _g_hash = _g.get('hash') or ''
-            if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
-                continue
-            _collect_ghost_addrs(_g)
+    # Note (May 18 2026 — rolled back): both the cross-pod ghost iteration AND
+    # the address-level dedup were tried and removed. They were too aggressive:
+    # the cross-pod sweep caused false positives when unrelated pods happened
+    # to share legacy task IDs, and the address sweep hid legitimate new
+    # continuity batches at already-dispatched kiosks. Keep dedup scoped to
+    # this pod's sent_db + ghost_db + same-rerun live clusters.
     # Also include task IDs from every LIVE cluster in `cls` whose session-state
     # route_state pins it to a non-Ready bucket (field_nation, email_sent,
     # finalized). These clusters didn't land in ghost_db (they're still live
@@ -7036,19 +6993,10 @@ def run_pod_tab(pod_name):
             # overlap AND we're falling through to Ready/Review, the
             # Awaiting cluster owns those tasks — skip rendering here so
             # the same kiosk doesn't appear in both columns.
+            # Address-level dedup was tried but it hid LEGITIMATE new
+            # continuity batches at already-dispatched kiosks. Reverted.
             if not is_reverted and any(tid in _awaiting_tids for tid in task_ids):
                 continue
-            # 🛡️ ADDRESS-LEVEL DEDUP — if every stop in this Ready cluster is
-            # already represented in an Awaiting ghost (same addresses, fresh
-            # OnFleet task IDs from a new continuity batch), suppress it. The
-            # dispatcher's already-dispatched WO covers this kiosk; rendering
-            # the new tasks as Ready would create the same UI duplicate the
-            # task-ID dedup catches, just by a different vector.
-            if not is_reverted and _awaiting_addrs:
-                _cluster_addrs = {_norm_addr(_t.get('full', '')) for _t in (c.get('data') or [])}
-                _cluster_addrs.discard('')
-                if _cluster_addrs and _cluster_addrs.issubset(_awaiting_addrs):
-                    continue
             # Fallback to calculated status
             if c.get('status') == 'Ready': ready.append(c) #
             else: review.append(c) #

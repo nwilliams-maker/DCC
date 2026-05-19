@@ -5421,15 +5421,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"_persisted_mailto_{cluster_hash}"] = _mailto
                 time.sleep(1)
                 _link_ph.empty()
-                # Explicit fragment-scope rerun — re-renders ONLY this route card
-                # to flip the GENERATE→RESEND label and show the persistent Default
-                # Mail button. Other cards, supercards, and Awaiting columns are
-                # untouched. Pre-May 18 this was a bare st.rerun() which, despite
-                # being inside an @st.fragment decorator, was sometimes triggering
-                # an app-scope rerun under Streamlit 1.39 — Nick reported the
-                # "full page rerun" feel. Forcing scope="fragment" eliminates the
-                # ambiguity.
-                st.rerun(scope="fragment")
+                # App-scope rerun (May 18 2026 — restored after the fragment-scope
+                # version left the route stuck in Ready after dispatch). The
+                # bucketing logic that decides Ready vs Sent lives in run_pod_tab
+                # OUTSIDE this fragment, so a fragment-scope rerun can't move the
+                # route to the Sent bucket. User explicitly clicked Generate Link;
+                # an app rerun here is expected (it's a user action, not an
+                # automatic-poll-triggered rerun).
+                st.rerun(scope="app")
 
     # 📨 PERSISTENT DEFAULT MAIL BUTTON
     # Renders below the GENERATE button whenever the route is in email_sent state

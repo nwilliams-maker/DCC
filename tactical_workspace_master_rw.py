@@ -3520,7 +3520,7 @@ def process_digital_pool(master_bar=None):
     v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy() if (lat_col in ic_df.columns and lng_col in ic_df.columns) else pd.DataFrame()
 
     clusters = []
-    route_radius = 25 # Strict 25-mile radius for digital
+    route_radius = 20 # Strict 20-mile radius for digital
     
     while pool:
         anc = pool.pop(0)
@@ -3948,7 +3948,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 # into one route. 25mi matches the digital radius AND the smart-sync
                 # merge radius below (CLUSTER_RADIUS = 25), so cluster geometry now
                 # stays consistent across the three clustering paths.
-                route_radius = 25
+                route_radius = 20
             
                 candidates = []; rem = []
                 for t in pool:

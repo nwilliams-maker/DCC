@@ -3520,7 +3520,7 @@ def process_digital_pool(master_bar=None):
     v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy() if (lat_col in ic_df.columns and lng_col in ic_df.columns) else pd.DataFrame()
 
     clusters = []
-    route_radius = 20 # Strict 20-mile radius for digital
+    route_radius = 20
     
     while pool:
         anc = pool.pop(0)
@@ -5228,7 +5228,23 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         task_breakdown_str = "\n".join([f"  {cat}: {count}" for cat, count in route_task_counts.items()]) + "\n"
     
         install_warning = f"\n⚠️ NOTE: This route contains Kiosk Installs. Please ensure you have adequate storage and vehicle space.\n" if total_installs > 0 else ""
-    
+
+        # 🩺 Quest Diagnostics hours warning (May 18 2026 — Nick's request).
+        # Quest venues are only open 7am-4pm. Surface in the email body if any
+        # stop on the route is a Quest so the contractor plans their day around
+        # the window. We also propagate this into the portal HTML below.
+        _quest_addrs = set()
+        for _t in cluster['data']:
+            _vn = str(_t.get('venue_name', '')).strip().lower()
+            if 'quest' in _vn:
+                _addr = _t.get('full', '')
+                if _addr:
+                    _quest_addrs.add(_addr)
+        quest_warning = (
+            f"\n⏰ QUEST DIAGNOSTICS HOURS: 7:00 AM – 4:00 PM only.\n"
+            f"   {len(_quest_addrs)} stop(s) on this route are Quest Diagnostics — please arrive within the open window.\n"
+        ) if _quest_addrs else ""
+
         sig_preview = (
             f"Hello {ic.get('name', 'Contractor')},\n\n"
             f"We have a new route available for you to review.\n\n"
@@ -5238,7 +5254,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f" Estimated Compensation: ${final_pay:.2f} \n\n"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
-            f"{install_warning}\n"
+            f"{install_warning}"
+            f"{quest_warning}\n"
             f"To view the complete route details—including total stops, estimated mileage, and time—please click the secure link below to access your Route Summary.\n\n"
             f"⚠️ ACTION REQUIRED:\n"
             f"You must confirm by selecting 'Accept' or 'Decline' directly through the portal link.\n\n"

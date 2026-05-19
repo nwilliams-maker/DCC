@@ -1839,6 +1839,22 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     st.session_state.pop(f"sync_{cluster_hash}", None)
     st.session_state.pop(f"scrub_timer_{cluster_hash}", None)
 
+    # 🔄 POST-REVOKE AUTO-RESYNC (May 18 2026 — Nick: "tasks don't flow back").
+    # When auto-rerun was killed, the natural path that brought re-routed tasks
+    # back to Ready was severed. The OnFleet cache is 60s TTL and pull only
+    # happens on Check New Tasks click, so the dispatcher saw the route vanish
+    # from Awaiting but never reappear in Ready. Two countermeasures:
+    #   (1) Bust the OnFleet 60s cache NOW so the next pull is fresh.
+    #   (2) Set a per-pod flag that triggers a JS-deferred auto-click of the
+    #       Check New Tasks button 12 seconds later (gives the bg thread time
+    #       to unassign the tasks back to state=0 before we re-fetch).
+    try:
+        _fetch_onfleet_open_tasks_cached.clear()
+    except Exception:
+        pass
+    if pod_name:
+        st.session_state[f"_post_revoke_resync_pending_{pod_name}"] = True
+
     # 📜 Record this action so the dispatch card can show "Revoked / Re-Routed"
     # context the next time this same route surfaces in the Ready pool.
     try:
@@ -3520,7 +3536,7 @@ def process_digital_pool(master_bar=None):
     v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy() if (lat_col in ic_df.columns and lng_col in ic_df.columns) else pd.DataFrame()
 
     clusters = []
-    route_radius = 20
+    route_radius = 25 # Strict 25-mile radius for digital
     
     while pool:
         anc = pool.pop(0)
@@ -3948,7 +3964,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 # into one route. 25mi matches the digital radius AND the smart-sync
                 # merge radius below (CLUSTER_RADIUS = 25), so cluster geometry now
                 # stays consistent across the three clustering paths.
-                route_radius = 20
+                route_radius = 25
             
                 candidates = []; rem = []
                 for t in pool:
@@ -6636,6 +6652,34 @@ def run_pod_tab(pod_name):
     # if init genuinely fails — after that the dispatcher gets the manual
     # Initialize button as a fallback. Side benefit: pod-locked dispatchers
     # now auto-init on landing and never see the Initialize button at all.
+    # 🔄 POST-REVOKE AUTO-RESYNC TRIGGER (May 18 2026).
+    # When move_to_dispatch fires (Re-route button), it sets
+    # _post_revoke_resync_pending_{pod}=True. The bg thread needs ~10s to
+    # unassign the OnFleet tasks back to state=0. We inject a one-shot JS
+    # snippet here that waits 12s after this rerun then clicks Check New
+    # Tasks, which forces smart_sync_pod to fetch fresh OnFleet data and
+    # surface the re-routed cluster in Ready. Fires once per re-route action
+    # (flag is consumed below).
+    _post_revoke_key = f"_post_revoke_resync_pending_{pod_name}"
+    if st.session_state.pop(_post_revoke_key, False):
+        _components.html(
+            f"""
+            <script>
+            (function() {{
+              parent.setTimeout(function() {{
+                try {{
+                  var btn = parent.document.querySelector(
+                    '[class*="st-key-reopt_{pod_name}"] button'
+                  );
+                  if (btn) btn.click();
+                }} catch (_) {{}}
+              }}, 12000);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+
     _auto_init_key = f"_auto_init_attempts_{pod_name}"
     if is_initialized:
         st.session_state.pop(_auto_init_key, None)

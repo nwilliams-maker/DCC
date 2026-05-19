@@ -3536,7 +3536,7 @@ def process_digital_pool(master_bar=None):
     v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy() if (lat_col in ic_df.columns and lng_col in ic_df.columns) else pd.DataFrame()
 
     clusters = []
-    route_radius = 25 # Strict 25-mile radius for digital
+    route_radius = 20 # Strict 20-mile radius for digital (May 18 2026 — was 25)
     
     while pool:
         anc = pool.pop(0)
@@ -3959,12 +3959,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 anc_wo = anc.get('wo', 'none')
             
                 # Set radius strictly based on type.
-                # May 18 2026 — bumped down 35 → 25 for static routes after Nick
-                # showed SF Bay Area clusters merging Peninsula + East Bay + Pleasanton
-                # into one route. 25mi matches the digital radius AND the smart-sync
-                # merge radius below (CLUSTER_RADIUS = 25), so cluster geometry now
-                # stays consistent across the three clustering paths.
-                route_radius = 25
+                # May 18 2026 — bumped down 35 → 25 → 20 for static routes after
+                # Nick tightened twice. Bay Area cross-bridge merges fully separated
+                # at 20mi. Matches the digital radius AND CLUSTER_RADIUS below so
+                # cluster geometry stays consistent across all three paths.
+                route_radius = 20
             
                 candidates = []; rem = []
                 for t in pool:
@@ -6063,7 +6062,7 @@ def smart_sync_pod(pod_name):
 
     _tick(0.7, f"📦 Merging {len(new_pool)} new tasks...")
 
-    CLUSTER_RADIUS = 25  # miles
+    CLUSTER_RADIUS = 20  # miles (May 18 2026 — kept in sync with route_radius)
 
     unmatched = []
     for new_task in new_pool:

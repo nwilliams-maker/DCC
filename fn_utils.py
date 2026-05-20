@@ -234,8 +234,9 @@ def generate_combined_fn_upload(clusters: list):
     need them all combined into 1 work order per location address". Rewritten to
     group tasks by `full` address ACROSS all clusters (not per-cluster like
     before). Same address from 4 different routes → 1 CSV row → 1 FN WO.
-    The Bundle column is dropped in this mode since cross-cluster dedupe makes
-    the per-cluster bundle index meaningless.
+    May 2026 — the Bundle column is now populated: each selected route gets a
+    sequential bundle # (1, 2, ...) and every address row carries the # of the
+    route that first contributed it. Field Nation bundles WOs sharing a value.
 
     Args:
         clusters: list of cluster dicts (same shape as generate_fn_upload's `cluster`).
@@ -259,8 +260,16 @@ def generate_combined_fn_upload(clusters: list):
     # slot doesn't get listed twice when two routes both included it.
     addr_tasks: dict = {}        # addr → list[task dict]
     addr_city_state: dict = {}   # addr → (city, state) for fallback header build
+    addr_bundle: dict = {}       # addr → bundle # of the route that first contributed it
     included_hashes: list = []
-    for cluster in (clusters or []):
+    # 🌟 BUNDLE # PER ROUTE (May 2026): each selected route gets a sequential
+    # bundle number (1, 2, 3, ...). Field Nation's "Bundle" column groups WOs
+    # sharing a value into one bundle on FN.com, so this makes each DCC route's
+    # stops bundle together after upload. Because the combined CSV dedupes rows
+    # by address across routes, an address that appears in two routes keeps the
+    # number of whichever route listed it FIRST (addr_bundle.setdefault — first
+    # write wins). enumerate starts at 1 so the column never shows a 0.
+    for _bundle_idx, cluster in enumerate(clusters or [], start=1):
         ch = cluster.get('_cluster_hash') or cluster.get('cluster_hash') or ''
         included_hashes.append(ch)
         c_city  = cluster.get('city', '')
@@ -271,6 +280,7 @@ def generate_combined_fn_upload(clusters: list):
                 continue
             bucket = addr_tasks.setdefault(addr, [])
             addr_city_state.setdefault(addr, (c_city, c_state))
+            addr_bundle.setdefault(addr, _bundle_idx)
             loc_in_venue = (t.get('location_in_venue', '') or '').strip()
             existing_locs = [(x.get('location_in_venue', '') or '').strip() for x in bucket]
             if loc_in_venue not in existing_locs:
@@ -298,9 +308,10 @@ def generate_combined_fn_upload(clusters: list):
         manager    = FN_STATE_MANAGER.get(state, '')
 
         base_row = [
-            "",  # Bundle column — blank in cross-cluster dedupe mode (the
-                 # original per-cluster bundle number is meaningless once
-                 # the same address pools tasks from multiple routes).
+            addr_bundle.get(addr, ""),  # Bundle # — the route (1, 2, 3, ...)
+                 # that first contributed this address. See addr_bundle build
+                 # above. Field Nation groups WOs sharing a Bundle value into
+                 # one bundle on FN.com, so each DCC route's stops bundle.
             venue_name,
             street,
             city,

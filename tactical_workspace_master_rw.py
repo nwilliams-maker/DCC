@@ -15,27 +15,35 @@ import os
 import re
 
 # --- CONFIG & CREDENTIALS ---
-# We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash
+# We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
+# Google Cloud Services were dropped May 1 2026 — Mapbox handles geocoding +
+# route distance + waypoint optimization, Geocodio handles address lookups in
+# the GAS backend. GOOGLE_MAPS_KEY is no longer required for startup.
 ONFLEET_KEY = os.environ.get("ONFLEET_KEY")
-GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_KEY")
-# Mapbox replaces Google Directions API for route distance + waypoint optimization.
-# Free tier: 100k Optimization API calls/month, $2/1000 after. Set this in Railway:
-#   MAPBOX_TOKEN=pk.eyJ1...   (the public token from your Mapbox account dashboard)
+# Mapbox is the active routing / geocoding key for the live app.
+#   Set in Railway: MAPBOX_TOKEN=pk.eyJ1...   (public token from Mapbox dashboard)
 MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN")
+# GOOGLE_MAPS_KEY kept as a soft fallback (some embedded JS components still
+# reference it for static maps preview). NOT required for app startup.
+GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_KEY")
 
 # If Railway didn't have them, ONLY THEN do we try st.secrets (and we catch the error)
-if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
+if not ONFLEET_KEY or not MAPBOX_TOKEN:
     try:
         ONFLEET_KEY = ONFLEET_KEY or st.secrets.get("ONFLEET_KEY")
-        GOOGLE_MAPS_KEY = GOOGLE_MAPS_KEY or st.secrets.get("GOOGLE_MAPS_KEY")
+        MAPBOX_TOKEN = MAPBOX_TOKEN or st.secrets.get("MAPBOX_TOKEN")
     except Exception:
         # If we get here, it means no secrets file exists AND Railway variables are missing
         pass
+    try:
+        GOOGLE_MAPS_KEY = GOOGLE_MAPS_KEY or st.secrets.get("GOOGLE_MAPS_KEY")
+    except Exception:
+        pass
 
-# Final check to keep the app from crashing with a traceback
-if not ONFLEET_KEY or not GOOGLE_MAPS_KEY:
+# Final check — only the keys the app actually needs to function.
+if not ONFLEET_KEY or not MAPBOX_TOKEN:
     st.error("🔑 **API Keys Missing!**")
-    st.info("I couldn't find your keys in Railway's 'Variables' tab. Please double-check that you added ONFLEET_KEY and GOOGLE_MAPS_KEY there.")
+    st.info("I couldn't find your keys in Railway's 'Variables' tab. Please double-check that you added ONFLEET_KEY and MAPBOX_TOKEN there.")
     st.stop()
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"

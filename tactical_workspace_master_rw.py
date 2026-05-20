@@ -6799,14 +6799,16 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
         # Seed the auto_sync_checker cooldown so the next 90s of polls don't
-        # fire an app-scope rerun that yanks the page out from under us. The
-        # dispatcher just synced; nothing else needs to interrupt them.
+        # fire an app-scope rerun that yanks the page out from under us.
         st.session_state['_auto_sync_last_app_rerun_ts'] = datetime.now()
-        # Removed st.rerun() (May 18 2026) — admin view runs run_pod_tab for
-        # every pod in sequence; the rerun made each pod's sync trigger a
-        # full page refresh, so admins watching the dashboard saw 5 refreshes
-        # in a row while data loaded. session_state is already updated; just
-        # let the script continue and render the post-sync dashboard inline.
+        # st.rerun() RESTORED (May 18 2026 v2 — BUG-3 fix). Without it, the
+        # "Check New Tasks" button and supercards were rendered earlier in the
+        # run with the PRE-sync state and never refreshed — dispatchers saw a
+        # stale header contradicting a freshly-populated dashboard. Sync
+        # completion is a discrete event; a rerun here is correct. (The reruns
+        # we permanently killed are the IDLE auto_sync_checker polls, not
+        # user/flow-triggered ones like this.)
+        st.rerun()
 
     # 🌟 FULL-WIDTH LOADING UI — outside columns so bar spans the page
     if not is_initialized and init_clicked:
@@ -6856,19 +6858,31 @@ def run_pod_tab(pod_name):
         st.session_state.pop('_loading_overlay', None)
         st.session_state.pop('_loading_start', None)
         st.session_state.pop('_loading_pod', None)
-        # Seed the auto_sync_checker cooldown (90s of quiet) — keeps the
-        # page from snapping back into a sync rerun moments after init
-        # completes, which was the "page reverts to Initialize Data" issue.
+        # Seed the auto_sync_checker cooldown (90s of quiet).
         st.session_state['_auto_sync_last_app_rerun_ts'] = datetime.now()
-        # Removed st.rerun() (May 18 2026) — see the matching removal in the
-        # Check-New-Tasks block above. Forcing a rerun here caused admin view
-        # to refresh the whole page after every pod's init completed (5 pods =
-        # 5 full-page flickers). clusters_{pod} is already in session_state;
-        # let the script render the rest of the pod tab inline.
+        # st.rerun() RESTORED (May 18 2026 v2 — BUG-1 + BUG-3 fix). Without it,
+        # the header was rendered with is_initialized=False BEFORE process_pod
+        # ran, so after a successful init the dispatcher saw a stale
+        # "Initialize Data" button + "No tasks initialized" message sitting
+        # above a fully-populated dashboard. The rerun lets the next pass
+        # render the header against the now-true is_initialized state.
+        # Admin multi-pod view does flicker once per pod as each finishes —
+        # acceptable: it's a load sequence, not a random idle refresh, and a
+        # broken-looking dispatcher page is the worse evil.
+        st.rerun()
 
     # 🌟 THE FIX: Remove the early return and safely default to an empty list
     # Load cluster data safely so the Supercards can render 0's
     cls = st.session_state.get(f"clusters_{pod_name}", [])
+
+    # 🛡️ RE-EVALUATE is_initialized (May 18 2026 — BUG-1/BUG-3 defensive fix).
+    # The header's is_initialized was computed BEFORE the init/sync blocks ran.
+    # If a process_pod just completed inline this pass, clusters_{pod} now
+    # exists — recompute so the "No tasks initialized" message + any other
+    # downstream is_initialized check reflect reality. The st.rerun() after
+    # init normally makes this moot, but this keeps a single render pass
+    # internally consistent if the rerun is ever skipped.
+    is_initialized = f"clusters_{pod_name}" in st.session_state
 
     # --- KEEPING THE CLEAN AUTO-SYNC LOGIC ---
     sent_db, ghost_db, _archived_wos, _history_db = fetch_sent_records_from_sheet()

@@ -24,6 +24,24 @@
   } catch (_) {}
 
   var doc = document, win = window;
+
+  // M28 (QA audit 2026-05-21) — dependency self-check. The watcher's deploy
+  // detection + stale-tab recovery rely on DOM hooks injected by the Streamlit
+  // app (the instance-id marker and the update banner). If static serving is
+  // off or those hooks never render, the watcher silently does nothing —
+  // failing closed but invisibly. Warn in the console so a missing dependency
+  // is at least diagnosable. Runs deferred so async Streamlit paint can finish.
+  setTimeout(function() {
+    try {
+      var missing = [];
+      if (!doc.getElementById("dcc-instance-id")) missing.push("#dcc-instance-id");
+      if (!doc.getElementById("dcc-update-banner")) missing.push("#dcc-update-banner");
+      if (missing.length) {
+        console.warn("[dcc-watcher] missing dependencies: " + missing.join(", ") +
+          " — deploy detection / stale-tab recovery may not function.");
+      }
+    } catch (_) {}
+  }, 8000);
   var LS_KEY = "dcc_known_instance_id";
   var lastActivity = Date.now();
 
@@ -141,9 +159,11 @@
     var baseline = ensureBaseline();
     if (cur && baseline && cur !== baseline) {
       try { win.localStorage.setItem(LS_KEY, cur); } catch (_) {}
-      var idleMs = Date.now() - lastActivity;
-      if (idleMs > 600000) { win.location.reload(); }
-      else { showBanner(); }
+      // M27 (QA audit 2026-05-21) — never reload unconditionally on the idle
+      // path: a dispatcher idle >10min may still have unsaved widget input
+      // (a typed provider name, a counter-offer). Always show the dismissible
+      // banner and let them choose when to reload.
+      showBanner();
     }
   }, 15000);
 
@@ -236,7 +256,11 @@
         }
       }
     });
-    exMo.observe(doc.body, { childList: true, subtree: true });
+    // Tightened scope (QA audit 2026-05-21): observe the Streamlit app root
+    // when present rather than the whole document body, narrowing the volume
+    // of mutations the callback inspects. Falls back to body if not yet painted.
+    exMo.observe(doc.querySelector('[data-testid="stApp"]') || doc.body,
+                 { childList: true, subtree: true });
     // Also scan once at script start in case the error is already rendered.
     var existing = doc.querySelectorAll('[data-testid="stException"], [data-testid="stExceptionMessage"], [data-testid="stAlert"]');
     for (var i = 0; i < existing.length; i++) checkExceptionBox(existing[i]);
@@ -263,12 +287,26 @@
         }
       }
     });
-    mo.observe(doc.body, { childList: true, subtree: true });
+    // Tightened scope (QA audit 2026-05-21): same narrowing as the exception
+    // observer — watch the app root when available.
+    mo.observe(doc.querySelector('[data-testid="stApp"]') || doc.body,
+               { childList: true, subtree: true });
   } catch (_) {}
 
   // Stale-tab Streamlit errors — Bad message / SessionInfo / fragment id / chunk load failures.
   function isStreamlitErr(m) {
-    return /Bad message format|Bad .setIn. index|Could not find fragment id|Could not find fragment with id|SessionInfo|ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk|NetworkError|Failed to fetch/i.test(m);
+    // Tightened (QA audit 2026-05-21): bare "NetworkError" / "Failed to fetch"
+    // were broad enough that any unrelated fetch failure in the page triggered
+    // a 30s auto-reload. Require those to co-occur with a Streamlit-asset
+    // signal (chunk / _stcore / static) before treating them as a stale-tab.
+    if (/Bad message format|Bad .setIn. index|Could not find fragment id|Could not find fragment with id|SessionInfo|ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk/i.test(m)) {
+      return true;
+    }
+    if (/NetworkError|Failed to fetch/i.test(m) &&
+        /chunk|_stcore|static|streamlit/i.test(m)) {
+      return true;
+    }
+    return false;
   }
   win.addEventListener("error", function(e) {
     var m = String((e && e.message) || (e && e.error && e.error.message) || "");

@@ -4,11 +4,15 @@ All Field Nation logic lives here: manager mapping, upload generation, backgroun
 """
 
 import io
+import os
 import sys
 import threading
 import requests
 from datetime import datetime, timedelta
 import csv
+
+# Backend shared secret for GAS auth (security audit C3).
+_GAS_AUTH = (os.environ.get("DCC_SHARED_SECRET") or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +47,108 @@ PAY_PER_STOP = 20.0
 
 
 # ---------------------------------------------------------------------------
+# H13 — CSV formula-injection guard
+# ---------------------------------------------------------------------------
+# Excel/Sheets treat a cell whose first character is one of = + - @ (or a
+# leading tab / carriage return) as a live formula when the CSV is opened.
+# Venue / campaign / address values originate in external upstream systems,
+# so any string cell written to an FN upload CSV is run through this guard.
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Neutralize CSV formula injection. If a string cell begins with a
+    dangerous character, prefix it with a single quote so spreadsheet
+    clients treat it as literal text. Non-strings pass through unchanged."""
+    if not isinstance(value, str):
+        return value
+    if value and value[0] in _CSV_INJECTION_PREFIXES:
+        return "'" + value
+    return value
+
+
+# ---------------------------------------------------------------------------
+# M25 — structured address parsing (replaces fragile positional comma-split)
+# ---------------------------------------------------------------------------
+import re as _re_addr
+
+
+def _parse_address(addr, task, fallback_city="", fallback_state=""):
+    """Resolve (street, city, state, zip) for one FN CSV row.
+
+    Prefers structured per-task fields (street/city/state/zip) when present.
+    Falls back to parsing the comma-joined `full` address, but anchored from
+    the END (state + zip are the last components) so a leading "Suite 4"
+    segment no longer shifts city/state into the wrong column."""
+    addr = addr or ""
+    parts = [p.strip() for p in addr.split(",") if p.strip()]
+
+    # Structured fields win when supplied by the task.
+    street = str(task.get("street", "") or "").strip()
+    city   = str(task.get("city", "") or "").strip()
+    state  = str(task.get("state", "") or "").strip()
+    zip_code = str(task.get("zip", "") or "").strip()
+
+    # End-anchored parse: the last comma segment is typically "ST 12345" or
+    # "ST" or "12345"; the second-to-last is the city.
+    if parts:
+        tail = parts[-1]
+        m = _re_addr.match(r"^([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$", tail)
+        if m:
+            if not state:
+                state = m.group(1)
+            if not zip_code:
+                zip_code = m.group(2)
+            if not city and len(parts) >= 2:
+                city = parts[-2]
+        elif _re_addr.match(r"^\d{5}(?:-\d{4})?$", tail):
+            if not zip_code:
+                zip_code = tail
+            if not state and len(parts) >= 2:
+                state = parts[-2]
+            if not city and len(parts) >= 3:
+                city = parts[-3]
+        elif _re_addr.match(r"^[A-Za-z]{2}$", tail):
+            if not state:
+                state = tail
+            if not city and len(parts) >= 2:
+                city = parts[-2]
+        else:
+            # Legacy 4-part positional fallback.
+            if not city and len(parts) > 1:
+                city = parts[1]
+            if not state and len(parts) > 2:
+                state = parts[2]
+            if not zip_code and len(parts) > 3:
+                zip_code = parts[3]
+        if not street:
+            street = parts[0]
+
+    if not street:
+        street = addr
+    if not city:
+        city = fallback_city
+    if not state:
+        state = fallback_state
+    return street, city, (state or "").strip().upper(), zip_code
+
+
+# ---------------------------------------------------------------------------
+# H16 — address dedup key normalization
+# ---------------------------------------------------------------------------
+def _norm_addr_key(addr):
+    """Normalize an address string into a stable dedup key so the same venue
+    written two slightly different ways ("123 Main St" vs "123 Main St.")
+    collapses to one CSV row / one FN work order."""
+    a = (addr or "").strip().lower()
+    a = a.replace(".", " ")
+    a = _re_addr.sub(r"\s+", " ", a)
+    # Drop whitespace around commas so "st , dallas" and "st, dallas" match.
+    a = _re_addr.sub(r"\s*,\s*", ", ", a)
+    return a.strip().strip(",").strip()
+
+
+# ---------------------------------------------------------------------------
 # Background sheet save — never blocks the UI
 # ---------------------------------------------------------------------------
 def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
@@ -58,7 +164,7 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
             # 30–60s server-side. The thread is fire-and-forget so the user isn't
             # blocked either way, but the longer timeout means we'll actually see
             # errors via stderr instead of silently dropping the connection mid-push.
-            requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload}, timeout=90)
+            requests.post(gas_url, json={"action": "saveToFieldNation", "payload": payload, "auth_secret": _GAS_AUTH}, timeout=90)
         except Exception as e:
             print(f"[fn_utils.save_fn_to_sheet] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
@@ -116,22 +222,23 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
     for addr, tasks in stop_task_map.items():
         if not tasks:
             continue
-        parts    = [p.strip() for p in addr.split(",")]
-        street   = parts[0] if len(parts) > 0 else addr
-        city     = parts[1] if len(parts) > 1 else cluster.get('city', '')
-        state    = parts[2].strip().upper() if len(parts) > 2 else cluster.get('state', '')
-        zip_code = tasks[0].get('zip', parts[3].strip() if len(parts) > 3 else '')
+        # M25 — structured/end-anchored parse instead of fixed positional split.
+        street, city, state, zip_code = _parse_address(
+            addr, tasks[0],
+            fallback_city=cluster.get('city', ''),
+            fallback_state=cluster.get('state', ''),
+        )
 
         venue_name = tasks[0].get('venue_name', 'Terraboost Media')
         manager    = FN_STATE_MANAGER.get(state, '')
 
         base_row = [
             _bundle_for_rows,
-            venue_name,
-            street,
-            city,
-            state,
-            zip_code,
+            _csv_safe(venue_name),
+            _csv_safe(street),
+            _csv_safe(city),
+            _csv_safe(state),
+            _csv_safe(zip_code),
             "US",
             "Complete work anytime over a date range",
             start_date,
@@ -142,7 +249,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
             PAY_PER_STOP,
             1.0,
             PAY_PER_STOP,
-            manager,
+            _csv_safe(manager),
             "",
         ]
 
@@ -154,10 +261,10 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
             venue_id     = str(task.get('venue_id', '')).strip()
             combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
 
-            custom_cols.append(client)
+            custom_cols.append(_csv_safe(client))
             if slot_idx == 1:
-                custom_cols.append(venue_id)
-            custom_cols.append(combined_loc)
+                custom_cols.append(_csv_safe(venue_id))
+            custom_cols.append(_csv_safe(combined_loc))
 
         # Pad empty slots up to 5
         filled = len(tasks[:5])
@@ -258,9 +365,10 @@ def generate_combined_fn_upload(clusters: list):
     # Aggregate every task from every cluster, keyed by `full` address.
     # Dedupe within each address by `location_in_venue` so the same kiosk
     # slot doesn't get listed twice when two routes both included it.
-    addr_tasks: dict = {}        # addr → list[task dict]
-    addr_city_state: dict = {}   # addr → (city, state) for fallback header build
-    addr_bundle: dict = {}       # addr → bundle # of the route that first contributed it
+    addr_tasks: dict = {}        # norm key → list[task dict]
+    addr_original: dict = {}     # norm key → first-seen original-cased address
+    addr_city_state: dict = {}   # norm key → (city, state) for fallback header build
+    addr_bundle: dict = {}       # norm key → bundle # of the route that first contributed it
     included_hashes: list = []
     # 🌟 BUNDLE # PER ROUTE (May 2026): each selected route gets a sequential
     # bundle number (1, 2, 3, ...). Field Nation's "Bundle" column groups WOs
@@ -278,9 +386,14 @@ def generate_combined_fn_upload(clusters: list):
             addr = t.get('full', '')
             if not addr:
                 continue
-            bucket = addr_tasks.setdefault(addr, [])
-            addr_city_state.setdefault(addr, (c_city, c_state))
-            addr_bundle.setdefault(addr, _bundle_idx)
+            # H16 — dedupe on a normalized key so "123 Main St" and
+            # "123 Main St." don't become two rows / two FN work orders.
+            # Keep the first-seen original-cased address for CSV output.
+            key = _norm_addr_key(addr)
+            bucket = addr_tasks.setdefault(key, [])
+            addr_original.setdefault(key, addr)
+            addr_city_state.setdefault(key, (c_city, c_state))
+            addr_bundle.setdefault(key, _bundle_idx)
             loc_in_venue = (t.get('location_in_venue', '') or '').strip()
             existing_locs = [(x.get('location_in_venue', '') or '').strip() for x in bucket]
             if loc_in_venue not in existing_locs:
@@ -294,29 +407,29 @@ def generate_combined_fn_upload(clusters: list):
     writer.writerow(_fn_csv_headers())
 
     total_stops = 0
-    for addr, tasks in addr_tasks.items():
+    for key, tasks in addr_tasks.items():
         if not tasks:
             continue
-        parts    = [p.strip() for p in addr.split(",")]
-        c_city, c_state = addr_city_state.get(addr, ('', ''))
-        street   = parts[0] if len(parts) > 0 else addr
-        city     = parts[1] if len(parts) > 1 else c_city
-        state    = parts[2].strip().upper() if len(parts) > 2 else c_state
-        zip_code = tasks[0].get('zip', parts[3].strip() if len(parts) > 3 else '')
+        addr = addr_original.get(key, key)
+        c_city, c_state = addr_city_state.get(key, ('', ''))
+        # M25 — structured/end-anchored parse instead of fixed positional split.
+        street, city, state, zip_code = _parse_address(
+            addr, tasks[0], fallback_city=c_city, fallback_state=c_state,
+        )
 
         venue_name = next((t.get('venue_name', '') for t in tasks if t.get('venue_name')), 'Terraboost Media')
         manager    = FN_STATE_MANAGER.get(state, '')
 
         base_row = [
-            addr_bundle.get(addr, ""),  # Bundle # — the route (1, 2, 3, ...)
+            addr_bundle.get(key, ""),  # Bundle # — the route (1, 2, 3, ...)
                  # that first contributed this address. See addr_bundle build
                  # above. Field Nation groups WOs sharing a Bundle value into
                  # one bundle on FN.com, so each DCC route's stops bundle.
-            venue_name,
-            street,
-            city,
-            state,
-            zip_code,
+            _csv_safe(venue_name),
+            _csv_safe(street),
+            _csv_safe(city),
+            _csv_safe(state),
+            _csv_safe(zip_code),
             "US",
             "Complete work anytime over a date range",
             start_date,
@@ -327,7 +440,7 @@ def generate_combined_fn_upload(clusters: list):
             PAY_PER_STOP,
             1.0,
             PAY_PER_STOP,
-            manager,
+            _csv_safe(manager),
             "",
         ]
 
@@ -339,10 +452,10 @@ def generate_combined_fn_upload(clusters: list):
             venue_id     = str(task.get('venue_id', '')).strip()
             combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
 
-            custom_cols.append(client)
+            custom_cols.append(_csv_safe(client))
             if slot_idx == 1:
-                custom_cols.append(venue_id)
-            custom_cols.append(combined_loc)
+                custom_cols.append(_csv_safe(venue_id))
+            custom_cols.append(_csv_safe(combined_loc))
 
         # Pad empty slots up to 5.
         filled = len(tasks[:5])
@@ -401,6 +514,7 @@ def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None):
                     "action": "setFnProvider",
                     "cluster_hash": cluster_hash,
                     "provider_name": provider_name,
+                    "auth_secret": _GAS_AUTH,
                 },
                 timeout=15,
             )
@@ -445,6 +559,7 @@ def bulk_save_fn_providers_by_address(gas_url, address_provider_map):
                 json={
                     "action": "bulkSetFnProvidersByAddress",
                     "address_map": clean_map,
+                    "auth_secret": _GAS_AUTH,
                 },
                 timeout=30,
             )

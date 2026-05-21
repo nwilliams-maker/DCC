@@ -35,6 +35,7 @@ Public API:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from datetime import date, datetime
 from typing import Iterable
@@ -121,6 +122,8 @@ def _login() -> str | None:
     email = os.environ.get("TERRABOOST_EMAIL")
     password = os.environ.get("TERRABOOST_PASSWORD")
     if not email or not password:
+        print("[terraboost_campaigns._login] TERRABOOST_EMAIL/TERRABOOST_PASSWORD "
+              "not set — cannot authenticate.", file=sys.stderr, flush=True)
         return None
     try:
         r = requests.post(
@@ -130,12 +133,18 @@ def _login() -> str | None:
             timeout=HTTP_TIMEOUT,
         )
         if r.status_code != 200:
+            print(f"[terraboost_campaigns._login] login HTTP {r.status_code}",
+                  file=sys.stderr, flush=True)
             return None
         body = r.json()
         if body.get("errors"):
+            print(f"[terraboost_campaigns._login] login GraphQL errors: "
+                  f"{body.get('errors')}", file=sys.stderr, flush=True)
             return None
         return ((body.get("data") or {}).get("login") or {}).get("token")
-    except Exception:
+    except Exception as e:
+        print(f"[terraboost_campaigns._login] {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
         return None
 
 
@@ -166,6 +175,8 @@ def _query(query_str: str, variables: dict | None = None) -> dict:
         )
     token = _get_token()
     if not token:
+        print("[terraboost_campaigns._query] no auth token — returning empty result.",
+              file=sys.stderr, flush=True)
         return {}
     headers = {
         "content-type": "application/json",
@@ -185,15 +196,27 @@ def _query(query_str: str, variables: dict | None = None) -> dict:
             cache["issued_ts"] = 0.0
             token = _get_token()
             if not token:
+                print("[terraboost_campaigns._query] re-login after 401 failed.",
+                      file=sys.stderr, flush=True)
                 return {}
             headers["authorization"] = f"Bearer {token}"
             r = requests.post(GQL_URL, headers=headers,
                               json={"query": query_str, "variables": variables or {}},
                               timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
+            print(f"[terraboost_campaigns._query] HTTP {r.status_code}",
+                  file=sys.stderr, flush=True)
             return {}
-        return r.json()
-    except Exception:
+        body = r.json()
+        if isinstance(body, dict) and body.get("errors"):
+            # GraphQL errors arrive inside an HTTP 200 — surface them, but still
+            # return the body so any partial `data` remains usable downstream.
+            print(f"[terraboost_campaigns._query] GraphQL errors: "
+                  f"{body.get('errors')}", file=sys.stderr, flush=True)
+        return body
+    except Exception as e:
+        print(f"[terraboost_campaigns._query] {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
         return {}
 
 
@@ -241,6 +264,13 @@ def _parse_date(s: str | None) -> date | None:
 
 def _pick_active(campaign_kiosks: list, today: date) -> dict | None:
     """Return the most-relevant campaignKiosk for this kiosk.
+
+    L13 (QA audit 2026-05-21) — BY DESIGN: this function intentionally
+    IGNORES `reservationEnd`. It never checks whether `today` falls before
+    the reservation end date, so a kiosk between campaigns will surface its
+    most recent (possibly expired) campaign rather than nothing. This matches
+    the dispatcher spec below ("whatever the portal shows as latest"). Do not
+    add an end-date guard without product-owner sign-off.
 
     Per dispatcher spec: no date filtering — whatever the Terraboost portal
     shows as the kiosk's current/latest assignment is what the packing slip

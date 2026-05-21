@@ -48,15 +48,15 @@
                         </div>
 
                         <div class="space-y-4 no-print">
-                            <button type="button" onclick="viewRoute(11)" class="btn-modern w-full bg-slate-900 text-white font-black py-4 rounded-xl shadow-lg uppercase tracking-widest text-xs flex justify-center items-center gap-2">
+                            <button type="button" onclick="viewRoute()" class="btn-modern w-full bg-slate-900 text-white font-black py-4 rounded-xl shadow-lg uppercase tracking-widest text-xs flex justify-center items-center gap-2">
                                 <span>🗺️</span> View Route Preview
                             </button>
-                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Only up to 9 locations are visible in the Google Maps UI.</p>
+                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Opens up to 25 stops in Google Maps. The mobile app may only display the first several visually.</p>
 
                             <button type="button" onclick="copyMapUrl()" class="btn-modern w-full bg-white border-2 border-slate-200 text-slate-600 hover:text-blue-600 font-black py-4 rounded-xl text-[10px] uppercase tracking-[0.15em] flex justify-center items-center gap-2">
                                 <span>🔗</span> Copy Browser Link
                             </button>
-                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Paste this URL into a browser to see 10+ location routes.</p>
+                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Paste this URL into a desktop browser to see the full multi-stop route.</p>
                         </div>
                     </div>
 
@@ -90,7 +90,7 @@
                         </div>
 
                         <div class="pt-4">
-                            <button type="button" id="submitBtn" onclick="submitFinalResponse()" class="btn-modern bg-blue-600 text-white font-black py-6 rounded-2xl shadow-xl text-sm uppercase tracking-[0.2em] w-full">Submit Final Response</button>
+                            <button type="button" id="submitBtn" onclick="submitFinalResponse()" disabled class="btn-modern bg-blue-600 text-white font-black py-6 rounded-2xl shadow-xl text-sm uppercase tracking-[0.2em] w-full disabled:opacity-50 disabled:cursor-not-allowed">Submit Final Response</button>
                         </div>
                     </div>
                 </div>
@@ -105,9 +105,37 @@
     </div>
 
     <script>
+        // [H15] HARD COUPLING: this URL must stay byte-identical to the Streamlit
+        // app's GAS_WEB_APP_URL env var (Railway). The portal deploys separately
+        // (GitHub Pages), so the two can silently drift. If the GAS deployment is
+        // ever re-published, update BOTH this constant and Railway's GAS_WEB_APP_URL
+        // in the same change. A stale URL here sends contractor accepts to a dead
+        // GAS deployment with no visible error.
         const webAppUrl = "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec";
-        const formspreeUrl = "https://formspree.io/f/meerlqll";
-        const PRIMARY_FORMSPREE_EMAIL = "nwilliams@terraboost.biz";
+
+        // [L10] Single source of truth for the route stop limit (was inconsistently
+        // 9 / 11 / 25 across UI copy and code).
+        const MAX_ROUTE_STOPS = 25;
+
+        // [M24] KNOWN LIMITATION — CSRF / forgery: the processDecision POST below
+        // goes to a public, unauthenticated GAS endpoint as text/plain (to dodge a
+        // CORS preflight). The only "secret" is the routeId. Anyone who knows or
+        // guesses a route ID can POST a forged accept/decline from any origin; the
+        // signature + consent checkbox are client-side only. A real fix requires an
+        // unguessable HMAC token embedded in the route link and validated server
+        // side — a coordinated GAS + Streamlit + portal change that must be tested
+        // live. Intentionally NOT changed here. Tracked as audit finding M24.
+
+        // [H4] HTML-escape helper — every value from the GAS getRoute response is
+        // untrusted and must be escaped before it touches innerHTML.
+        function esc(v) {
+            return String(v == null ? "" : v)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
 
         window.onload = () => {
             const urlParams = new URLSearchParams(window.location.search);
@@ -120,7 +148,8 @@
                     .then(r => r.json())
                     .then(res => {
                         if (res.error) {
-                            document.getElementById('summaryZone').innerHTML = `<div class="text-red-500 font-bold">⚠️ ${res.error}</div>`;
+                            // [H4] res.error is untrusted GAS output — escape before innerHTML.
+                            document.getElementById('summaryZone').innerHTML = `<div class="text-red-500 font-bold">⚠️ ${esc(res.error)}</div>`;
                             return;
                         }
                         const d = res.payload; window.payloadData = d;
@@ -148,21 +177,44 @@
                                </div>`
                             : '';
 
+                        // [H4] All values below come from the GAS getRoute payload
+                        // (untrusted) — every interpolation is run through esc().
                         document.getElementById('summaryZone').innerHTML = `
                             ${questBanner}
                             <div class="flex justify-between border-b border-slate-100 pb-3 mb-3 font-bold uppercase text-[10px] tracking-widest text-slate-400"><span>Route Summary</span></div>
-                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3"><span>Contractor:</span> <span class="font-bold text-slate-900">${d.icn}</span></div>
-                            <div class="flex justify-between text-blue-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>Work Order #:</span> <span>${d.wo}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Due Date:</span> <span class="font-bold text-slate-900">${d.due || 'N/A'}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Unique Locations:</span> <span class="font-bold text-slate-900">${d.lCnt}</span></div>
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Total Tasks:</span> <span class="font-bold text-slate-900">${d.tCnt}</span></div>
-                            ${(d.kCnt > 0) ? `<div class="flex justify-between text-emerald-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🛠️ Kiosk Installs:</span> <span>${d.kCnt}</span></div>` : ''}
-                            ${(d.rCnt > 0) ? `<div class="flex justify-between text-orange-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🗑️ Kiosk Removals:</span> <span>${d.rCnt}</span></div>` : ''}
-                            ${(d.dCnt > 0) ? `<div class="flex justify-between text-teal-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🔌 Digital Tasks:</span> <span>${d.dCnt}</span></div>` : ''}
-                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Est. Total Time On-Duty:</span> <span class="font-bold text-slate-900">${d.time}</span></div>
-                            <div class="flex justify-between pb-3 mb-3"><span>Mileage:</span> <span class="font-medium">${d.mi} Miles</span></div>
+                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3"><span>Contractor:</span> <span class="font-bold text-slate-900">${esc(d.icn)}</span></div>
+                            <div class="flex justify-between text-blue-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>Work Order #:</span> <span>${esc(d.wo)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Due Date:</span> <span class="font-bold text-slate-900">${esc(d.due || 'N/A')}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Unique Locations:</span> <span class="font-bold text-slate-900">${esc(d.lCnt)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Total Tasks:</span> <span class="font-bold text-slate-900">${esc(d.tCnt)}</span></div>
+                            ${(d.kCnt > 0) ? `<div class="flex justify-between text-emerald-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🛠️ Kiosk Installs:</span> <span>${esc(d.kCnt)}</span></div>` : ''}
+                            ${(d.rCnt > 0) ? `<div class="flex justify-between text-orange-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🗑️ Kiosk Removals:</span> <span>${esc(d.rCnt)}</span></div>` : ''}
+                            ${(d.dCnt > 0) ? `<div class="flex justify-between text-teal-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🔌 Digital Tasks:</span> <span>${esc(d.dCnt)}</span></div>` : ''}
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Est. Total Time On-Duty:</span> <span class="font-bold text-slate-900">${esc(d.time)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3"><span>Mileage:</span> <span class="font-medium">${esc(d.mi)} Miles</span></div>
                             <div class="flex justify-between border-t border-slate-200 pt-4 mt-2 font-black text-3xl text-emerald-600"><span>Total Comp:</span> <span>$${parseFloat(d.comp).toFixed(2)}</span></div>
                         `;
+
+                        // [M23] Route data is loaded — the contractor may now submit.
+                        document.getElementById('submitBtn').disabled = false;
+                    })
+                    .catch(err => {
+                        // [M22] Network failure, GAS outage, or a non-JSON response would
+                        // otherwise leave the page frozen forever on "Loading...". Show a
+                        // clear error with a retry instead, and keep submit disabled.
+                        console.error("getRoute failed:", err);
+                        document.getElementById('submitBtn').disabled = true;
+                        document.getElementById('summaryZone').innerHTML = `
+                            <div class="border-l-4 border-red-400 bg-red-50 p-4 rounded">
+                                <div class="font-black text-red-700 text-sm">⚠️ Couldn't load this route.</div>
+                                <div class="text-red-600 text-xs mt-1.5 leading-relaxed">
+                                    There was a problem reaching the dispatch server. Check your
+                                    connection and try again. If it keeps failing, contact dispatch.
+                                </div>
+                                <button type="button" onclick="window.location.reload()" class="mt-3 bg-red-600 text-white font-black py-2 px-4 rounded-lg text-[10px] uppercase tracking-widest">
+                                    Retry
+                                </button>
+                            </div>`;
                     });
             }
         };
@@ -175,6 +227,13 @@
             const notes = document.getElementById('ic_notes').value;
 
             if (decision === 'Accepted' && (!sig || !consent)) return alert("Signature and consent required.");
+
+            // [M23] Guard against route data never having loaded (getRoute failed,
+            // or the page opened with no ?route= param). Without this, the POST
+            // below dereferences undefined and can fire with routeId: undefined.
+            if (!window.payloadData || !window.currentRouteId) {
+                return alert("Route details haven't finished loading yet. Please refresh the page and try again.");
+            }
 
             const btn = document.getElementById('submitBtn');
             btn.disabled = true;
@@ -270,8 +329,39 @@
             return `https://www.google.com/maps/dir/${encodedStops}`;
         }
 
-        function viewRoute(limit) { const url = buildMapsUrl(limit); if (url) window.open(url, '_blank'); }
-        function copyMapUrl() { const url = buildMapsUrl(25); if (url) { navigator.clipboard.writeText(url); alert("20-Stop Link Copied!"); } }
+        // [L10] Single limit (MAX_ROUTE_STOPS) everywhere.
+        function viewRoute() { const url = buildMapsUrl(MAX_ROUTE_STOPS); if (url) window.open(url, '_blank'); }
+
+        // [L10] Clipboard fallback: navigator.clipboard is undefined on non-HTTPS
+        // contexts and unavailable in older browsers. Fall back to a hidden
+        // textarea + execCommand('copy'); if even that fails, prompt() the URL.
+        function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text)
+                    .then(() => alert("Route link copied! (up to " + MAX_ROUTE_STOPS + " stops)"))
+                    .catch(() => legacyCopy(text));
+            } else {
+                legacyCopy(text);
+            }
+        }
+        function legacyCopy(text) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { alert("Route link copied! (up to " + MAX_ROUTE_STOPS + " stops)"); }
+                else { window.prompt("Copy this route link:", text); }
+            } catch (e) {
+                window.prompt("Copy this route link:", text);
+            }
+        }
+        function copyMapUrl() { const url = buildMapsUrl(MAX_ROUTE_STOPS); if (url) { copyToClipboard(url); } }
         function toggleDecisionView() { const d = document.querySelector('input[name="ic_decision"]:checked').value; document.getElementById('reason_block').classList.toggle('hidden', d !== 'Declined'); document.getElementById('signature_block').classList.toggle('hidden', d === 'Declined'); }
         function updateLiveSignature(v) { document.getElementById('live_sig_text').innerText = v || "________________"; }
     </script>

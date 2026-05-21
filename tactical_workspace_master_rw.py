@@ -8277,7 +8277,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -8319,7 +8319,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
         with t_sent:
             _render_sent_panel()
         # 🚀 Shared re-route helpers for the Accepted/Declined/Finalized panels.
@@ -8402,7 +8402,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -8432,7 +8432,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
         @st.fragment
         def _render_dec_panel():
             _close_popover_if_flagged()
@@ -8469,7 +8469,7 @@ def run_pod_tab(pod_name):
                             if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                 move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
                                 st.session_state['_close_reroute_popover'] = True
-                                st.rerun(scope="fragment")
+                                st.rerun(scope="app")
         @st.fragment
         def _render_fin_panel():
             _close_popover_if_flagged()
@@ -8524,7 +8524,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -8552,7 +8552,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")
+                                    st.rerun(scope="app")
         with t_acc:
             _render_acc_panel()
         with t_dec:

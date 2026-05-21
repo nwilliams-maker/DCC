@@ -13,6 +13,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
 import re
+import html as _html
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
@@ -47,9 +48,15 @@ if not ONFLEET_KEY or not MAPBOX_TOKEN:
     st.stop()
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"
-# GAS_WEB_APP_URL: deployment URL acts as auth — rotate via redeploy and update the Railway env var.
-GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL") or "https://script.google.com/macros/s/AKfycbyZQddevAysMd0l0StlXFPYJI-MsKyigb5yi-PvHaH9gPBd7bE_e__7GsYVjGHfzag/exec"
-IC_SHEET_URL = os.environ.get("IC_SHEET_URL") or "https://docs.google.com/spreadsheets/d/1y6wX0x93iDc3gdK_nZKLD-2QcGkUHkcM75u90ffRO6k/edit#gid=0"
+# GAS_WEB_APP_URL and IC_SHEET_URL are credential-equivalent and MUST come from
+# the environment — no in-source fallback (security audit H1). Fail fast if unset.
+GAS_WEB_APP_URL = (os.environ.get("GAS_WEB_APP_URL") or "").strip()
+GAS_AUTH = (os.environ.get("DCC_SHARED_SECRET") or "").strip()
+IC_SHEET_URL = (os.environ.get("IC_SHEET_URL") or "").strip()
+if not GAS_WEB_APP_URL or not IC_SHEET_URL:
+    st.error("\U0001F511 **Backend configuration missing!**")
+    st.info("GAS_WEB_APP_URL and IC_SHEET_URL must be set in Railway's 'Variables' tab.")
+    st.stop()
 
 # --- TUNABLES (hoisted from inline magic numbers) ---
 DEFAULT_DUE_DAYS = 14   # default deadline offset from today when dispatcher hasn't picked one
@@ -62,6 +69,64 @@ def _log_err(context, exc):
         print(f"[{context}] {type(exc).__name__}: {exc}", flush=True)
     except Exception:
         pass
+
+# Security audit H3 - HTML-escape semi-trusted (Onfleet / Google Sheet) text
+# before interpolating into any unsafe_allow_html block. Stops stored XSS via
+# poisoned venue/campaign/client/contractor/WO values and stray markup chars.
+def esc(value):
+    try:
+        return _html.escape(str(value if value is not None else ""), quote=True)
+    except Exception:
+        return ""
+
+# Security audit M11 - pagination for the Awaiting Confirmation panels.
+# A busy pod can hold ~89 route cards, each a large HTML block plus a
+# nested fragment - enough to freeze the browser. This renders ~20 cards
+# per page with prev/next controls. `page_key` must be unique per panel
+# per pod (run_pod_tab runs once per pod for admin/manager). Returns
+# (page_slice, start_index) so callers keep stable global indices.
+def _paginate_panel(items, page_key, per_page=20):
+    try:
+        items = list(items or [])
+        total = len(items)
+        if total <= per_page:
+            return items, 0
+        n_pages = (total + per_page - 1) // per_page
+        _sk = f"_panel_page_{page_key}"
+        cur = int(st.session_state.get(_sk, 0) or 0)
+        if cur < 0:
+            cur = 0
+        if cur > n_pages - 1:
+            cur = n_pages - 1
+        _pc1, _pc2, _pc3 = st.columns([1, 2, 1])
+        with _pc1:
+            if st.button("‹ Prev", key=f"_pgprev_{page_key}",
+                         disabled=(cur <= 0), use_container_width=True):
+                st.session_state[_sk] = max(0, cur - 1)
+                st.rerun()
+        with _pc2:
+            _start = cur * per_page
+            _end = min(total, _start + per_page)
+            st.caption(f"Showing {_start + 1}-{_end} of {total} · page {cur + 1}/{n_pages}")
+        with _pc3:
+            if st.button("Next ›", key=f"_pgnext_{page_key}",
+                         disabled=(cur >= n_pages - 1), use_container_width=True):
+                st.session_state[_sk] = min(n_pages - 1, cur + 1)
+                st.rerun()
+        _s = cur * per_page
+        return items[_s:_s + per_page], _s
+    except Exception as _pg_e:
+        _log_err("paginate_panel", _pg_e)
+        return list(items or []), 0
+# Security audit H17 / M7 - routes whose background archive write failed all
+# retries. The re-route handler checks this set on the next render and shows
+# the dispatcher a visible warning instead of silently leaving a ghost.
+_RECONCILE_FAILURES = set()
+
+# Security audit M12 - pods with a route-gmaps warm thread currently running,
+# so a repeated process_pod() call does not stack redundant warm threads.
+_GMAPS_WARM_INFLIGHT = set()
+
 SAVED_ROUTES_GID = "1477617688"
 ACCEPTED_ROUTES_GID = "934075207"
 DECLINED_ROUTES_GID = "600909788"
@@ -182,6 +247,7 @@ def _fetch_onfleet_open_tasks_cached():
     # of the unassigned pool. Created in Onfleet by Nick on 2026-04-30.
     FN_WORKER_PHONE = "6302869764"
     fn_worker_id = None
+    _fn_worker_lookup_failed = False  # security audit M9
     _w_lastid = None
     _w_seen = set()
     for _wp in range(10):
@@ -189,6 +255,10 @@ def _fetch_onfleet_open_tasks_cached():
         try:
             _wresp = requests.get(_wurl, headers=headers, timeout=10)
             if _wresp.status_code != 200:
+                # Security audit M9 - a non-200 here means the FN worker
+                # lookup is incomplete; flag it so the None worker is not
+                # silently propagated (FN tasks would stay in state=0).
+                _fn_worker_lookup_failed = True
                 break
             _wdata = _wresp.json()
             _wlist = _wdata if isinstance(_wdata, list) else _wdata.get('workers', [])
@@ -218,12 +288,21 @@ def _fetch_onfleet_open_tasks_cached():
     _MAX_PAGES = 200
     _page = 0
     _seen_last_ids = set()
+    _retry_429 = 0
     while url and _page < _MAX_PAGES:
         _page += 1
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 429:
-            time.sleep(2)
+            # Security audit M9 - exponential backoff for rate limits so a
+            # transient 429 does not burn pages at full speed. Capped at 6
+            # retries (~63s worst case) then raises so the cache discards.
+            _retry_429 += 1
+            if _retry_429 > 6:
+                raise RuntimeError("Onfleet 429 rate-limit persisted after 6 backoff retries")
+            time.sleep(min(60, 2 ** _retry_429))
+            _page -= 1
             continue
+        _retry_429 = 0
         if response.status_code != 200:
             # Raise so st.cache_data discards this attempt — the next caller
             # will retry instead of inheriting a half-populated list.
@@ -246,6 +325,7 @@ def _fetch_onfleet_open_tasks_cached():
         'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
         'excluded_team_ids': excluded_team_ids,
         'fn_worker_id': fn_worker_id,
+        '_fn_worker_lookup_failed': bool(_fn_worker_lookup_failed and fn_worker_id is None),
         '_page_count': _page,
         '_hit_cap': _page >= _MAX_PAGES,
     }
@@ -322,18 +402,12 @@ INSTANCE_ID = (
 # it's just a build-state readback, not user data.
 try:
     if st.query_params.get("healthz") == "1":
-        import datetime as _dt
-        _commit = _os.environ.get('RAILWAY_GIT_COMMIT_SHA', '')
-        _short = _commit[:8] if _commit else ''
+        # Security audit L1 - return ONLY ok=true. Instance id and the full
+        # git commit SHA were dropped: they let an unauthenticated caller
+        # fingerprint the exact running build.
         st.markdown(
-            f"""<div style='font-family:monospace;font-size:13px;color:#0f172a;padding:20px;'>
-            <strong>DCC healthz</strong><br>
-            ok=true<br>
-            instance_id={INSTANCE_ID}<br>
-            commit={_commit or '(unset)'}<br>
-            commit_short={_short or '(unset)'}<br>
-            checked_at={_dt.datetime.utcnow().isoformat()}Z
-            </div>""",
+            "<div style='font-family:monospace;font-size:13px;color:#0f172a;padding:20px;'>"
+            "<strong>DCC healthz</strong><br>ok=true</div>",
             unsafe_allow_html=True,
         )
         st.stop()
@@ -588,7 +662,7 @@ _components.html(
 # ============================================================================
 # Each entry below is a user account.
 #   - username (the dict key, lowercase) is what they type to sign in
-#   - password_hash is SHA-256 of their password (NEVER store the plain password)
+#   - password_hash is a salted PBKDF2-HMAC-SHA256 digest (see _hash_password)
 #   - pod controls which tabs they can see:
 #       'ADMIN'                                -> Global + every pod + Digital (full access)
 #       'MANAGER'                              -> Global + every pod + Digital (full access, alias of ADMIN)
@@ -596,137 +670,160 @@ _components.html(
 #   Global and Digital are gated to ADMIN/MANAGER ONLY by policy. Pod dispatchers
 #   land directly on their pod tab and can't see overview / digital views.
 #
-# To add a new user (you, Nick, edit this in github.dev):
-#   1. Generate a SHA-256 hash of the password. From any terminal or replit:
-#        python3 -c "import hashlib; print(hashlib.sha256('THEIR_PASSWORD'.encode()).hexdigest())"
-#   2. Paste a new entry below following the same shape.
+# To add or rotate a user (Nick, edit this in github.dev):
+#   1. Run the helper:  python3 gen_password_hash.py "THEIR_PASSWORD"
+#      It prints a fresh "salt" + "password_hash" pair.
+#   2. Paste both into that user's entry below (or add a new entry).
 #   3. Commit + push -> Railway redeploys -> they can sign in.
 USERS = {
-    # Default admin — username: 'admin', password: 'terraboostadmin2026'
-    # CHANGE THIS PASSWORD after first login: regenerate the hash with the command above.
     "admin": {
         "name": "Nick Williams",
-        "password_hash": "0d3027f005f66c3d4b5d96a2faadc31d32c4914643ad49a64375b1c4cd4345cd",
+        "salt": "3cf32ad44bec7092ffe0cb572c938dec",
+        "password_hash": "c574bc503c48bdf7717a3a0806bfcb3e4171a6ee46dac9aff243fe6471891aa9",
         "email": "nicholas.byron.williams@gmail.com",
         "pod": "ADMIN",
         "tier": "admin",
     },
-
-    # ───── Dispatch Associates (one per pod) ─────
-    # Pre-seeded with default passwords — change these before sharing the URL.
-    # Each Associate gets pod-locked access to ONLY their pod's tab.
     "blue_assoc": {
         "name": "Blue Dispatch Associate",
-        "password_hash": "e7ce65e1ff8c574cb353a8b5ed055a5e01fde717c685f06a538ef6bc57cead01",
+        "salt": "c48f2e8876aae5dbdbeb12096da71c3f",
+        "password_hash": "3e9bff8c1da728cb0061b840875c841516ba0aef913d4679a381bd84a1162580",
         "email": "eburger@terraboost.biz",
         "pod": "Blue",
         "role": "Associate",
-    "tier": "guest",
-    },  # default password: blueassociate2026
+        "tier": "guest",
+    },
     "green_assoc": {
         "name": "Green Dispatch Associate",
-        "password_hash": "e60d30662e47a2b8c9299c5b3f8fab86bb749a655919873cd6a726cf52578908",
+        "salt": "9977880f8d35ce5be466c32cf9687ddb",
+        "password_hash": "9c8144b8f47bab673c378addeafdf6924175f1919acf379fa266dfdfeb067e5e",
         "email": "reabetswe@terraboost.biz",
         "pod": "Green",
         "role": "Associate",
-    "tier": "guest",
-    },  # default password: greenassociate2026
+        "tier": "guest",
+    },
     "orange_assoc": {
         "name": "Orange Dispatch Associate",
-        "password_hash": "b0bb99055d6e1a755bd8dbf310988fd6b167b9b2e0b918cd436c647dd92cb1b8",
+        "salt": "1e1d5f24099eb0274c8b8e09d14ece80",
+        "password_hash": "32beb1ba4e4046f245827c7633d0730d7559c9d299a5483d0792352037b65bd0",
         "email": "bmakaya@terraboost.biz",
         "pod": "Orange",
         "role": "Associate",
-    "tier": "guest",
-    },  # default password: orangeassociate2026
+        "tier": "guest",
+    },
     "purple_assoc": {
         "name": "Purple Dispatch Associate",
-        "password_hash": "74cb0116691b1cc5ddb015f3ec88e9ac6ba363ae32e2d2ddded2e3f1644ca74e",
+        "salt": "8693d5f149ce24f3336ec5ab758e1df5",
+        "password_hash": "1fa11ad7d88817a8f2c8649d5961d50e3482e0b63fb11e08e43f1618d49b7359",
         "email": "sferreira@terraboost.biz",
         "pod": "Purple",
         "role": "Associate",
-    "tier": "guest",
-    },  # default password: purpleassociate2026
+        "tier": "guest",
+    },
     "red_assoc": {
         "name": "Red Dispatch Associate",
-        "password_hash": "5fd1beafa3d940ce3aa002605966d1e34304019e98cacc32fea9a2eda74fc54f",
+        "salt": "1d3ac2dde478cc091371b119915f52b0",
+        "password_hash": "369236f6bf45be6f04ff25201c1129e29ccc8c2fcc0e6fa68f93bdb72e78bc03",
         "email": "ladams@terraboost.biz",
         "pod": "Red",
         "role": "Associate",
-    "tier": "guest",
-    },  # default password: redassociate2026
-
-    # ───── Dispatchers (one per pod) ─────
-    # Pre-seeded with default passwords — change these before sharing the URL.
+        "tier": "guest",
+    },
     "bluedispatch1811": {
         "name": "Blue Dispatcher",
-        "password_hash": "299bb7f09cee5ecb05f7338674fc99d17340445fc64c25ed054a97a64ab3332d",
+        "salt": "dad7410d3a1d48ac818aa11a8e3161a3",
+        "password_hash": "16c71df1ae8716b70bdae450623c2586fc4ec244a3f12b4dce12efb4e60ecbad",
         "email": "dcazares@terraboost.biz",
         "pod": "Blue",
         "role": "Dispatcher",
-    "tier": "user",
-    },  # default password: bluedispatcher2026
+        "tier": "user",
+    },
     "greendispatch1811": {
         "name": "Green Dispatcher",
-        "password_hash": "45a194276bf8a6e2595e3d8cfab8365166ec8dea591643384befe53926bf4cc3",
+        "salt": "0dd3f9b8aab9a55786acb934737709e2",
+        "password_hash": "b52216333f10b0edc2a2ca1f6c93aac5ebd7bed67ce96529a9eeaf5d9cab0e74",
         "email": "aengelhardt@terraboost.biz",
         "pod": "Green",
         "role": "Dispatcher",
-    "tier": "user",
-    },  # default password: greendispatcher2026
+        "tier": "user",
+    },
     "orangedispatch1811": {
         "name": "Orange Dispatcher",
-        "password_hash": "768658cedfc1cb9d3001ec707d71b29ddb4d3ee1d670c1f6b8d3bda261efa0f1",
+        "salt": "357eb46c62e8d61bf442131f68fef3a2",
+        "password_hash": "3c614ab3499a82d01f7a3c1b95ebeb34db8aab63719edd8200c44e2a543c6bdc",
         "email": "nwilliams@terraboost.biz",
         "pod": "Orange",
         "role": "Dispatcher",
-    "tier": "user",
-    },  # default password: orangedispatcher2026
+        "tier": "user",
+    },
     "purpledispatch1811": {
         "name": "Purple Dispatcher",
-        "password_hash": "81f76219614717b157d2dc8f59e936f727214eda7893430ae875f7cec7128219",
+        "salt": "6a6500fbcb4b316b7cbac1071fb0700f",
+        "password_hash": "947e445d8466909f84aac9265d9566ad303882485724ed9cb2dc62f9d5be6e94",
         "email": "kgallardo@terraboost.biz",
         "pod": "Purple",
         "role": "Dispatcher",
-    "tier": "user",
-    },  # default password: purpledispatcher2026
+        "tier": "user",
+    },
     "reddispatch1811": {
         "name": "Red Dispatcher",
-        "password_hash": "1ed45d815f19ba3d691e4e41bb578d51d6f88aac66e5693573e7da05a19ed389",
+        "salt": "a4b5b69dbeee9ed7973838b622e02d2f",
+        "password_hash": "a5281fba9f8686a540a9fd44626430463399d8f3441e413bfee6fb8dc710aaa9",
         "email": "mespinoza@terraboost.biz",
         "pod": "Red",
         "role": "Dispatcher",
-    "tier": "user",
-    },  # default password: reddispatcher2026
-
-    # ───── Digital tab user (sees only the Digital pod tab) ─────
+        "tier": "user",
+    },
     "digital_user": {
         "name": "Digital User",
-        "password_hash": "fc72997426be122f0f40e2a4a058de8095f6d5feb5e4de9fa5d207b3f4b58171",
+        "salt": "94d5da52e40bfc22c0d25d854dd1aab3",
+        "password_hash": "7552a5428baade58489c80b4e340b1ce6e638847fe1c14d705bc62c7442dc247",
         "email": "kheiden@terraboost.biz",
         "pod": "Digital",
         "role": "Dispatcher",
         "tier": "user",
-    },  # default password: digitaluser2026
-
-    # ───── Manager (full read access, separate from Admin) ─────
+    },
     "manager": {
         "name": "Pod Manager",
-        "password_hash": "2e064c30dfe840ff76432c401a0d0c19f0b30d823f60fd378353a6a63e431e75",
+        "salt": "d90271811efbe9b427f489f3f1ad3bcb",
+        "password_hash": "ff34acd0f447bf070ff3e6dd34406ae16212e0a1ade9f47140268a81bcdac39f",
         "email": "nwilliams@terraboost.biz",
         "pod": "MANAGER",
         "role": "Manager",
         "tier": "manager",
-    },  # default password: manager2026
+    },
 }
 
 import hashlib as _login_hashlib
+
+# \U0001F512 Password storage — salted PBKDF2-HMAC-SHA256 (security audit H2).
+# Each USERS entry carries a per-user random `salt`; `password_hash` is the
+# PBKDF2 digest. Use gen_password_hash.py to make new salt+hash pairs.
+_PBKDF2_ITERS = 200000
+
+def _hash_password(password: str, salt_hex: str) -> str:
+    # Salted PBKDF2-HMAC-SHA256 digest, returned as hex.
+    try:
+        _salt = bytes.fromhex(str(salt_hex or ""))
+    except Exception:
+        return ""
+    if not _salt:
+        return ""
+    return _login_hashlib.pbkdf2_hmac(
+        "sha256", str(password or "").encode("utf-8"), _salt, _PBKDF2_ITERS
+    ).hex()
+
 def _check_password(username: str, password: str):
-    """Returns the user record dict on match, else None."""
+    # Returns the user record dict on match, else None. Constant-time compare.
     rec = USERS.get(str(username or "").lower().strip())
     if not rec:
         return None
-    if _login_hashlib.sha256(str(password or "").encode("utf-8")).hexdigest() == rec.get("password_hash"):
+    _salt = rec.get("salt", "")
+    _expected = rec.get("password_hash", "")
+    if not _salt or not _expected:
+        return None
+    _candidate = _hash_password(password, _salt)
+    if _candidate and _login_hashlib.compare_digest(_candidate, _expected):
         return rec
     return None
 
@@ -744,22 +841,32 @@ def _check_password(username: str, password: str):
 #      side then validates the token and auto-restores the auth user.
 #   4. Sign out clears both the URL param AND the localStorage entry.
 #
-# Security note: this is "remember me" for an internal tool, not a hardened
-# auth system. Anyone with physical access to the browser (or who copies the
-# URL while ?auth= is set) can sign in as that user. Acceptable trade-off for
-# a 12-user dispatch app behind a Railway URL the team only shares internally.
-# Rotate STAY_SALT to invalidate every persisted login at once.
-STAY_SALT = "dcc-stay-token-2026-v1"
+# Security (audit C1): STAY_SALT is a SERVER-ONLY secret read from the
+# environment — it is NOT stored in source. The persistent-login token is
+# sha256(username | password_hash | STAY_SALT): it cannot be forged without
+# the server salt AND the user's stored password hash, and it auto-invalidates
+# whenever the password changes. If STAY_SALT is unset, stay-signed-in is
+# disabled (fail-closed) but the app still works — users sign in each session.
+# Set STAY_SALT in Railway -> Variables to a long random string.
+STAY_SALT = (os.environ.get("STAY_SALT") or "").strip()
 
 def _stay_token_for(username: str) -> str:
-    return _login_hashlib.sha256(f"{username}|{STAY_SALT}".encode("utf-8")).hexdigest()
+    # Unforgeable persistent-login token, or '' if stay-signed-in is disabled.
+    _uname = str(username or "").lower().strip()
+    rec = USERS.get(_uname)
+    if not rec or not STAY_SALT:
+        return ""
+    return _login_hashlib.sha256(
+        f"{_uname}|{rec.get('password_hash','')}|{STAY_SALT}".encode("utf-8")
+    ).hexdigest()
 
 def _validate_stay_token(token: str):
-    """Returns (username, record) if token matches a known user, else None."""
-    if not token:
+    # Returns (username, record) if token matches a known user, else None.
+    if not token or not STAY_SALT:
         return None
     for u, rec in USERS.items():
-        if _stay_token_for(u) == token:
+        _expected = _stay_token_for(u)
+        if _expected and _login_hashlib.compare_digest(_expected, str(token)):
             return u, rec
     return None
 
@@ -873,22 +980,38 @@ def _render_login_form():
             _password = st.text_input("Password", type="password", key="_login_pw_input", autocomplete="current-password")
             _submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
             if _submitted:
-                _rec = _check_password(_username, _password)
-                if _rec:
-                    _u_clean = str(_username).lower().strip()
-                    st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
-                    # ALWAYS set ?auth=TOKEN in URL so this tab survives deploys.
-                    # Independent of stay-signed-in (which controls localStorage).
-                    # Without this, a Railway redeploy boots active users back to
-                    # the login screen because Streamlit session_state is wiped
-                    # on server restart and there's no per-tab restore key.
-                    try:
-                        st.query_params['auth'] = _stay_token_for(_u_clean)
-                    except Exception:
-                        pass
-                    st.rerun()
+                # \U0001F512 Login throttling (security audit M2) — exponential
+                # backoff after repeated failures, tracked per session.
+                _now_ts = time.time()
+                _lock_until = float(st.session_state.get('_login_lock_until', 0) or 0)
+                if _now_ts < _lock_until:
+                    _wait = int(_lock_until - _now_ts) + 1
+                    st.error(f"Too many failed attempts. Please wait {_wait} second(s) before trying again.")
                 else:
-                    st.error("Invalid username or password.")
+                    _rec = _check_password(_username, _password)
+                    if _rec:
+                        st.session_state['_login_fails'] = 0
+                        st.session_state['_login_lock_until'] = 0
+                        _u_clean = str(_username).lower().strip()
+                        st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
+                        # ?auth=TOKEN lets this tab survive a Railway redeploy.
+                        # Skipped silently if stay-signed-in is disabled (no STAY_SALT).
+                        try:
+                            _tok = _stay_token_for(_u_clean)
+                            if _tok:
+                                st.query_params['auth'] = _tok
+                        except Exception:
+                            pass
+                        st.rerun()
+                    else:
+                        _fails = int(st.session_state.get('_login_fails', 0) or 0) + 1
+                        st.session_state['_login_fails'] = _fails
+                        if _fails >= 5:
+                            _delay = min(600, 30 * (2 ** (_fails - 5)))
+                            st.session_state['_login_lock_until'] = _now_ts + _delay
+                            st.error(f"Too many failed attempts. Locked for {_delay} second(s).")
+                        else:
+                            st.error(f"Invalid username or password. {5 - _fails} attempt(s) left before lockout.")
 
 # --- PINNED TOP-LEFT LOGO ---
 # Function to convert the local image into web-safe code
@@ -1702,17 +1825,42 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
     Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
     so the Ready-card history banner can recover Revoked/Re-Routed events after a
     session reset (was previously session-only via st.session_state['_actions_*'])."""
-    try:
-        requests.post(GAS_WEB_APP_URL, json={
-            "action": "archiveRoute",
-            "cluster_hash": cluster_hash,
-            "taskIds": ",".join(task_ids) if task_ids else "",  # Fallback for hash mismatch
-            "payload": payload_json if payload_json else {},
-            "action_label": action_label,
-            "ic_name": ic_name,
-        }, timeout=15)
-    except Exception as e:
-        _log_err("background_sheet_move/archive", e)
+    # Security audit H17 / M7 - the archive POST is now retried (3 attempts,
+    # exponential backoff) so a transient GAS hiccup or a process recycle
+    # mid-flight does not silently lose the archive write (which would
+    # recycle the WO-suffix counter and produce duplicate WOs). On final
+    # failure the route hash is recorded in a module-level set the main
+    # thread surfaces to the dispatcher.
+    _archive_payload = {
+        "action": "archiveRoute",
+        "auth_secret": GAS_AUTH,
+        "cluster_hash": cluster_hash,
+        "taskIds": ",".join(task_ids) if task_ids else "",  # Fallback for hash mismatch
+        "payload": payload_json if payload_json else {},
+        "action_label": action_label,
+        "ic_name": ic_name,
+    }
+    _archive_ok = False
+    for _attempt in range(3):
+        try:
+            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=15)
+            if _ar.status_code == 200:
+                _archive_ok = True
+                break
+            _log_err("background_sheet_move/archive",
+                     f"HTTP {_ar.status_code} on attempt {_attempt + 1}")
+        except Exception as e:
+            _log_err("background_sheet_move/archive",
+                     f"attempt {_attempt + 1}: {type(e).__name__}: {e}")
+        if _attempt < 2:
+            time.sleep(2 ** _attempt)
+    if not _archive_ok:
+        try:
+            _RECONCILE_FAILURES.add(str(cluster_hash))
+        except Exception:
+            pass
+        _log_err("background_sheet_move/archive",
+                 f"archive write FAILED after 3 attempts for cluster {cluster_hash}")
     # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
     # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
     if task_ids:
@@ -1754,6 +1902,7 @@ def background_fn_revoke(cluster_hash):
     try:
         requests.post(GAS_WEB_APP_URL, json={
             "action": "removeFieldNation",
+            "auth_secret": GAS_AUTH,
             "cluster_hash": cluster_hash
         }, timeout=15)
     except Exception as e:
@@ -1786,6 +1935,13 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
       each task in parallel and skip any with state=3 / completionDetails.success.
       Completed work stays attributed to the contractor; only outstanding tasks are
       returned to the pool. The toast reports the outstanding count + city/state."""
+
+    # Security audit H23 - re-route double-submit guard. Every re-route /
+    # revoke button funnels through move_to_dispatch; if this route is
+    # already flagged reverted_ (a prior click is in flight or done), a
+    # second click would re-fire the archive + Onfleet unassign. Bail.
+    if st.session_state.get(f"reverted_{cluster_hash}", False):
+        return
 
     # 1. Parse all task IDs from cluster_data (str CSV or list of dicts).
     all_task_ids = []
@@ -1886,6 +2042,13 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # has no ScriptRunContext dependency and completes reliably while the process
     # stays alive. (This is what makes "Sheet update + Onfleet scrub run in
     # background" in the docstring actually true again.)
+    # Security audit H7 - the background thread reads cluster_data for several
+    # seconds while the main thread keeps mutating the same dict on later
+    # reruns. Snapshot it now so the archive payload is stable and a
+    # mutate-while-iterate cannot raise inside (and silently lose) the
+    # archive write.
+    import copy as _copy_h7
+    _cluster_snapshot = _copy_h7.deepcopy(cluster_data) if cluster_data is not None else None
     def _bg_reconcile():
         # Onfleet unassign — only for Accepted/Finalized re-routes (check_completed=
         # True) whose tasks are actively assigned. Sent/Declined/FN tasks are still
@@ -1909,7 +2072,7 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
                 _log_err("move_to_dispatch/unassign-outer", e)
         # Sheet archival — the GAS archiveRoute POST (multi-second).
         try:
-            background_sheet_move(cluster_hash, cluster_data, None, action_label, ic_name)
+            background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name)
         except Exception as _bsm_e:
             _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 
@@ -2232,7 +2395,7 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
             # 1. 🚀 SYNCHRONOUS SHEET UPDATE
             with st.spinner("Archiving to Google Sheets..."):
                 try:
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "finalizeRoute", "cluster_hash": cluster_hash}, timeout=15)
+                    res = requests.post(GAS_WEB_APP_URL, json={"action": "finalizeRoute", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=15)
                     res_data = res.json() # 🌟 Parse the response!
                     
                     if not res_data.get("success"):
@@ -2365,6 +2528,7 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
                                 GAS_WEB_APP_URL,
                                 json={
                                     "action": "setFnRoutePlanId",
+                                    "auth_secret": GAS_AUTH,
                                     "cluster_hash": cluster_hash,
                                     "routePlanId": _rid,
                                 },
@@ -2713,7 +2877,7 @@ def fetch_sync_status(since: int = 0):
     try:
         r = requests.get(
             GAS_WEB_APP_URL,
-            params={"action": "getSyncVersion", "since": str(int(since or 0))},
+            params={"action": "getSyncVersion", "auth_secret": GAS_AUTH, "since": str(int(since or 0))},
             timeout=5,
         )
         if r.status_code != 200:
@@ -2724,7 +2888,10 @@ def fetch_sync_status(since: int = 0):
         if not isinstance(ch, list):
             ch = []
         return (v, ch)
-    except Exception:
+    except Exception as _ss_e:
+        # Security audit L4 - log instead of failing silently so an
+        # intermittent sync outage is diagnosable in Railway logs.
+        _log_err("fetch_sync_status", _ss_e)
         return (-1, [])
 
 
@@ -2931,8 +3098,24 @@ def _cached_fetch_sent_records_from_sheet():
                                         "stop_data": stop_data,
                                         "task_ids": [str(t).strip() for t in tids if str(t).strip()],
                                     })
-                        except Exception: continue
-            except Exception: continue
+                        except Exception as _row_e:
+                            # Security audit M6 - log malformed-row parse
+                            # failures instead of silently dropping them.
+                            _log_err(f"fetch_sent_records_from_sheet/row/{status_label}", _row_e)
+                            continue
+            except Exception as _sheet_e:
+                # Security audit M6 - a whole tab failing to load is a real
+                # incident (routes vanish, collision detection misses); log
+                # loudly and surface a warning rather than going silent-empty.
+                _log_err(f"fetch_sent_records_from_sheet/sheet/{status_label}", _sheet_e)
+                try:
+                    st.warning(
+                        f"\u26a0\ufe0f Could not load the '{status_label}' route tab "
+                        "- some routes may be missing from this view. Refresh to retry."
+                    )
+                except Exception:
+                    pass
+                continue
             
         # 🌟 ARCHIVE SIDE-CHANNEL: harvest WOs of archived routes so the WO counter
         # can move past suffixes that were "freed" when a route was archived. We also
@@ -2993,7 +3176,13 @@ def _cached_fetch_sent_records_from_sheet():
                     except Exception:
                         pass
         except Exception as _ae:
+            # Security audit M5 - flag a hard archive-read failure so the WO
+            # counter does not silently treat consumed suffixes as free.
             _log_err("fetch_sent_records_from_sheet/archive_harvest", _ae)
+            try:
+                ghost_routes['_archive_read_failed'] = True
+            except Exception:
+                pass
 
         # Sort each task's events chronologically (oldest first). Defensive key: strip
         # any accidental tz from raw_ts so a single tz-aware value can\'t poison the
@@ -3071,6 +3260,14 @@ def fetch_sent_records_from_sheet():
             st.session_state['_fn_provider'] = _ss_fpv
     except Exception as _fpv:
         _log_err("fn_provider_hydrate_wrapper", _fpv)
+    # Security audit M5 - lift the archive-read-failure flag into
+    # session_state so the dispatch WO-suffix block can warn the user.
+    try:
+        st.session_state['_archive_read_failed'] = bool(
+            (ghost_routes or {}).get('_archive_read_failed', False)
+        )
+    except Exception:
+        pass
     return sent_dict, ghost_routes, archived_wos, history_db
 
 
@@ -3276,6 +3473,17 @@ def get_gmaps(home, waypoints):
         waypoint_order,
     )
     _cache[_key] = (_result, _now)  # cache success only
+    # Security audit L3 - bound the process-wide route cache. It is keyed on
+    # (home, waypoints) and never evicted, so over a long container uptime it
+    # creeps. When it exceeds the cap, drop the oldest ~20% by timestamp.
+    try:
+        _GMAPS_CACHE_CAP = 2000
+        if len(_cache) > _GMAPS_CACHE_CAP:
+            _evict = sorted(_cache.items(), key=lambda kv: kv[1][1])
+            for _ek, _ in _evict[:max(1, len(_cache) // 5)]:
+                _cache.pop(_ek, None)
+    except Exception as _gc_e:
+        _log_err("gmaps_cache_evict", _gc_e)
     return _result
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -3700,6 +3908,17 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
         if not warm_only: st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
         if not warm_only: st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
+        # Security audit M9 - warn loudly if the FN placeholder worker could
+        # not be resolved; FN assignment would otherwise half-complete.
+        if not warm_only and _onfleet_data.get('_fn_worker_lookup_failed'):
+            _log_err("process_pod", "FN placeholder worker lookup failed (None propagated)")
+            try:
+                st.warning(
+                    "\u26a0\ufe0f Could not resolve the Field Nation placeholder "
+                    "worker - FN assignments may not fully sync. Retry after a refresh."
+                )
+            except Exception:
+                pass
         all_tasks          = _onfleet_data['tasks']
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
@@ -3721,6 +3940,23 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         # cache bug can only cost the speedup, never correctness.
         import copy as _copy
         _ic_df_peek = (_warm_load_ic_df() if warm_only else st.session_state.get('ic_df', pd.DataFrame()))
+        # Security audit H8 - hash the actual IC lat/lng content into the
+        # cache signature. Previously only len(_ic_df_peek) was used, so an
+        # IC whose home address was corrected (row count unchanged) kept
+        # serving stale cached clusters / distances until a redeploy.
+        try:
+            _lat_col = next((c for c in _ic_df_peek.columns if 'lat' in str(c).lower()), None)
+            _lng_col = next((c for c in _ic_df_peek.columns if 'lng' in str(c).lower()
+                             or 'lon' in str(c).lower()), None)
+            if _lat_col is not None and _lng_col is not None:
+                _ic_geo_sig = hash(tuple(
+                    zip(_ic_df_peek[_lat_col].astype(str),
+                        _ic_df_peek[_lng_col].astype(str))
+                ))
+            else:
+                _ic_geo_sig = len(_ic_df_peek)
+        except Exception:
+            _ic_geo_sig = len(_ic_df_peek)
         _clu_sig = (
             pod_name,
             len(all_tasks),
@@ -3731,6 +3967,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 for _k, _v in fresh_sent_db.items()
             )),
             len(_ic_df_peek),
+            _ic_geo_sig,
         )
         _clu_store = _pod_cluster_store()
         _clu_hit = _clu_store.get(pod_name)
@@ -4152,7 +4389,20 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                         get_gmaps(_wloc, _wstops)
                     except Exception as _we:
                         _log_err("warm_route_gmaps", _we)
-            threading.Thread(target=_warm_route_gmaps, args=(_warm_pairs,), daemon=True).start()
+            # Security audit M12 - skip the warm spawn if a warm pass for
+            # this pod is already running, so re-initializing a pod does not
+            # stack threads each making ~50 Mapbox calls.
+            if pod_name not in _GMAPS_WARM_INFLIGHT:
+                _GMAPS_WARM_INFLIGHT.add(pod_name)
+                def _warm_route_gmaps_guarded(_pairs, _pn):
+                    try:
+                        _warm_route_gmaps(_pairs)
+                    finally:
+                        _GMAPS_WARM_INFLIGHT.discard(_pn)
+                threading.Thread(
+                    target=_warm_route_gmaps_guarded,
+                    args=(_warm_pairs, pod_name), daemon=True,
+                ).start()
         except Exception as _wt_e:
             _log_err("warm_route_gmaps/setup", _wt_e)
         if warm_only:
@@ -4199,11 +4449,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
 @st.cache_resource(show_spinner=False)
 def _startup_warm_guard():
     def _do_startup_warm():
+        # Security audit M8 - sleep between pods so this CPU-heavy warm-up
+        # yields the GIL to the first dispatcher's render thread instead of
+        # starving the very user it is meant to help.
         for _wp in list(POD_CONFIGS.keys()):
             try:
                 process_pod(_wp, warm_only=True)
             except Exception as _swe:
                 _log_err(f"startup_warm/{_wp}", _swe)
+            time.sleep(1.0)
     try:
         threading.Thread(target=_do_startup_warm, daemon=True).start()
     except Exception as _sw_e:
@@ -4848,9 +5102,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
-            st.number_input("Total Comp ($)", min_value=0.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            # Security audit M29 - cap comp so a fat-fingered value cannot
+            # flow verbatim into the saveRoute payload and contractor email.
+            st.number_input("Total Comp ($)", min_value=0.0, max_value=10000.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            st.number_input("Rate/Stop ($)", min_value=0.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            # Security audit M29 - cap rate/stop for the same reason.
+            st.number_input("Rate/Stop ($)", min_value=0.0, max_value=2000.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
@@ -4928,7 +5185,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             esc_count_stop = sum(1 for t in cluster['data'] if t.get('full') == addr and t.get('escalated'))
             esc_inline = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_count_stop}</span>" if esc_count_stop > 0 else ""
             display_addr = f"+ {addr}" if metrics.get('is_new') else addr
-            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{metrics['venue_name']} — </span>" if metrics.get('venue_name') else ""
+            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{esc(metrics['venue_name'])} — </span>" if metrics.get('venue_name') else ""
             task_pill = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{metrics['t_count']} Tasks</span>"
             pill_html = f"<span style='font-size:11px;color:#94a3b8;'> — {pill_str}</span>" if pill_str else ""
             # Campaign expansion: aggregate by (campaign, task_type) with × N count
@@ -5206,10 +5463,21 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     _suffix = int(str(_w).rsplit('-', 1)[-1])
                     if _suffix > _max_suffix:
                         _max_suffix = _suffix
-                except Exception:
-                    pass
+                except Exception as _wo_e:
+                    # Security audit M4 - a malformed suffix feeding this
+                    # correctness-critical max() is logged, not swallowed:
+                    # an undetected bad suffix can recycle a WO number.
+                    _log_err("wo_suffix_parse", f"bad WO '{_w}': {_wo_e}")
             _wo_num = _max_suffix + 1
             wo_val = f"{_base_wo}-{_wo_num}"
+            # Security audit M5 - if the Archive sheet could not be read,
+            # consumed WO suffixes are invisible and this number may collide.
+            if st.session_state.get('_archive_read_failed'):
+                st.warning(
+                    "\u26a0\ufe0f Archive sheet could not be read - the new WO "
+                    f"number ({wo_val}) may reuse an archived suffix. Verify it "
+                    "before sending, or retry after a refresh."
+                )
         # 🌟 NEW: Calculate route-level task breakdowns for the email preview
         route_task_counts = {}
         total_installs = 0
@@ -5337,6 +5605,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.rerun()
                 return
 
+            # Security audit H23 - in-flight guard. A double-click within ~1s
+            # fires two saveRoute POSTs before route_state is set, producing
+            # duplicate sheet rows / WO suffixes / emails. Bail if a dispatch
+            # for this exact cluster is already in flight.
+            _dispatch_inflight_key = f"_dispatching_{cluster_hash}"
+            if st.session_state.get(_dispatch_inflight_key):
+                st.warning("⏳ Dispatch already in progress for this route - please wait.")
+                st.stop()
+            st.session_state[_dispatch_inflight_key] = True
+
             # 🚀 STEP 2: PROCEED WITH DISPATCH
             _dispatch_result = {}
             with st.spinner("Generating link..."):
@@ -5416,11 +5694,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
-                    _dispatch_result = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "payload": payload}, timeout=25).json()
+                    _dispatch_result = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25).json()
                 except requests.exceptions.Timeout:
                     _dispatch_result = {"_timeout": True}
                 except Exception as e:
                     _dispatch_result = {"_error": str(e)}
+
+            # Security audit H23 - the saveRoute POST has resolved; release
+            # the in-flight guard so a later legitimate dispatch / resend works.
+            st.session_state.pop(_dispatch_inflight_key, None)
 
             # Spinner now closed — handle result
             if _dispatch_result.get("_timeout"):
@@ -5445,13 +5727,18 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
-                gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={ic.get('email', '')}&su={subject_line}&body={body_content}"
+                # Security audit M3 - the IC email is quote()-encoded like the
+                # subject/body, and the whole URL is JSON-encoded before being
+                # placed into the injected <script> so a poisoned email cell
+                # cannot break out of the JS string literal.
+                _to_enc = requests.utils.quote(str(ic.get('email', '') or ''))
+                gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={_to_enc}&su={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Gmail opening...")
                 # Desktop: fire popup via height=0 script (not blocked by browser).
                 # This IS the "Generate Link & Open Gmail" behavior — the click both
                 # generates the link AND opens Gmail in a new tab on desktop.
-                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open('{gmail_url}','_blank');}}</script>", height=0)
+                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open({json.dumps(gmail_url)},'_blank');}}</script>", height=0)
                 # Stash the mailto: URL so the "Default Mail" button persists across
                 # reruns (was previously rendered inline inside this click block and
                 # vanished as soon as st.rerun() fired — second-generate bug).
@@ -5596,7 +5883,7 @@ text-decoration:none;">📨 Default Mail</a>
                 _log_err("fn_assign_sync", _fn_team_e)
             st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
             st.toast("✅ Saved to Field Nation Tab")
-            st.rerun()
+            st.rerun(scope="app")  # security audit L6 - bucket re-sort is app-scoped
         
         elif not fn_checked and is_fn:
             # 🌟 ADDED Safety check for Field Nation revocation
@@ -5606,7 +5893,7 @@ text-decoration:none;">📨 Default Mail</a>
                 if st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
                     revoke_field_nation(**{"cluster_hash": cluster_hash, "pod_name": pod_name})
                     fetch_sent_records_from_sheet.clear()   # bust the sheet cache so the rerun sees the post-revoke state
-                    st.rerun()
+                    st.rerun(scope="app")  # security audit L6 - bucket re-sort is app-scoped
             st.stop()
 
     BG_COLOR = "#FEF9C3"
@@ -5619,7 +5906,7 @@ text-decoration:none;">📨 Default Mail</a>
         # campaign / task-type fields the renderer is being handed. Solves
         # the "campaigns missing on FN cards but present in Ready" mystery
         # one row at a time. (May 17 2026.)
-        if st.query_params.get("debug") == "fn":
+        if st.query_params.get("debug") == "fn" and _is_admin_or_manager():
             with st.expander(f"🐛 FN data debug — {cluster_hash[:8]}", expanded=False):
                 _dbg_addrs = {}
                 for _t in cluster.get('data', []):
@@ -5800,7 +6087,7 @@ text-decoration:none;">📨 Default Mail</a>
                     threading.Thread(
                         target=lambda: requests.post(
                             GAS_WEB_APP_URL,
-                            json={"action": "markFNPosted", "cluster_hash": cluster_hash},
+                            json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash},
                             timeout=15,
                         ),
                         daemon=True,
@@ -5819,7 +6106,7 @@ text-decoration:none;">📨 Default Mail</a>
                     # stop Monday lookups + WO/installer mutations. An 11-stop
                     # route can fire ~120+ HTTP calls server-side; the old 25s
                     # cap timed out on bigger routes. (May 17 2026.)
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "cluster_hash": cluster_hash}, timeout=90).json()
+                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=90).json()
                     if res.get("success"):
                         # Local state: route moves to Accepted (treated as already accepted by the FN rep).
                         # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened
@@ -6231,7 +6518,7 @@ def make_venue_details(data):
         if digi_srv > 0: _icon_parts.append("⚙️")
         _icon_html  = f" <span style='font-size:13px;margin-left:6px;'>{' '.join(_icon_parts)}</span>" if _icon_parts else ""
 
-        venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>" if venue else ""
+        venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{esc(venue)} — </span>" if venue else ""
 
         # Campaign expansion: aggregate by (campaign, task type) so multiple tasks for
         # the same client+type at one stop collapse into one row with COUNTS — and the
@@ -6272,8 +6559,8 @@ def make_venue_details(data):
             lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
-                f"• <span style='color:#0f172a;font-weight:600;'>{cmp}</span>"
-                f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>"
+                f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
+                f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{esc(tt_badge)}</span>"
                 f"{count_suffix}"
                 f"{esc_pill}{boost_pill}{lplus_pill}"
                 f"</div>"
@@ -6313,7 +6600,7 @@ def make_venue_details(data):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{loc}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(loc)}</span>"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
             f"</summary>{camp_block}</details>"
         )
@@ -6337,7 +6624,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
     for loc in locs_list:
         if " — " in loc:
             parts = loc.split(" — ", 1)
-            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{parts[0]} — </span>"
+            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{esc(parts[0])} — </span>"
             addr = parts[1]
         else:
             venue_prefix = ""
@@ -6346,7 +6633,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         sd = sd_map.get(addr) or sd_map.get(loc) or {}
         venue = sd.get('venue', '')
         if venue and not venue_prefix:
-            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{venue} — </span>"
+            venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;'>{esc(venue)} — </span>"
 
         # Per-stop counts (defensive — older sheet rows may be missing keys).
         _inst    = int(sd.get('inst', 0) or 0)
@@ -6395,7 +6682,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
             tt_html = f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>" if tt_badge else ""
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
-                f"• <span style='color:#0f172a;font-weight:600;'>{cname}</span>"
+                f"• <span style='color:#0f172a;font-weight:600;'>{esc(cname)}</span>"
                 f"{tt_html}{badges}"
                 f"</div>"
             )
@@ -6428,7 +6715,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{addr}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(addr)}</span>"
             f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
@@ -6506,6 +6793,19 @@ def run_pod_tab(pod_name):
         height=0,
     )
 
+    # Security audit M7 - surface any background archive-write failures so a
+    # route that looks re-routed but never archived is not silently lost.
+    try:
+        if _RECONCILE_FAILURES:
+            _failed_n = len(_RECONCILE_FAILURES)
+            st.warning(
+                f"\u26a0\ufe0f {_failed_n} re-route(s) could not be archived in the "
+                f"backend after retries. Re-run the re-route, or check Railway logs."
+            )
+            _RECONCILE_FAILURES.clear()
+    except Exception as _rf_e:
+        _log_err("reconcile_failure_banner", _rf_e)
+
     # Show toast only if a route in THIS pod changed
     sent_db = st.session_state.get('sent_db', {})
     pod_clusters = st.session_state.get(f"clusters_{pod_name}", [])
@@ -6517,104 +6817,20 @@ def run_pod_tab(pod_name):
 
 
 
-    # 🔄 IC ACCEPT/DECLINE AUTO-REFLECTION — bug fix May 14 2026.
-    #
-    # auto_sync_checker's docstring claims "polls every 60s" but in fact only
-    # runs when the script reruns (user click, st.rerun, etc.). Without a
-    # periodic trigger, dispatchers had to click around the UI to see an IC's
-    # accept/decline reflect — sometimes instant (if they happened to click),
-    # sometimes never (if they walked away).
-    #
-    # Fix: a tiny JS poller hits GAS `?action=getSyncVersion` every 15s. When
-    # the version changes, it clicks the hidden _sync_pulse_hidden button
-    # below, which forces a Streamlit rerun. The rerun lands here and
-    # auto_sync_checker does the actual sent_db patching — no extra Python
-    # work added, just a way to wake the script up.
-    #
-    # Properties of the fix:
-    #   • All polling is JS → GAS. Streamlit server sees ZERO polls.
-    #   • GAS getSyncVersion is a single PropertiesService read (~50ms).
-    #   • lastVer is held on parent window so the iframe can re-mount on
-    #     reruns without losing the baseline (parent.setInterval keeps the
-    #     closure alive even after the iframe is destroyed).
-    #   • Idempotency guard `parent._dccSyncPollInstalled` prevents stacked
-    #     intervals across reruns / pod-tab switches.
-    #   • A rerun fires only when version actually changed; idle pods cost
-    #     nothing.
-    #
-    # Worst-case latency from IC click → dispatcher sees move: ~15s poll +
-    # ~500ms (button-click rerun + auto_sync_checker st.rerun) = ~15.5s.
-    #
-    # ⚠️ POD-SCOPED KEY — run_pod_tab() is called once PER POD for admin/manager
-    # users (the loop over Blue/Green/Orange/Purple/Red). A single shared
-    # st.button key="_sync_pulse_hidden" therefore collided on the 2nd pod and
-    # raised StreamlitDuplicateElementKey, which aborted the rest of that pod
-    # tab's render — killing BOTH the re-route fragment and this poller. The key
-    # is now pod-scoped so each pod gets its own button. The CSS + JS selectors
-    # below stay on the `class*=` substring so they still match every variant
-    # (st-key-_sync_pulse_hidden_Blue, ..._Green, etc.); clicking any one of them
-    # triggers a full app rerun, which is all we need.
-    st.markdown(
-        "<style>div[class*='st-key-_sync_pulse_hidden']{display:none !important;height:0 !important;margin:0 !important;padding:0 !important;}</style>",
-        unsafe_allow_html=True,
-    )
-    if st.button("sync", key=f"_sync_pulse_hidden_{pod_name}"):
-        pass  # No-op — the click itself is what we want; it triggers the rerun.
-    _components.html(
-        f"""
-        <script>
-        (function() {{
-          if (parent._dccSyncPollInstalled) return;
-          parent._dccSyncPollInstalled = true;
-          var GAS_URL  = "{GAS_WEB_APP_URL}";
-          var lastVer  = null;   // null = baseline not yet recorded
-          var inFlight = false;  // guard against overlapping polls on slow GAS
-          function clickPulse() {{
-            try {{
-              var btn = parent.document.querySelector('[class*="st-key-_sync_pulse_hidden"] button');
-              if (btn) btn.click();
-            }} catch (_) {{}}
-          }}
-          function tick() {{
-            if (inFlight) return;
-            inFlight = true;
-            var url = GAS_URL + (GAS_URL.indexOf('?') > -1 ? '&' : '?') + 'action=getSyncVersion';
-            if (lastVer !== null) url += '&since=' + lastVer;
-            fetch(url)
-              .then(function (r) {{ return r.json(); }})
-              .then(function (j) {{
-                if (!j || typeof j.version !== 'number') return;
-                if (lastVer === null) {{
-                  // First poll of this browser session — record the baseline
-                  // silently. We only fire reruns on subsequent CHANGES, not
-                  // on the initial snapshot. Otherwise every page load would
-                  // immediately rerun, which is wasted work.
-                  lastVer = j.version;
-                  return;
-                }}
-                if (j.version !== lastVer) {{
-                  // 🛑 NO AUTO-RERUN OF ANY KIND (May 18 2026 — Nick's hard
-                  // rule). Record the new version silently so we don't keep
-                  // re-triggering. New tasks / accept-decline events surface
-                  // only when the dispatcher clicks "Check New Tasks" or
-                  // interacts with the page in any other way.
-                  lastVer = j.version;
-                }}
-              }})
-              .catch(function () {{ /* silent — next tick will retry */ }})
-              .then(function () {{ inFlight = false; }});
-          }}
-          // First tick after a small delay so initial page paint isn't
-          // competing with the network for resources.
-          parent.setTimeout(tick, 2000);
-          parent.setInterval(tick, 15000);
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-    auto_sync_checker(pod_name)  # 🔄 Picks up the version bump and patches sent_db in-memory.
+    # Security audit H9 - the JS sync poller that used to live here was dead
+    # code: clickPulse() was defined but never called and the hidden
+    # _sync_pulse_hidden button was never clicked, so it reflected nothing.
+    # It has been removed (along with the hidden button and stale docstring)
+    # so a future maintainer cannot 'fix it back' and reintroduce the
+    # run-every starvation the team deliberately removed. accept/decline
+    # surfaces on the next user interaction or Check New Tasks click.
+    # Security audit M13 - run_pod_tab() runs once PER POD for admin/manager
+    # (5x). auto_sync_checker patches the app-wide sent_db, so running it 5x
+    # per render just multiplies sheet I/O. Gate it to the first pod of the
+    # render; the per-render flag is reset once per script run near the tabs.
+    if not st.session_state.get('_asc_ran_this_render'):
+        st.session_state['_asc_ran_this_render'] = True
+        auto_sync_checker(pod_name)  # patches sent_db in-memory on each rerun.
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
@@ -6669,16 +6885,27 @@ def run_pod_tab(pod_name):
     # (flag is consumed below).
     _post_revoke_key = f"_post_revoke_resync_pending_{pod_name}"
     if st.session_state.pop(_post_revoke_key, False):
+        # Security audit M10 - share a sessionStorage mutex with the
+        # auto-sync JS. Both timers click the same reopt_{pod} button;
+        # smart_sync_pod is not re-entrant, so a recent click suppresses
+        # this one (and vice-versa) to avoid overlapping syncs.
         _components.html(
             f"""
             <script>
             (function() {{
               parent.setTimeout(function() {{
                 try {{
+                  var LK = '_dccSyncClickLock_{pod_name}';
+                  var now = Date.now();
+                  var last = parseInt(parent.sessionStorage.getItem(LK) || '0', 10);
+                  if (now - last < 15000) return;  // another timer just clicked
                   var btn = parent.document.querySelector(
                     '[class*="st-key-reopt_{pod_name}"] button'
                   );
-                  if (btn) btn.click();
+                  if (btn) {{
+                    parent.sessionStorage.setItem(LK, String(now));
+                    btn.click();
+                  }}
                 }} catch (_) {{}}
               }}, 12000);
             }})();
@@ -6736,10 +6963,18 @@ def run_pod_tab(pod_name):
                 try {{
                   // Look for the "Check New Tasks" button by its pod-scoped key.
                   // Key pattern: st-key-reopt_{pod_name}
+                  // Security audit M10 - respect the shared sync-click mutex
+                  // so this auto-sync click and the post-revoke click never
+                  // overlap (smart_sync_pod is not re-entrant).
+                  var LK = '_dccSyncClickLock_{pod_name}';
+                  var now = Date.now();
+                  var last = parseInt(parent.sessionStorage.getItem(LK) || '0', 10);
+                  if (now - last < 15000) {{ try {{ parent.sessionStorage.setItem(KEY, "1"); }} catch(_) {{}} return; }}
                   var btn = parent.document.querySelector(
                     '[class*="st-key-reopt_{pod_name}"] button'
                   );
                   if (btn) {{
+                    parent.sessionStorage.setItem(LK, String(now));
                     btn.click();
                     try {{ parent.sessionStorage.setItem(KEY, "1"); }} catch(_) {{}}
                   }}
@@ -6889,17 +7124,25 @@ def run_pod_tab(pod_name):
     st.session_state['_history_db'] = _history_db
     st.session_state['archived_wos'] = _archived_wos
     # Merge real-time status updates from auto_sync_checker (overrides stale cache)
+    # Security audit H10 - full union. Previously this merge only handled
+    # `_tid in sent_db`, so an in-memory tid added by auto_sync_checker while
+    # the 5-minute sheet cache was still stale was silently dropped. Now an
+    # in-memory tid absent from the fresh fetch is carried over verbatim.
     _ss_db = st.session_state.get('sent_db', {})
     for _tid, _info in _ss_db.items():
-        if _tid in sent_db and _info.get('status') != sent_db[_tid].get('status'):
-            sent_db[_tid]['status'] = _info['status']
-            # Clear reverted flag so traffic cop picks up the new status
-            for _c in st.session_state.get(f"clusters_{pod_name}", []):
-                _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
-                if _tid in _c_tids:
-                    _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
-                    st.session_state[f"reverted_{_c_hash}"] = False
-                    break
+        if _tid in sent_db:
+            if _info.get('status') != sent_db[_tid].get('status'):
+                sent_db[_tid]['status'] = _info['status']
+                # Clear reverted flag so traffic cop picks up the new status
+                for _c in st.session_state.get(f"clusters_{pod_name}", []):
+                    _c_tids = [str(t['id']).strip() for t in _c.get('data', [])]
+                    if _tid in _c_tids:
+                        _c_hash = hashlib.md5("".join(sorted(_c_tids)).encode()).hexdigest()
+                        st.session_state[f"reverted_{_c_hash}"] = False
+                        break
+        else:
+            # In-memory addition not yet visible in the sheet fetch - keep it.
+            sent_db[_tid] = _info
 
     # 🌟 THE FIX: Omni-Ghost Sorter
     # May 4 2026 — fn_ghosts added so FN-status sheet rows have a separate bucket.
@@ -7107,7 +7350,7 @@ def run_pod_tab(pod_name):
     # --- 🐛 DEBUG: bucket routing visibility (collapsed by default, no behavior change) ---
     # Shows what each cluster's bucket decision was based on. Drop the URL-param check or
     # remove the whole block once we've confirmed auto-move works.
-    if st.query_params.get("debug") == "1":
+    if st.query_params.get("debug") == "1" and _is_admin_or_manager():
         with st.expander(f"🐛 Bucket debug — {pod_name}", expanded=False):
             _fp_now = st.session_state.get(f"_auto_sync_fp_{pod_name}", "(unset)")
             st.caption(f"Last fingerprint: `{_fp_now[:12]}...`  |  sent_db rows: {len(sent_db)}  |  pod_clusters: {len(cls)}")
@@ -7744,7 +7987,7 @@ def run_pod_tab(pod_name):
                             threading.Thread(
                                 target=lambda: requests.post(
                                     GAS_WEB_APP_URL,
-                                    json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                    json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
                                     timeout=15,
                                 ),
                                 daemon=True,
@@ -7777,7 +8020,7 @@ def run_pod_tab(pod_name):
                             try:
                                 _r = requests.post(
                                     GAS_WEB_APP_URL,
-                                    json={"action": "markFNAssigned", "cluster_hash": _h},
+                                    json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
                                     timeout=90,  # see comment on per-route call above
                                 ).json()
                                 return (_h, bool(_r.get("success")), _r.get("error", ""))
@@ -7987,7 +8230,8 @@ def run_pod_tab(pod_name):
             if not unified_sent: st.info("No pending routes sent.")
             
             current_date = None
-            for i, item in enumerate(unified_sent):
+            _pg_items, _pg_start = _paginate_panel(unified_sent, f"{pod_name}_sent")
+            for i, item in enumerate(_pg_items, start=_pg_start):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
@@ -8036,7 +8280,7 @@ def run_pod_tab(pod_name):
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_sent_{i}")
+                    ghost_hash = g.get('hash', f"ghost_sent_{pod_name}_{i}")  # H14 pod-scoped
                     wo_display = g.get('wo', g_ic_name)
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
@@ -8104,7 +8348,8 @@ def run_pod_tab(pod_name):
             if not unified_acc: st.info("Waiting for portal acceptances...")
             
             current_date = None
-            for i, item in enumerate(unified_acc):
+            _pg_items, _pg_start = _paginate_panel(unified_acc, f"{pod_name}_acc")
+            for i, item in enumerate(_pg_items, start=_pg_start):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
@@ -8160,7 +8405,7 @@ def run_pod_tab(pod_name):
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_{i}")
+                    ghost_hash = g.get('hash', f"ghost_{pod_name}_{i}")  # H14 pod-scoped
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
@@ -8195,7 +8440,8 @@ def run_pod_tab(pod_name):
             if not unified_dec: st.info("No declined routes.")
             
             current_date = None
-            for i, item in enumerate(unified_dec):
+            _pg_items, _pg_start = _paginate_panel(unified_dec, f"{pod_name}_dec")
+            for i, item in enumerate(_pg_items, start=_pg_start):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
@@ -8232,7 +8478,8 @@ def run_pod_tab(pod_name):
             if not unified_fin: st.info("No finalized routes.") 
             
             current_date = None
-            for i, item in enumerate(unified_fin):
+            _pg_items, _pg_start = _paginate_panel(unified_fin, f"{pod_name}_fin")
+            for i, item in enumerate(_pg_items, start=_pg_start):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
@@ -8280,7 +8527,7 @@ def run_pod_tab(pod_name):
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_fin_{i}")
+                    ghost_hash = g.get('hash', f"ghost_fin_{pod_name}_{i}")  # H14 pod-scoped
                     wo_display = g.get('wo', g_ic_name)
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
@@ -8383,13 +8630,14 @@ if not st.session_state.get('_stay_prompt_dismissed'):
     st.session_state['_stay_prompt_dismissed'] = True
     _u_now = st.session_state['_auth_user'].get('username', '')
     _tok = _stay_token_for(_u_now)
-    # Persist to localStorage AND tag the current URL so reloads keep the session.
-    _components.html(
-        f"<script>try{{localStorage.setItem('dcc_stay_auth','{_tok}');}}catch(e){{}}</script>",
-        height=0,
-    )
-    st.query_params['auth'] = _tok
-    st.rerun()
+    if _tok:
+        # Persist to localStorage AND tag the current URL so reloads keep the session.
+        _components.html(
+            f"<script>try{{localStorage.setItem('dcc_stay_auth','{_tok}');}}catch(e){{}}</script>",
+            height=0,
+        )
+        st.query_params['auth'] = _tok
+        st.rerun()
 
 # --- START ---
 if "ic_df" not in st.session_state:
@@ -8452,7 +8700,7 @@ st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terr
 # field name / response shape is confirmed, fetch_worker_task_counts() can be
 # patched and this block can stay dormant (or be removed) — it's behind a query
 # param so end-users never see it.
-if st.query_params.get("debug") == "1":
+if st.query_params.get("debug") == "1" and _is_admin_or_manager():
     with st.expander("🔍 IC ↔ Worker Phone-Match Debug", expanded=True):
         if st.button("🔗 Cross-reference IC database with Onfleet workers", key="_dbg_ic_xref"):
             try:
@@ -8619,6 +8867,12 @@ if st.query_params.get("debug") == "1":
             except Exception as _e:
                 st.error(f"{type(_e).__name__}: {_e}")
         st.caption("Click to see what fields OnFleet actually returns on tasks. Tells us where the art file lives and whether National-vs-Local detection has anything to match against.")
+
+# Security audit M13 - reset the once-per-render sync-check guard. This line
+# runs exactly once per Streamlit script run (it is in the linear flow, not
+# inside any loop/function), so auto_sync_checker fires once even for the
+# admin/manager 5-pod view.
+st.session_state['_asc_ran_this_render'] = False
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
@@ -9275,7 +9529,7 @@ with tabs[6]:
                                     threading.Thread(
                                         target=lambda: requests.post(
                                             GAS_WEB_APP_URL,
-                                            json={"action": "markFNPosted", "cluster_hash": _hashes_csv},
+                                            json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
                                             timeout=15,
                                         ),
                                         daemon=True,
@@ -9311,8 +9565,8 @@ with tabs[6]:
                                 try:
                                     _r = requests.post(
                                         GAS_WEB_APP_URL,
-                                        json={"action": "markFNAssigned", "cluster_hash": _h},
-                                        timeout=25,
+                                        json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
+                                        timeout=90,
                                     ).json()
                                     return (_h, bool(_r.get("success")), _r.get("error", ""))
                                 except Exception as _ex:
@@ -9426,7 +9680,8 @@ with tabs[6]:
                 if not unified_sent: st.info("No pending routes sent.")
                 
                 current_date = None
-                for i, item in enumerate(unified_sent):
+                _pg_items, _pg_start = _paginate_panel(unified_sent, "digital_sent")
+                for i, item in enumerate(_pg_items, start=_pg_start):
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
@@ -9462,7 +9717,7 @@ with tabs[6]:
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
-                        ghost_hash = g.get('hash', f"ghost_d_sent_{i}")
+                        ghost_hash = g.get('hash', f"ghost_d_sent_Global_Digital_{i}")  # H14 pod-scoped
                         wo_display = g.get('wo', g_ic_name)
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
@@ -9488,7 +9743,8 @@ with tabs[6]:
                 if not unified_acc: st.info("Waiting for portal acceptances...")
                 
                 current_date = None
-                for i, item in enumerate(unified_acc):
+                _pg_items, _pg_start = _paginate_panel(unified_acc, "digital_acc")
+                for i, item in enumerate(_pg_items, start=_pg_start):
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
@@ -9527,7 +9783,7 @@ with tabs[6]:
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
-                        ghost_hash = g.get('hash', f"ghost_digi_{i}")
+                        ghost_hash = g.get('hash', f"ghost_digi_Global_Digital_{i}")  # H14 pod-scoped
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                         
@@ -9554,7 +9810,8 @@ with tabs[6]:
                 if not unified_dec: st.info("No declined routes.")
                 
                 current_date = None
-                for i, item in enumerate(unified_dec):
+                _pg_items, _pg_start = _paginate_panel(unified_dec, "digital_dec")
+                for i, item in enumerate(_pg_items, start=_pg_start):
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
@@ -9583,7 +9840,8 @@ with tabs[6]:
                 if not unified_fin: st.info("No finalized digital routes.") 
                 
                 current_date = None
-                for i, item in enumerate(unified_fin):
+                _pg_items, _pg_start = _paginate_panel(unified_fin, "digital_fin")
+                for i, item in enumerate(_pg_items, start=_pg_start):
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
@@ -9620,7 +9878,7 @@ with tabs[6]:
                     else:
                         g = item
                         g_ic_name = g.get('contractor_name', 'Unknown')
-                        ghost_hash = g.get('hash', f"ghost_d_fin_{i}")
+                        ghost_hash = g.get('hash', f"ghost_d_fin_Global_Digital_{i}")  # H14 pod-scoped
                         wo_display = g.get('wo', g_ic_name)
                         comp, due = g.get('pay', 0), g.get('due', 'N/A')
                         stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)

@@ -18,9 +18,11 @@
     }
   },
   // Heavy apt upgrade runs ONCE on container creation, not every reopen.
-  // pip install stays on updateContentCommand so requirements.txt changes are picked up.
-  "postCreateCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; echo '✅ System packages installed'",
-  "updateContentCommand": "[ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Requirements met'",
+  "postCreateCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; echo 'System packages installed'",
+  // Security audit M31: install ONLY from the pinned requirements.txt. The
+  // previous trailing 'pip3 install --user streamlit' upgraded Streamlit to
+  // latest and broke parity with the pinned production version.
+  "updateContentCommand": "[ -f requirements.txt ] && pip3 install --user -r requirements.txt; echo 'Requirements met'",
   "postAttachCommand": {
     "server": "streamlit run tactical_workspace_master_rw.py --server.enableCORS false --server.enableXsrfProtection false"
   },

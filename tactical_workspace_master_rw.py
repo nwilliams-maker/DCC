@@ -678,61 +678,34 @@ _components.html(
 USERS = {
     "admin": {
         "name": "Nick Williams",
-        "salt": "3cf32ad44bec7092ffe0cb572c938dec",
-        "password_hash": "c574bc503c48bdf7717a3a0806bfcb3e4171a6ee46dac9aff243fe6471891aa9",
+        "salt": "41658aea82936e38ebd617d6c0058e5a",
+        "password_hash": "56bd4d0957a83d203e31d877c3c895693ee56343318436a23927bb94d185b98a",
         "email": "nicholas.byron.williams@gmail.com",
         "pod": "ADMIN",
         "tier": "admin",
     },
-    "blue_assoc": {
-        "name": "Blue Dispatch Associate",
-        "salt": "c48f2e8876aae5dbdbeb12096da71c3f",
-        "password_hash": "3e9bff8c1da728cb0061b840875c841516ba0aef913d4679a381bd84a1162580",
-        "email": "eburger@terraboost.biz",
-        "pod": "Blue",
-        "role": "Associate",
-        "tier": "guest",
+    "manager": {
+        "name": "Pod Manager",
+        "salt": "6939cffef79bd801d8419773f2a9f3a3",
+        "password_hash": "43f3e62e61a841a254d2cecfb7468b146534359f9a488e24aa31beeff7ae8cd5",
+        "email": "nwilliams@terraboost.biz",
+        "pod": "MANAGER",
+        "role": "Manager",
+        "tier": "manager",
     },
-    "green_assoc": {
-        "name": "Green Dispatch Associate",
-        "salt": "9977880f8d35ce5be466c32cf9687ddb",
-        "password_hash": "9c8144b8f47bab673c378addeafdf6924175f1919acf379fa266dfdfeb067e5e",
-        "email": "reabetswe@terraboost.biz",
-        "pod": "Green",
-        "role": "Associate",
-        "tier": "guest",
-    },
-    "orange_assoc": {
-        "name": "Orange Dispatch Associate",
-        "salt": "1e1d5f24099eb0274c8b8e09d14ece80",
-        "password_hash": "32beb1ba4e4046f245827c7633d0730d7559c9d299a5483d0792352037b65bd0",
-        "email": "bmakaya@terraboost.biz",
-        "pod": "Orange",
-        "role": "Associate",
-        "tier": "guest",
-    },
-    "purple_assoc": {
-        "name": "Purple Dispatch Associate",
-        "salt": "8693d5f149ce24f3336ec5ab758e1df5",
-        "password_hash": "1fa11ad7d88817a8f2c8649d5961d50e3482e0b63fb11e08e43f1618d49b7359",
-        "email": "sferreira@terraboost.biz",
-        "pod": "Purple",
-        "role": "Associate",
-        "tier": "guest",
-    },
-    "red_assoc": {
-        "name": "Red Dispatch Associate",
-        "salt": "1d3ac2dde478cc091371b119915f52b0",
-        "password_hash": "369236f6bf45be6f04ff25201c1129e29ccc8c2fcc0e6fa68f93bdb72e78bc03",
-        "email": "ladams@terraboost.biz",
-        "pod": "Red",
-        "role": "Associate",
-        "tier": "guest",
+    "digital_user": {
+        "name": "Digital User",
+        "salt": "744a9204a1b8456ab389229cb81c1e69",
+        "password_hash": "2b1898b8b4a3407a6b655b53296bcda0a0951b8d92361035e170c149d5e8fc0c",
+        "email": "kheiden@terraboost.biz",
+        "pod": "Digital",
+        "role": "Dispatcher",
+        "tier": "user",
     },
     "bluedispatch1811": {
         "name": "Blue Dispatcher",
-        "salt": "dad7410d3a1d48ac818aa11a8e3161a3",
-        "password_hash": "16c71df1ae8716b70bdae450623c2586fc4ec244a3f12b4dce12efb4e60ecbad",
+        "salt": "46e95e4699615d387e68298d35561439",
+        "password_hash": "4fd6c3d9c39ecdd8b9bfaac21d2ba35cab58b876644c5d47cf8275ca83b50989",
         "email": "dcazares@terraboost.biz",
         "pod": "Blue",
         "role": "Dispatcher",
@@ -740,8 +713,8 @@ USERS = {
     },
     "greendispatch1811": {
         "name": "Green Dispatcher",
-        "salt": "0dd3f9b8aab9a55786acb934737709e2",
-        "password_hash": "b52216333f10b0edc2a2ca1f6c93aac5ebd7bed67ce96529a9eeaf5d9cab0e74",
+        "salt": "8d8b541f3b87c5dafa9bfa55c74a1eca",
+        "password_hash": "cfa2785552a950b615d208140444cb85a3499577818ab3ae6944ad7b89ab01bb",
         "email": "aengelhardt@terraboost.biz",
         "pod": "Green",
         "role": "Dispatcher",
@@ -749,8 +722,8 @@ USERS = {
     },
     "orangedispatch1811": {
         "name": "Orange Dispatcher",
-        "salt": "357eb46c62e8d61bf442131f68fef3a2",
-        "password_hash": "3c614ab3499a82d01f7a3c1b95ebeb34db8aab63719edd8200c44e2a543c6bdc",
+        "salt": "9e36cee9f516304b6d52c0a454605041",
+        "password_hash": "a4404c082f1a4702bc27e65248fc769fe07bfab4f29d020d994b7a007cf691a2",
         "email": "nwilliams@terraboost.biz",
         "pod": "Orange",
         "role": "Dispatcher",
@@ -758,8 +731,8 @@ USERS = {
     },
     "purpledispatch1811": {
         "name": "Purple Dispatcher",
-        "salt": "6a6500fbcb4b316b7cbac1071fb0700f",
-        "password_hash": "947e445d8466909f84aac9265d9566ad303882485724ed9cb2dc62f9d5be6e94",
+        "salt": "ac9b24e906d7ed7023ca05a38363cf64",
+        "password_hash": "6896a20ffa9e25431d5f031541fe7be3499b94505f8adf27f929b1272bc927c4",
         "email": "kgallardo@terraboost.biz",
         "pod": "Purple",
         "role": "Dispatcher",
@@ -767,34 +740,62 @@ USERS = {
     },
     "reddispatch1811": {
         "name": "Red Dispatcher",
-        "salt": "a4b5b69dbeee9ed7973838b622e02d2f",
-        "password_hash": "a5281fba9f8686a540a9fd44626430463399d8f3441e413bfee6fb8dc710aaa9",
+        "salt": "47dd3a91429348b6bc6ed09c50dc2ef7",
+        "password_hash": "3ec6d2168b85be00699c2ba269694066671c6444940452586cbb7483835f0177",
         "email": "mespinoza@terraboost.biz",
         "pod": "Red",
         "role": "Dispatcher",
         "tier": "user",
     },
-    "digital_user": {
-        "name": "Digital User",
-        "salt": "94d5da52e40bfc22c0d25d854dd1aab3",
-        "password_hash": "7552a5428baade58489c80b4e340b1ce6e638847fe1c14d705bc62c7442dc247",
-        "email": "kheiden@terraboost.biz",
-        "pod": "Digital",
-        "role": "Dispatcher",
-        "tier": "user",
+    "blue_assoc": {
+        "name": "Blue Dispatch Associate",
+        "salt": "1d30d368b6490b38b945b7d3a45c0483",
+        "password_hash": "bb01647f74a33e708cf57d2f25862e0a23c052780d7b2f7581e7b86e2e0953e2",
+        "email": "eburger@terraboost.biz",
+        "pod": "Blue",
+        "role": "Associate",
+        "tier": "guest",
     },
-    "manager": {
-        "name": "Pod Manager",
-        "salt": "d90271811efbe9b427f489f3f1ad3bcb",
-        "password_hash": "ff34acd0f447bf070ff3e6dd34406ae16212e0a1ade9f47140268a81bcdac39f",
-        "email": "nwilliams@terraboost.biz",
-        "pod": "MANAGER",
-        "role": "Manager",
-        "tier": "manager",
+    "green_assoc": {
+        "name": "Green Dispatch Associate",
+        "salt": "21478b35c7869c227a92553445d32c35",
+        "password_hash": "ca5841d98f8f0183716a46791afc54cb72a70ab1b3c77defb078475eae394999",
+        "email": "reabetswe@terraboost.biz",
+        "pod": "Green",
+        "role": "Associate",
+        "tier": "guest",
+    },
+    "orange_assoc": {
+        "name": "Orange Dispatch Associate",
+        "salt": "5db25814784f2963aca0e0403bba1686",
+        "password_hash": "eab58a00423e76045e20593e56ef1cbc9bb7554c6313d19fc1931bbe0227a742",
+        "email": "bmakaya@terraboost.biz",
+        "pod": "Orange",
+        "role": "Associate",
+        "tier": "guest",
+    },
+    "purple_assoc": {
+        "name": "Purple Dispatch Associate",
+        "salt": "3c524a86ae0e5c49e0d72276f7f483e5",
+        "password_hash": "0a7d8a5eec5a693dbcbef8ad8d7b81692a0ad50f43844d8b07a2f28eeed465c7",
+        "email": "sferreira@terraboost.biz",
+        "pod": "Purple",
+        "role": "Associate",
+        "tier": "guest",
+    },
+    "red_assoc": {
+        "name": "Red Dispatch Associate",
+        "salt": "38f491d91e13c087402f90243da7b26a",
+        "password_hash": "b3c3d9d6b320ea2c4f25f90f6c1dbf7c1e7c671c61724e07f2047015d35aeb9d",
+        "email": "ladams@terraboost.biz",
+        "pod": "Red",
+        "role": "Associate",
+        "tier": "guest",
     },
 }
 
 import hashlib as _login_hashlib
+import hmac as _login_hmac
 
 # \U0001F512 Password storage — salted PBKDF2-HMAC-SHA256 (security audit H2).
 # Each USERS entry carries a per-user random `salt`; `password_hash` is the
@@ -823,7 +824,7 @@ def _check_password(username: str, password: str):
     if not _salt or not _expected:
         return None
     _candidate = _hash_password(password, _salt)
-    if _candidate and _login_hashlib.compare_digest(_candidate, _expected):
+    if _candidate and _login_hmac.compare_digest(_candidate, _expected):
         return rec
     return None
 
@@ -866,7 +867,7 @@ def _validate_stay_token(token: str):
         return None
     for u, rec in USERS.items():
         _expected = _stay_token_for(u)
-        if _expected and _login_hashlib.compare_digest(_expected, str(token)):
+        if _expected and _login_hmac.compare_digest(_expected, str(token)):
             return u, rec
     return None
 

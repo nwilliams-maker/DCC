@@ -2999,7 +2999,10 @@ def _cached_fetch_sent_records_from_sheet():
                                         "time": ts_display,
                                         "wo": p.get('wo', display_name),
                                         "comp": p.get('comp', 0),     
-                                        "due": p.get('due', 'N/A')    
+                                        "due": p.get('due', 'N/A'),
+                                        # raw_ts: sheet-row creation time ~ when the contractor accepted.
+                                        # Used by the return-to-Dispatch grace-window check in the bucket loop.
+                                        "raw_ts": dt_obj,
                                     }
                                     # 📜 Record this row as a history event for the task.
                                     # `dt_obj` (computed above) is the raw pandas Timestamp we can sort on later.
@@ -7296,8 +7299,34 @@ def run_pod_tab(pod_name):
             finalized.append(c)
         elif sheet_match and not is_reverted:
             raw_status = str(sheet_match.get('status', '')).lower()
-            if raw_status == 'field_nation':
-                # 🌟 Restore session state so checkbox stays checked after reload
+            # RETURN-TO-DISPATCH (May 23 2026 - Nick: previously-assigned
+            # then unassigned tasks must pop back to Dispatch).
+            # A live cluster only reaches this loop because its tasks are in
+            # OnFleet's state=0 (unassigned) feed. A route's OnFleet tasks
+            # get assigned to a worker only when a contractor ACCEPTS - so an
+            # 'accepted'/'finalized' route whose tasks are sitting unassigned
+            # was unassigned again (directly in OnFleet, or via a DCC revoke)
+            # and must drop back to the Dispatch/Ready side. Skip the override
+            # only inside a short grace window so a just-accepted route whose
+            # worker-assignment PUT is still propagating cannot flicker into
+            # Ready and get double-dispatched.
+            _reassigned_back = False
+            if raw_status in ('accepted', 'finalized'):
+                _acc_raw_ts = sheet_match.get('raw_ts')
+                _acc_is_fresh = False
+                if _acc_raw_ts is not None:
+                    try:
+                        _acc_age = (pd.Timestamp.now() - _acc_raw_ts).total_seconds()
+                        _acc_is_fresh = _acc_age < 180  # 3-min propagation grace
+                    except Exception:
+                        _acc_is_fresh = False
+                if not _acc_is_fresh:
+                    _reassigned_back = True
+            if _reassigned_back:
+                c['status'] = 'Ready'
+                ready.append(c)
+            elif raw_status == 'field_nation':
+                # Restore session state so checkbox stays checked after reload
                 if not st.session_state.get(f"route_state_{cluster_hash}"):
                     st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
                 field_nation.append(c)

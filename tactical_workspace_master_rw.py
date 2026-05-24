@@ -6117,7 +6117,12 @@ text-decoration:none;">📨 Default Mail</a>
                         # 2-item finalization checklist (no Onfleet step) kicks in on next render.
                         st.session_state[f"contractor_{cluster_hash}"] = "Field Nation"
                         st.session_state.pop(f"route_state_{cluster_hash}", None)
-                        st.session_state[f"reverted_{cluster_hash}"] = True
+                        # NOT reverted (May 23 2026). markFNAssigned moves the route
+                        # TO Accepted, not back to Dispatch. reverted_=True hid it
+                        # from the Accepted tab (its ghost is filtered on reverted_)
+                        # and dropped any still-live cluster into Ready. Clear it so
+                        # the route lands in Accepted on this rerun.
+                        st.session_state[f"reverted_{cluster_hash}"] = False
                         # Force the next render to re-pull the sheet so the new Accepted row is visible.
                         fetch_sent_records_from_sheet.clear()
                         st.toast("✅ Assigned to FN Rep — moved to Accepted!")
@@ -8067,7 +8072,8 @@ def run_pod_tab(pod_name):
                                     _fn_assigned_dict[_h] = _ts_now
                                     st.session_state[f"contractor_{_h}"] = "Field Nation"
                                     st.session_state.pop(f"route_state_{_h}", None)
-                                    st.session_state[f"reverted_{_h}"] = True
+                                    # NOT reverted — see per-route handler (May 23 2026).
+                                    st.session_state[f"reverted_{_h}"] = False
                                 else:
                                     _fail += 1
                                     _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
@@ -9637,7 +9643,8 @@ with tabs[6]:
                                         _fn_assigned_dict_d[_h] = _ts_now_d
                                         st.session_state[f"contractor_{_h}"] = "Field Nation"
                                         st.session_state.pop(f"route_state_{_h}", None)
-                                        st.session_state[f"reverted_{_h}"] = True
+                                        # NOT reverted — see per-route handler (May 23 2026).
+                                        st.session_state[f"reverted_{_h}"] = False
                                     else:
                                         _fail_d += 1
                                         _log_err(f"bulk markFNAssigned/digital hash={_h}", _err)

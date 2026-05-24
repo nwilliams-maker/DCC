@@ -8257,6 +8257,31 @@ def run_pod_tab(pod_name):
                     "}catch(e){}</script>",
                     height=0,
                 )
+            # 🔄 POST-REVOKE RESYNC — relocated into this fragment (May 23 2026).
+            # The Sent re-route now fires st.rerun(scope="fragment"), so the
+            # main-script resync trigger never runs on a re-route. Emit it here
+            # so the route still gets pulled back into Ready ~12s after the
+            # background OnFleet unassign lands.
+            if st.session_state.pop(f"_post_revoke_resync_pending_{pod_name}", False):
+                _components.html(
+                    f"""
+                    <script>
+                    (function() {{
+                      parent.setTimeout(function() {{
+                        try {{
+                          var LK = '_dccSyncClickLock_{pod_name}';
+                          var now = Date.now();
+                          var last = parseInt(parent.sessionStorage.getItem(LK) || '0', 10);
+                          if (now - last < 15000) return;
+                          var btn = parent.document.querySelector('[class*="st-key-reopt_{pod_name}"] button');
+                          if (btn) {{ parent.sessionStorage.setItem(LK, String(now)); btn.click(); }}
+                        }} catch (_) {{}}
+                      }}, 12000);
+                    }})();
+                    </script>
+                    """,
+                    height=0,
+                )
             if not unified_sent: st.info("No pending routes sent.")
             
             current_date = None
@@ -8306,7 +8331,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
+                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
                 else:
                     g = item
                     g_ic_name = g.get('contractor_name', 'Unknown')
@@ -8348,7 +8373,7 @@ def run_pod_tab(pod_name):
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
                                     move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
                                     st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
+                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
         with t_sent:
             _render_sent_panel()
         # 🚀 Shared re-route helpers for the Accepted/Declined/Finalized panels.

@@ -7849,8 +7849,7 @@ def run_pod_tab(pod_name):
                 st.markdown(
                     """
                     <style>
-                    div[class*="st-key-fn_"][data-testid="stButton"]:not([class*="st-key-fn_sel_"]) button,
-                    div[class*="st-key-fn_"][data-testid="stDownloadButton"] button,
+                    div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button,
                     div[data-testid="stLinkButton"] a {
                         background: #faf9fd !important;
                         border: 1px solid #d9d4ec !important;
@@ -7862,8 +7861,7 @@ def run_pod_tab(pod_name):
                         padding: 0.1rem 0.5rem !important;
                         line-height: 1.1 !important;
                     }
-                    div[class*="st-key-fn_"][data-testid="stButton"]:not([class*="st-key-fn_sel_"]) button p,
-                    div[class*="st-key-fn_"][data-testid="stDownloadButton"] button p,
+                    div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button p,
                     div[data-testid="stLinkButton"] a p {
                         font-size: 0.8rem !important;
                         font-weight: 500 !important;

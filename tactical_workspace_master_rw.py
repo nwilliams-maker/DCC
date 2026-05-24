@@ -6064,7 +6064,7 @@ text-decoration:none;">📨 Default Mail</a>
                 )
         with link_col:
             st.link_button(
-                "Post to FN",
+                "Field Nation",
                 url="https://app.fieldnation.com/projects",
                 use_container_width=True
             )
@@ -6086,7 +6086,7 @@ text-decoration:none;">📨 Default Mail</a>
                 )
             else:
                 if st.button(
-                    "Mark Posted",
+                    "Posted",
                     key=f"fn_post_one_{pod_name}_{cluster_hash}",
                     use_container_width=True,
                 ):
@@ -6107,7 +6107,7 @@ text-decoration:none;">📨 Default Mail</a>
                     st.toast("📤 Marked as Posted to Field Nation.")
                     st.rerun()
         with _fn_act_c2:
-            if st.button("Assigned FN Rep", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+            if st.button("Assigned", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
                 with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
                     try:
                         # 90s timeout: markFNAssigned does (1) OnFleet routePlan
@@ -7852,15 +7852,49 @@ def run_pod_tab(pod_name):
                     div[class*="st-key-fn_"][data-testid="stButton"] button,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button,
                     div[data-testid="stLinkButton"] a {
-                        min-height: 1.7rem !important;
+                        min-height: 1.75rem !important;
+                        height: 1.75rem !important;
                         padding-top: 0.05rem !important;
                         padding-bottom: 0.05rem !important;
-                        line-height: 1.15 !important;
+                        line-height: 1.1 !important;
                     }
                     div[class*="st-key-fn_"][data-testid="stButton"] button p,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button p,
                     div[data-testid="stLinkButton"] a p {
                         font-size: 0.78rem !important;
+                    }
+                    div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-fn_sel_"]) {
+                        gap: 0 !important;
+                    }
+                    div[class*="st-key-fn_sel_"] button {
+                        border-radius: 0 !important;
+                        border: 0.5px solid #c9c2e6 !important;
+                        background: #ffffff !important;
+                        color: #534AB7 !important;
+                        box-shadow: none !important;
+                        font-weight: 500 !important;
+                    }
+                    div[class*="st-key-fn_sel_"] button p { font-size: 0.72rem !important; }
+                    div[class*="st-key-fn_sel_"] button:disabled {
+                        color: #b3aecb !important;
+                        background: #f7f6fb !important;
+                    }
+                    div[class*="st-key-fn_sel_all_"] button {
+                        border-top-left-radius: 7px !important;
+                        border-bottom-left-radius: 7px !important;
+                    }
+                    div[class*="st-key-fn_sel_clear_"] button {
+                        border-top-right-radius: 7px !important;
+                        border-bottom-right-radius: 7px !important;
+                        color: #8b8898 !important;
+                    }
+                    div[class*="st-key-fn_assigned_"] button:not(:disabled) {
+                        background: #534AB7 !important;
+                        border: 1px solid #534AB7 !important;
+                        box-shadow: none !important;
+                    }
+                    div[class*="st-key-fn_assigned_"] button:not(:disabled) p {
+                        color: #ffffff !important;
                     }
                     </style>
                     """,
@@ -8003,7 +8037,7 @@ def run_pod_tab(pod_name):
                 )
 
                 # ── BULK ACTION ROW 1: Combined CSV + Open FN link ──────────
-                # Disabled buttons just show "Combined CSV · 0" instead of a wordy
+                # Disabled buttons just show "Combined CSV" instead of a wordy
                 # "(none selected)" suffix — the count IS the empty-state signal.
                 _action_cols = st.columns(2)
                 with _action_cols[0]:
@@ -8022,14 +8056,14 @@ def run_pod_tab(pod_name):
                             _log_err("fn_combined", _fe)
                         if _fn_combined_buf is None:
                             st.button(
-                                f"Combined CSV · {len(_fn_selected)} (no stops)",
+                                "Combined CSV",
                                 disabled=True,
                                 use_container_width=True,
                                 key=f"fn_dl_disabled_{pod_name}",
                             )
                         else:
                             if st.download_button(
-                                label=f"Combined CSV · {len(_fn_selected)}",
+                                label="Combined CSV",
                                 data=_fn_combined_buf,
                                 file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
                                 mime="text/csv",
@@ -8043,14 +8077,14 @@ def run_pod_tab(pod_name):
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
                         st.button(
-                            "Combined CSV · 0",
+                            "Combined CSV",
                             disabled=True,
                             use_container_width=True,
                             key=f"fn_dl_empty_{pod_name}",
                         )
                 with _action_cols[1]:
                     st.link_button(
-                        "Open FN",
+                        "Field Nation",
                         url="https://app.fieldnation.com/projects",
                         use_container_width=True,
                     )
@@ -8061,7 +8095,7 @@ def run_pod_tab(pod_name):
                 with _fn_act_row[0]:
                     if _sel_pending:
                         if st.button(
-                            f"Mark Posted · {len(_sel_pending)}",
+                            "Posted",
                             key=f"fn_post_btn_{pod_name}",
                             use_container_width=True,
                             type="secondary",
@@ -8087,7 +8121,7 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "Mark Posted · 0",
+                            "Posted",
                             key=f"fn_post_btn_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
@@ -8095,7 +8129,7 @@ def run_pod_tab(pod_name):
                 with _fn_act_row[1]:
                     if _sel_assigned:
                         if st.button(
-                            f"To Accepted · {len(_sel_assigned)}",
+                            "Assigned",
                             key=f"fn_assigned_bulk_{pod_name}",
                             use_container_width=True,
                             type="primary",
@@ -8139,7 +8173,7 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "To Accepted · 0",
+                            "Assigned",
                             key=f"fn_assigned_bulk_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
@@ -9616,7 +9650,7 @@ with tabs[6]:
                     _fn_post_left_d, _fn_post_right_d = st.columns(2)
                     with _fn_post_left_d:
                         st.link_button(
-                            "Post to FN",
+                            "Field Nation",
                             url="https://app.fieldnation.com/projects",
                             use_container_width=True,
                         )

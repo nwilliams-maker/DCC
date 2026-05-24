@@ -7316,7 +7316,16 @@ def run_pod_tab(pod_name):
             # worker-assignment PUT is still propagating cannot flicker into
             # Ready and get double-dispatched.
             _reassigned_back = False
-            if raw_status in ('accepted', 'finalized'):
+            # 🌐 FN-assigned routes are managed by Field Nation, not DCC.
+            # Their OnFleet tasks can legitimately sit in the state=0 feed (DCC
+            # never worker-assigns an FN route), so the "accepted route with
+            # unassigned tasks -> back to Dispatch" rule must NOT fire for them
+            # — otherwise every FN route bounces out of Accepted into Ready once
+            # the 3-min grace expires. markFNAssigned always stamps the
+            # contractor as "Field Nation"; a real contractor name never
+            # collides with that. (May 23 2026 — Nick.)
+            _is_fn_route = str(sheet_match.get('name', '')).strip().lower() == 'field nation'
+            if raw_status in ('accepted', 'finalized') and not _is_fn_route:
                 _acc_raw_ts = sheet_match.get('raw_ts')
                 _acc_is_fresh = False
                 if _acc_raw_ts is not None:

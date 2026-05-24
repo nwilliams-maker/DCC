@@ -7849,19 +7849,25 @@ def run_pod_tab(pod_name):
                 st.markdown(
                     """
                     <style>
-                    div[class*="st-key-fn_"][data-testid="stButton"] button,
+                    div[class*="st-key-fn_"][data-testid="stButton"]:not([class*="st-key-fn_sel_"]) button,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button,
                     div[data-testid="stLinkButton"] a {
-                        min-height: 1.75rem !important;
-                        height: 1.75rem !important;
-                        padding-top: 0.05rem !important;
-                        padding-bottom: 0.05rem !important;
+                        background: #faf9fd !important;
+                        border: 1px solid #d9d4ec !important;
+                        border-radius: 8px !important;
+                        box-shadow: none !important;
+                        color: #7a72a8 !important;
+                        min-height: 2rem !important;
+                        height: 2rem !important;
+                        padding: 0.1rem 0.5rem !important;
                         line-height: 1.1 !important;
                     }
-                    div[class*="st-key-fn_"][data-testid="stButton"] button p,
+                    div[class*="st-key-fn_"][data-testid="stButton"]:not([class*="st-key-fn_sel_"]) button p,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button p,
                     div[data-testid="stLinkButton"] a p {
-                        font-size: 0.78rem !important;
+                        font-size: 0.8rem !important;
+                        font-weight: 500 !important;
+                        color: #7a72a8 !important;
                     }
                     div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-fn_sel_"]) {
                         gap: 0 !important;
@@ -7873,6 +7879,8 @@ def run_pod_tab(pod_name):
                         color: #534AB7 !important;
                         box-shadow: none !important;
                         font-weight: 500 !important;
+                        min-height: 1.85rem !important;
+                        height: 1.85rem !important;
                     }
                     div[class*="st-key-fn_sel_"] button p { font-size: 0.72rem !important; }
                     div[class*="st-key-fn_sel_"] button:disabled {
@@ -7887,14 +7895,6 @@ def run_pod_tab(pod_name):
                         border-top-right-radius: 7px !important;
                         border-bottom-right-radius: 7px !important;
                         color: #8b8898 !important;
-                    }
-                    div[class*="st-key-fn_assigned_"] button:not(:disabled) {
-                        background: #534AB7 !important;
-                        border: 1px solid #534AB7 !important;
-                        box-shadow: none !important;
-                    }
-                    div[class*="st-key-fn_assigned_"] button:not(:disabled) p {
-                        color: #ffffff !important;
                     }
                     </style>
                     """,

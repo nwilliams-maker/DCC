@@ -6107,7 +6107,7 @@ text-decoration:none;">📨 Default Mail</a>
                     st.toast("📤 Marked as Posted to Field Nation.")
                     st.rerun()
         with _fn_act_c2:
-            if st.button("Assigned", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+            if st.button("Assigned", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", use_container_width=True):
                 with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
                     try:
                         # 90s timeout: markFNAssigned does (1) OnFleet routePlan
@@ -7772,9 +7772,14 @@ def run_pod_tab(pod_name):
             """
             <style>
             div[class*="st-key-gbtn_"] button {
-                min-height: 2.1rem !important;
-                padding-top: 0.2rem !important;
-                padding-bottom: 0.2rem !important;
+                min-height: 2rem !important;
+                height: 2rem !important;
+                padding-top: 0.05rem !important;
+                padding-bottom: 0.05rem !important;
+                line-height: 1.1 !important;
+            }
+            div[class*="st-key-gbtn_"] button p {
+                font-size: 0.8rem !important;
             }
             </style>
             """,
@@ -8130,7 +8135,6 @@ def run_pod_tab(pod_name):
                             "Assigned",
                             key=f"fn_assigned_bulk_{pod_name}",
                             use_container_width=True,
-                            type="primary",
                         ):
                             _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
                             def _fire_assigned(_h):

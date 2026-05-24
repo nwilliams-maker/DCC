@@ -6052,7 +6052,7 @@ text-decoration:none;">📨 Default Mail</a>
         with dl_col:
             if fn_buf:
                 st.download_button(
-                    label="📥 Download FN Upload",
+                    label="📥 Download CSV",
                     data=fn_buf,
                     file_name=f"FN_Upload_{cluster.get('city', 'Route')}_{datetime.now().strftime('%m%d%Y')}.csv",
                     mime="text/csv",
@@ -6061,7 +6061,7 @@ text-decoration:none;">📨 Default Mail</a>
                 )
         with link_col:
             st.link_button(
-                "🌐 Post to Field Nation",
+                "🌐 Post to FN",
                 url="https://app.fieldnation.com/projects",
                 use_container_width=True
             )
@@ -6071,66 +6071,68 @@ text-decoration:none;">📨 Default Mail</a>
         # button switches to a disabled "Posted ✓ {timestamp}" indicator.
         _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
         _already_posted_ts = _fn_posted_dict.get(cluster_hash)
-        if _already_posted_ts:
-            st.button(
-                f"📤 Posted ✓ {_already_posted_ts}",
-                key=f"fn_posted_done_{pod_name}_{cluster_hash}",
-                use_container_width=True,
-                disabled=True,
-            )
-        else:
-            if st.button(
-                "📤 Mark as Posted",
-                key=f"fn_post_one_{pod_name}_{cluster_hash}",
-                use_container_width=True,
-            ):
-                _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                _fn_posted_dict[cluster_hash] = _ts
-                st.session_state['_fn_posted'] = _fn_posted_dict
-                try:
-                    threading.Thread(
-                        target=lambda: requests.post(
-                            GAS_WEB_APP_URL,
-                            json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash},
-                            timeout=15,
-                        ),
-                        daemon=True,
-                    ).start()
-                except Exception as _fpe:
-                    _log_err("markFNPosted/per-route", _fpe)
-                st.toast("📤 Marked as Posted to Field Nation.")
-                st.rerun()
-
-        # 🌟 UNIQUE KEY
-        if st.button("📢 Assigned FN Rep (Move to Accepted)", key=f"posted_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
-            with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
-                try:
-                    # 90s timeout: markFNAssigned does (1) OnFleet routePlan
-                    # rename, (2) per-task metadata + worker re-PUT, (3) per-
-                    # stop Monday lookups + WO/installer mutations. An 11-stop
-                    # route can fire ~120+ HTTP calls server-side; the old 25s
-                    # cap timed out on bigger routes. (May 17 2026.)
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=90).json()
-                    if res.get("success"):
-                        # Local state: route moves to Accepted (treated as already accepted by the FN rep).
-                        # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened
-                        # 2-item finalization checklist (no Onfleet step) kicks in on next render.
-                        st.session_state[f"contractor_{cluster_hash}"] = "Field Nation"
-                        st.session_state.pop(f"route_state_{cluster_hash}", None)
-                        # NOT reverted (May 23 2026). markFNAssigned moves the route
-                        # TO Accepted, not back to Dispatch. reverted_=True hid it
-                        # from the Accepted tab (its ghost is filtered on reverted_)
-                        # and dropped any still-live cluster into Ready. Clear it so
-                        # the route lands in Accepted on this rerun.
-                        st.session_state[f"reverted_{cluster_hash}"] = False
-                        # Force the next render to re-pull the sheet so the new Accepted row is visible.
-                        fetch_sent_records_from_sheet.clear()
-                        st.toast("✅ Assigned to FN Rep — moved to Accepted!")
-                        st.rerun()
-                    else:
-                        st.error(f"Sheet Error: {res.get('error')}")
-                except Exception as e:
-                    st.error(f"Connection Failed: {e}")
+        # Mark Posted + Assigned FN Rep paired into one 2-up row. (May 23 2026.)
+        _fn_act_c1, _fn_act_c2 = st.columns(2)
+        with _fn_act_c1:
+            if _already_posted_ts:
+                st.button(
+                    f"📤 Posted ✓ {_already_posted_ts}",
+                    key=f"fn_posted_done_{pod_name}_{cluster_hash}",
+                    use_container_width=True,
+                    disabled=True,
+                )
+            else:
+                if st.button(
+                    "📤 Mark Posted",
+                    key=f"fn_post_one_{pod_name}_{cluster_hash}",
+                    use_container_width=True,
+                ):
+                    _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                    _fn_posted_dict[cluster_hash] = _ts
+                    st.session_state['_fn_posted'] = _fn_posted_dict
+                    try:
+                        threading.Thread(
+                            target=lambda: requests.post(
+                                GAS_WEB_APP_URL,
+                                json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash},
+                                timeout=15,
+                            ),
+                            daemon=True,
+                        ).start()
+                    except Exception as _fpe:
+                        _log_err("markFNPosted/per-route", _fpe)
+                    st.toast("📤 Marked as Posted to Field Nation.")
+                    st.rerun()
+        with _fn_act_c2:
+            if st.button("📢 Assigned FN Rep", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+                with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
+                    try:
+                        # 90s timeout: markFNAssigned does (1) OnFleet routePlan
+                        # rename, (2) per-task metadata + worker re-PUT, (3) per-
+                        # stop Monday lookups + WO/installer mutations. An 11-stop
+                        # route can fire ~120+ HTTP calls server-side; the old 25s
+                        # cap timed out on bigger routes. (May 17 2026.)
+                        res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=90).json()
+                        if res.get("success"):
+                            # Local state: route moves to Accepted (treated as already accepted by the FN rep).
+                            # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened
+                            # 2-item finalization checklist (no Onfleet step) kicks in on next render.
+                            st.session_state[f"contractor_{cluster_hash}"] = "Field Nation"
+                            st.session_state.pop(f"route_state_{cluster_hash}", None)
+                            # NOT reverted (May 23 2026). markFNAssigned moves the route
+                            # TO Accepted, not back to Dispatch. reverted_=True hid it
+                            # from the Accepted tab (its ghost is filtered on reverted_)
+                            # and dropped any still-live cluster into Ready. Clear it so
+                            # the route lands in Accepted on this rerun.
+                            st.session_state[f"reverted_{cluster_hash}"] = False
+                            # Force the next render to re-pull the sheet so the new Accepted row is visible.
+                            fetch_sent_records_from_sheet.clear()
+                            st.toast("✅ Assigned to FN Rep — moved to Accepted!")
+                            st.rerun()
+                        else:
+                            st.error(f"Sheet Error: {res.get('error')}")
+                    except Exception as e:
+                        st.error(f"Connection Failed: {e}")
 
                     
 def smart_sync_pod(pod_name):
@@ -7825,6 +7827,28 @@ def run_pod_tab(pod_name):
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
+                # FN-tab button slimming (May 23 2026) -- scoped to fn_-keyed
+                # widgets so it never affects buttons on other tabs.
+                st.markdown(
+                    """
+                    <style>
+                    div[class*="st-key-fn_"][data-testid="stButton"] button,
+                    div[class*="st-key-fn_"][data-testid="stDownloadButton"] button,
+                    div[data-testid="stLinkButton"] a {
+                        min-height: 2rem !important;
+                        padding-top: 0.15rem !important;
+                        padding-bottom: 0.15rem !important;
+                        line-height: 1.15 !important;
+                    }
+                    div[class*="st-key-fn_"][data-testid="stButton"] button p,
+                    div[class*="st-key-fn_"][data-testid="stDownloadButton"] button p,
+                    div[data-testid="stLinkButton"] a p {
+                        font-size: 0.85rem !important;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
                 # 🌐 FN TAB — 3-section model (May 16 2026):
                 #   Pending  = no fn_posted_ts (not yet posted to FN)
@@ -7988,7 +8012,7 @@ def run_pod_tab(pod_name):
                             )
                         else:
                             if st.download_button(
-                                label=f"📥 Combined CSV · {len(_fn_selected)} routes · {_fn_combined_stops} stops",
+                                label=f"📥 Combined CSV · {len(_fn_selected)}",
                                 data=_fn_combined_buf,
                                 file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
                                 mime="text/csv",
@@ -8009,100 +8033,100 @@ def run_pod_tab(pod_name):
                         )
                 with _action_cols[1]:
                     st.link_button(
-                        "🌐 Open Field Nation",
+                        "🌐 Open FN",
                         url="https://app.fieldnation.com/projects",
                         use_container_width=True,
                     )
 
-                # ── BULK ACTION ROW 2: Mark Posted (full-width) ─────────────
-                if _sel_pending:
-                    if st.button(
-                        f"📤 Mark Posted · {len(_sel_pending)}",
-                        key=f"fn_post_btn_{pod_name}",
-                        use_container_width=True,
-                        type="secondary",
-                    ):
-                        _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                        for _h in _sel_pending:
-                            _fn_posted_dict[_h] = _ts
-                        st.session_state['_fn_posted'] = _fn_posted_dict
-                        try:
-                            _hashes_csv = ",".join(_sel_pending)
-                            threading.Thread(
-                                target=lambda: requests.post(
-                                    GAS_WEB_APP_URL,
-                                    json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
-                                    timeout=15,
-                                ),
-                                daemon=True,
-                            ).start()
-                        except Exception as _fpe:
-                            _log_err("markFNPosted/pod", _fpe)
-                        st.session_state[_fn_select_key] = []
-                        st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
-                        st.rerun()
-                else:
-                    st.button(
-                        "📤 Mark Posted · 0",
-                        key=f"fn_post_btn_empty_{pod_name}",
-                        use_container_width=True,
-                        disabled=True,
-                    )
-
-                # ── BULK ACTION ROW 3: Move Assigned → Accepted ─────────────
-                # Mirrors the per-cluster button but parallelized across the
-                # Assigned subset of the selection.
-                if _sel_assigned:
-                    if st.button(
-                        f"📢 Move to Accepted · {len(_sel_assigned)}",
-                        key=f"fn_assigned_bulk_{pod_name}",
-                        use_container_width=True,
-                        type="primary",
-                    ):
-                        _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
-                        def _fire_assigned(_h):
+                # BULK FN ACTIONS -- Mark Posted + Move to Accepted paired into
+                # one 2-up row to keep the bulk bar compact. (May 23 2026.)
+                _fn_act_row = st.columns(2)
+                with _fn_act_row[0]:
+                    if _sel_pending:
+                        if st.button(
+                            f"📤 Mark Posted · {len(_sel_pending)}",
+                            key=f"fn_post_btn_{pod_name}",
+                            use_container_width=True,
+                            type="secondary",
+                        ):
+                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                            for _h in _sel_pending:
+                                _fn_posted_dict[_h] = _ts
+                            st.session_state['_fn_posted'] = _fn_posted_dict
                             try:
-                                _r = requests.post(
-                                    GAS_WEB_APP_URL,
-                                    json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
-                                    timeout=90,  # see comment on per-route call above
-                                ).json()
-                                return (_h, bool(_r.get("success")), _r.get("error", ""))
-                            except Exception as _ex:
-                                return (_h, False, str(_ex))
-                        _ok = 0
-                        _fail = 0
-                        with st.spinner(f"Marking {len(_sel_assigned)} route(s) as Assigned FN Rep..."):
-                            with ThreadPoolExecutor(max_workers=min(8, max(1, len(_sel_assigned)))) as _ex:
-                                _results = list(_ex.map(_fire_assigned, _sel_assigned))
-                            for _h, _success, _err in _results:
-                                if _success:
-                                    _ok += 1
-                                    _fn_assigned_dict[_h] = _ts_now
-                                    st.session_state[f"contractor_{_h}"] = "Field Nation"
-                                    st.session_state.pop(f"route_state_{_h}", None)
-                                    # NOT reverted — see per-route handler (May 23 2026).
-                                    st.session_state[f"reverted_{_h}"] = False
-                                else:
-                                    _fail += 1
-                                    _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
-                        st.session_state['_fn_assigned'] = _fn_assigned_dict
-                        fetch_sent_records_from_sheet.clear()
-                        st.session_state[_fn_select_key] = []
-                        if _fail == 0:
-                            st.toast(f"✅ {_ok} route(s) moved to Accepted.")
-                        elif _ok == 0:
-                            st.error(f"All {_fail} GAS calls failed. Check logs.")
-                        else:
-                            st.toast(f"⚠️ {_ok} succeeded, {_fail} failed. Check logs for details.")
-                        st.rerun()
-                else:
-                    st.button(
-                        "📢 Move to Accepted · 0",
-                        key=f"fn_assigned_bulk_empty_{pod_name}",
-                        use_container_width=True,
-                        disabled=True,
-                    )
+                                _hashes_csv = ",".join(_sel_pending)
+                                threading.Thread(
+                                    target=lambda: requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
+                                        timeout=15,
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            except Exception as _fpe:
+                                _log_err("markFNPosted/pod", _fpe)
+                            st.session_state[_fn_select_key] = []
+                            st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "📤 Mark Posted · 0",
+                            key=f"fn_post_btn_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
+                        )
+                with _fn_act_row[1]:
+                    if _sel_assigned:
+                        if st.button(
+                            f"📢 To Accepted · {len(_sel_assigned)}",
+                            key=f"fn_assigned_bulk_{pod_name}",
+                            use_container_width=True,
+                            type="primary",
+                        ):
+                            _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
+                            def _fire_assigned(_h):
+                                try:
+                                    _r = requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
+                                        timeout=90,  # see comment on per-route call above
+                                    ).json()
+                                    return (_h, bool(_r.get("success")), _r.get("error", ""))
+                                except Exception as _ex:
+                                    return (_h, False, str(_ex))
+                            _ok = 0
+                            _fail = 0
+                            with st.spinner(f"Marking {len(_sel_assigned)} route(s) as Assigned FN Rep..."):
+                                with ThreadPoolExecutor(max_workers=min(8, max(1, len(_sel_assigned)))) as _ex:
+                                    _results = list(_ex.map(_fire_assigned, _sel_assigned))
+                                for _h, _success, _err in _results:
+                                    if _success:
+                                        _ok += 1
+                                        _fn_assigned_dict[_h] = _ts_now
+                                        st.session_state[f"contractor_{_h}"] = "Field Nation"
+                                        st.session_state.pop(f"route_state_{_h}", None)
+                                        # NOT reverted — see per-route handler (May 23 2026).
+                                        st.session_state[f"reverted_{_h}"] = False
+                                    else:
+                                        _fail += 1
+                                        _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
+                            st.session_state['_fn_assigned'] = _fn_assigned_dict
+                            fetch_sent_records_from_sheet.clear()
+                            st.session_state[_fn_select_key] = []
+                            if _fail == 0:
+                                st.toast(f"✅ {_ok} route(s) moved to Accepted.")
+                            elif _ok == 0:
+                                st.error(f"All {_fail} GAS calls failed. Check logs.")
+                            else:
+                                st.toast(f"⚠️ {_ok} succeeded, {_fail} failed. Check logs for details.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "📢 To Accepted · 0",
+                            key=f"fn_assigned_bulk_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
+                        )
 
                 st.divider()
 
@@ -9575,7 +9599,7 @@ with tabs[6]:
                     _fn_post_left_d, _fn_post_right_d = st.columns(2)
                     with _fn_post_left_d:
                         st.link_button(
-                            "🌐 Post to Field Nation",
+                            "🌐 Post to FN",
                             url="https://app.fieldnation.com/projects",
                             use_container_width=True,
                         )

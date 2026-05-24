@@ -6038,7 +6038,7 @@ text-decoration:none;">📨 Default Mail</a>
             unsafe_allow_html=True,
         )
 
-        st.info("💡 Route is currently tracked in the Field Nation tab.")
+
 
         # 🌟 FIELD NATION BUTTONS
         _due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date() + timedelta(DEFAULT_DUE_DAYS))
@@ -6049,7 +6049,7 @@ text-decoration:none;">📨 Default Mail</a>
         with dl_col:
             if fn_buf:
                 st.download_button(
-                    label="📥 Download CSV",
+                    label="Download CSV",
                     data=fn_buf,
                     file_name=f"FN_Upload_{cluster.get('city', 'Route')}_{datetime.now().strftime('%m%d%Y')}.csv",
                     mime="text/csv",
@@ -6058,7 +6058,7 @@ text-decoration:none;">📨 Default Mail</a>
                 )
         with link_col:
             st.link_button(
-                "🌐 Post to FN",
+                "Post to FN",
                 url="https://app.fieldnation.com/projects",
                 use_container_width=True
             )
@@ -6073,14 +6073,14 @@ text-decoration:none;">📨 Default Mail</a>
         with _fn_act_c1:
             if _already_posted_ts:
                 st.button(
-                    f"📤 Posted ✓ {_already_posted_ts}",
+                    f"Posted ✓ {_already_posted_ts}",
                     key=f"fn_posted_done_{pod_name}_{cluster_hash}",
                     use_container_width=True,
                     disabled=True,
                 )
             else:
                 if st.button(
-                    "📤 Mark Posted",
+                    "Mark Posted",
                     key=f"fn_post_one_{pod_name}_{cluster_hash}",
                     use_container_width=True,
                 ):
@@ -6101,7 +6101,7 @@ text-decoration:none;">📨 Default Mail</a>
                     st.toast("📤 Marked as Posted to Field Nation.")
                     st.rerun()
         with _fn_act_c2:
-            if st.button("📢 Assigned FN Rep", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
+            if st.button("Assigned FN Rep", key=f"fn_assigned_one_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
                 with st.spinner("Marking as Assigned to FN Rep — moving to Accepted..."):
                     try:
                         # 90s timeout: markFNAssigned does (1) OnFleet routePlan
@@ -7846,15 +7846,15 @@ def run_pod_tab(pod_name):
                     div[class*="st-key-fn_"][data-testid="stButton"] button,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button,
                     div[data-testid="stLinkButton"] a {
-                        min-height: 2rem !important;
-                        padding-top: 0.15rem !important;
-                        padding-bottom: 0.15rem !important;
+                        min-height: 1.7rem !important;
+                        padding-top: 0.05rem !important;
+                        padding-bottom: 0.05rem !important;
                         line-height: 1.15 !important;
                     }
                     div[class*="st-key-fn_"][data-testid="stButton"] button p,
                     div[class*="st-key-fn_"][data-testid="stDownloadButton"] button p,
                     div[data-testid="stLinkButton"] a p {
-                        font-size: 0.85rem !important;
+                        font-size: 0.78rem !important;
                     }
                     </style>
                     """,
@@ -8016,14 +8016,14 @@ def run_pod_tab(pod_name):
                             _log_err("fn_combined", _fe)
                         if _fn_combined_buf is None:
                             st.button(
-                                f"📥 Combined CSV · {len(_fn_selected)} (no stops)",
+                                f"Combined CSV · {len(_fn_selected)} (no stops)",
                                 disabled=True,
                                 use_container_width=True,
                                 key=f"fn_dl_disabled_{pod_name}",
                             )
                         else:
                             if st.download_button(
-                                label=f"📥 Combined CSV · {len(_fn_selected)}",
+                                label=f"Combined CSV · {len(_fn_selected)}",
                                 data=_fn_combined_buf,
                                 file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
                                 mime="text/csv",
@@ -8037,14 +8037,14 @@ def run_pod_tab(pod_name):
                                 st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
                     else:
                         st.button(
-                            "📥 Combined CSV · 0",
+                            "Combined CSV · 0",
                             disabled=True,
                             use_container_width=True,
                             key=f"fn_dl_empty_{pod_name}",
                         )
                 with _action_cols[1]:
                     st.link_button(
-                        "🌐 Open FN",
+                        "Open FN",
                         url="https://app.fieldnation.com/projects",
                         use_container_width=True,
                     )
@@ -8055,7 +8055,7 @@ def run_pod_tab(pod_name):
                 with _fn_act_row[0]:
                     if _sel_pending:
                         if st.button(
-                            f"📤 Mark Posted · {len(_sel_pending)}",
+                            f"Mark Posted · {len(_sel_pending)}",
                             key=f"fn_post_btn_{pod_name}",
                             use_container_width=True,
                             type="secondary",
@@ -8081,7 +8081,7 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "📤 Mark Posted · 0",
+                            "Mark Posted · 0",
                             key=f"fn_post_btn_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
@@ -8089,7 +8089,7 @@ def run_pod_tab(pod_name):
                 with _fn_act_row[1]:
                     if _sel_assigned:
                         if st.button(
-                            f"📢 To Accepted · {len(_sel_assigned)}",
+                            f"To Accepted · {len(_sel_assigned)}",
                             key=f"fn_assigned_bulk_{pod_name}",
                             use_container_width=True,
                             type="primary",
@@ -8133,7 +8133,7 @@ def run_pod_tab(pod_name):
                             st.rerun()
                     else:
                         st.button(
-                            "📢 To Accepted · 0",
+                            "To Accepted · 0",
                             key=f"fn_assigned_bulk_empty_{pod_name}",
                             use_container_width=True,
                             disabled=True,
@@ -9610,7 +9610,7 @@ with tabs[6]:
                     _fn_post_left_d, _fn_post_right_d = st.columns(2)
                     with _fn_post_left_d:
                         st.link_button(
-                            "🌐 Post to FN",
+                            "Post to FN",
                             url="https://app.fieldnation.com/projects",
                             use_container_width=True,
                         )

@@ -5572,7 +5572,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             st.session_state[active_tx_key] = st.session_state[active_tx_key].replace("LINK_PENDING", real_id)
     
        # 🌟 UNIQUE KEY & PERFECT INDENTATION
-        email_body_content = st.text_area("Email Content Preview", value=sig_preview, height=120, key=f"txt_area_{pod_name}_{current_data_fingerprint}_{cluster_hash}", disabled=not is_unlocked)
+        # Email Preview shows only for admin/manager. Pod accounts (Dispatchers
+        # + Associates) see the email when Gmail opens on Generate Link, so the
+        # in-app preview just eats vertical space for them. (May 23 2026.)
+        if _is_admin_or_manager():
+            email_body_content = st.text_area("Email Content Preview", value=sig_preview, height=120, key=f"txt_area_{pod_name}_{current_data_fingerprint}_{cluster_hash}", disabled=not is_unlocked)
+        else:
+            email_body_content = sig_preview
 
         # --- HIGH-SPEED DISPATCH BUTTON ---
         btn_label = "RESEND LINK & OPEN GMAIL" if is_already_sent else "GENERATE LINK & OPEN GMAIL"

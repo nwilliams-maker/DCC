@@ -5070,11 +5070,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         ic_location_tmp = f"{cluster['center'][0]},{cluster['center'][1]}"
 
         # ── CONTRACTOR ──────────────────────────────────────────────────
-        st.markdown(f"""<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
-            <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Contractor</span>
-            <span style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">{cluster['stops']} Stops / {len(cluster['data'])} Tasks</span>
-        </div>""", unsafe_allow_html=True)
-
         if ic_opts:
             selected_label = st.selectbox("Contractor", list(ic_opts.keys()), key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
             ic = ic_opts[selected_label]
@@ -5103,7 +5098,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             is_unlocked = st.checkbox("Authorize Premium Rate / Distance", key=f"lock_{pod_name}_{cluster_hash}")
 
         # ── INPUTS ──────────────────────────────────────────────────────
-        st.markdown("<div style='border-top:1px solid #f1f5f9; margin:8px 0 6px 0;'></div>", unsafe_allow_html=True)
         _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
         with _inp_a:
             # Security audit M29 - cap comp so a fat-fingered value cannot
@@ -5130,22 +5124,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         _t_display = t_str if t_str and t_str not in ("0h 0m", "N/A") else "—"
         _mi_display = f"{mi} mi" if mi and mi > 0 else "—"
 
-        st.markdown(f"""
-<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:8px;">
-    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div>
-            <div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div>
-            <div style="font-size:20px; font-weight:900; color:{status_color};">${final_pay:,.2f}</div>
-            <div style="font-size:10px; color:#94a3b8; margin-top:1px;">${final_rate}/stop</div>
-        </div>
-        <div style="text-align:right;">
-            <div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Drive Time</div>
-            <div style="font-size:20px; font-weight:900; color:#0f172a;">{_t_display}</div>
-            <div style="font-size:10px; color:#94a3b8; margin-top:1px;">Round Trip: {_mi_display}</div>
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:11px; color:#64748b; margin:4px 0 8px 0;'>"
+            f"<b style='color:{status_color}; font-size:13px;'>${final_pay:,.2f}</b> total"
+            f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;${final_rate}/stop"
+            f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_t_display} drive"
+            f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_mi_display} round trip"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         # ── ROUTE STOPS ─────────────────────────────────────────────────────
         hist = st.session_state.get(f"history_{cluster_hash}", [])
@@ -5247,7 +5234,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 f"</summary>{camp_block}</details>"
             )
 
-        st.markdown(f"{VENUE_SECTION_CSS}<div style='background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:8px;'><div style='background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:6px 12px;'><span style='font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;'>Route Stops</span></div><div style='padding:2px 8px 4px 8px;'>{''.join(_dispatch_rows)}</div></div>", unsafe_allow_html=True)
+        st.markdown(f"{VENUE_SECTION_CSS}<div style='font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;margin:6px 0 3px 0;'>Route Stops &nbsp;&middot;&nbsp; {len(_dispatch_rows)}</div><div style='padding:0 2px;'>{''.join(_dispatch_rows)}</div>", unsafe_allow_html=True)
 
         # 🔗 BUNDLE ROUTES — Apr 27 2026 (preview-driven).
         # Find OTHER unsent clusters in this pod within 50mi and offer them as a
@@ -5588,11 +5575,20 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         email_body_content = st.text_area("Email Content Preview", value=sig_preview, height=120, key=f"txt_area_{pod_name}_{current_data_fingerprint}_{cluster_hash}", disabled=not is_unlocked)
 
         # --- HIGH-SPEED DISPATCH BUTTON ---
-        btn_label = "✉️ RESEND LINK & OPEN GMAIL" if is_already_sent else "🚀 GENERATE LINK & OPEN GMAIL"
+        btn_label = "RESEND LINK & OPEN GMAIL" if is_already_sent else "GENERATE LINK & OPEN GMAIL"
         if is_fn:
             st.caption("📋 Email dispatch disabled — route is assigned to Field Nation.")
 
-        if st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None)):
+        # Generate Link button + FN checkbox paired into one row (May 23 2026).
+        _disp_c1, _disp_c2 = st.columns([1.8, 1], vertical_alignment="center")
+        with _disp_c1:
+            _gen_clicked = st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None))
+        with _disp_c2:
+            if route_state != "email_sent":
+                fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
+            else:
+                fn_checked = is_fn
+        if _gen_clicked:
             # 🛡️ STEP 1: FAST COLLISION CHECK — only block active sent routes (not revoked/declined)
             local_sent_db = st.session_state.get('sent_db', {})
             _active_statuses = ('sent',)
@@ -5781,9 +5777,10 @@ text-decoration:none;">📨 Default Mail</a>
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 
     if route_state != "email_sent":
-        # 🌟 UNIQUE KEY
-        fn_checked = st.checkbox("🌐 Assign to Field Nation", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
-        
+        # Checkbox is rendered up top (paired with Generate Link) for non-FN
+        # routes; FN routes render it here so un-check = revoke still works.
+        if is_fn:
+            fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
         if fn_checked and not is_fn:
             # 🌟 INSTANT UI UPDATE — Sheet write fires in background
             home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
@@ -7763,6 +7760,20 @@ def run_pod_tab(pod_name):
 
     with col_left:
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_PURPLE}; text-align: center;'>🚀 Dispatch</div>", unsafe_allow_html=True)
+        # Slim the per-route Generate Link button (May 23 2026) -- scoped to
+        # its gbtn_ key so only the dispatch button is affected.
+        st.markdown(
+            """
+            <style>
+            div[class*="st-key-gbtn_"] button {
+                min-height: 2.1rem !important;
+                padding-top: 0.2rem !important;
+                padding-bottom: 0.2rem !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
 
         with t_ready:

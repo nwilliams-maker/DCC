@@ -98,7 +98,29 @@ def _paginate_panel(items, page_key, per_page=20):
             cur = 0
         if cur > n_pages - 1:
             cur = n_pages - 1
-        _pc1, _pc2, _pc3 = st.columns([1, 2, 1])
+        st.markdown(
+            """
+            <style>
+            div[class*="st-key-_pg"] button {
+                background: #faf9fd !important;
+                border: 1px solid #d9d4ec !important;
+                border-radius: 8px !important;
+                box-shadow: none !important;
+                min-height: 2rem !important;
+                height: 2rem !important;
+                padding: 0.1rem 0.4rem !important;
+            }
+            div[class*="st-key-_pg"] button p {
+                font-size: 0.78rem !important;
+                font-weight: 500 !important;
+                color: #7a72a8 !important;
+            }
+            div[class*="st-key-_pg"] button:disabled { opacity: 0.4 !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        _spl, _pc1, _pc2, _pc3, _spr = st.columns([1, 1.3, 3, 1.3, 1])
         with _pc1:
             if st.button("‹ Prev", key=f"_pgprev_{page_key}",
                          disabled=(cur <= 0), use_container_width=True):
@@ -107,7 +129,10 @@ def _paginate_panel(items, page_key, per_page=20):
         with _pc2:
             _start = cur * per_page
             _end = min(total, _start + per_page)
-            st.caption(f"Showing {_start + 1}-{_end} of {total} · page {cur + 1}/{n_pages}")
+            st.markdown(
+                f"<div style='text-align:center; font-size:0.74rem; color:#94a3b8; padding-top:0.5rem; white-space:nowrap;'>{_start + 1}-{_end} of {total} &middot; page {cur + 1}/{n_pages}</div>",
+                unsafe_allow_html=True,
+            )
         with _pc3:
             if st.button("Next ›", key=f"_pgnext_{page_key}",
                          disabled=(cur >= n_pages - 1), use_container_width=True):

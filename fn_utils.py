@@ -206,15 +206,25 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
     cluster so the dispatcher can sort/group all rows belonging to one route in the
     final spreadsheet. Single-cluster generate_fn_upload always passes 1."""
     stop_task_map: dict = {}
+    _seen_keys: dict = {}
     for t in cluster.get('data', []):
         addr = t.get('full', '')
         if not addr:
             continue
         if addr not in stop_task_map:
             stop_task_map[addr] = []
-        loc = t.get('location_in_venue', '').strip()
-        existing = [x.get('location_in_venue', '') for x in stop_task_map[addr]]
-        if loc not in existing:
+            _seen_keys[addr] = set()
+        # Dedupe by full customer identity (client + task type + location),
+        # not location alone -- multiple customers at one address commonly
+        # share a blank location_in_venue, which the old key collapsed into
+        # a single Customer Name slot. (May 30 2026 -- Nick.)
+        _ckey = (
+            str(t.get('client_company', '') or '').strip().lower(),
+            str(t.get('task_type', '') or '').strip().lower(),
+            str(t.get('location_in_venue', '') or '').strip().lower(),
+        )
+        if _ckey not in _seen_keys[addr]:
+            _seen_keys[addr].add(_ckey)
             stop_task_map[addr].append(t)
     # Bundle column rule: only fill the Bundle # when this cluster has 2+
     # venue locations. Single-venue routes leave Bundle blank.
@@ -394,9 +404,21 @@ def generate_combined_fn_upload(clusters: list):
             addr_original.setdefault(key, addr)
             addr_city_state.setdefault(key, (c_city, c_state))
             addr_bundle.setdefault(key, _bundle_idx)
-            loc_in_venue = (t.get('location_in_venue', '') or '').strip()
-            existing_locs = [(x.get('location_in_venue', '') or '').strip() for x in bucket]
-            if loc_in_venue not in existing_locs:
+            # Dedupe by full customer identity (client + task type + location),
+            # not location alone. (May 30 2026 -- Nick -- see _fn_stop_rows.)
+            _ckey = (
+                str(t.get('client_company', '') or '').strip().lower(),
+                str(t.get('task_type', '') or '').strip().lower(),
+                str(t.get('location_in_venue', '') or '').strip().lower(),
+            )
+            _existing_keys = {
+                (
+                    str(x.get('client_company', '') or '').strip().lower(),
+                    str(x.get('task_type', '') or '').strip().lower(),
+                    str(x.get('location_in_venue', '') or '').strip().lower(),
+                ) for x in bucket
+            }
+            if _ckey not in _existing_keys:
                 bucket.append(t)
 
     if not addr_tasks:

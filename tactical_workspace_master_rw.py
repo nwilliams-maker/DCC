@@ -264,7 +264,7 @@ def _fetch_onfleet_open_tasks_cached():
     # 🚫 Excluded teams — never include tasks in these team pools in any pod's
     # Ready/Flagged. Match is case-insensitive substring on team name.
     # Add more substrings here as Nick identifies more teams to exclude.
-    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team']
+    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team', 'hold']  # 'hold' -> any team with HOLD in its name (May 30 2026, Nick)
     excluded_team_ids = [t['id'] for t in teams_res if any(ex in str(t.get('name', '')).lower() for ex in _EXCLUDED_TEAM_SUBSTRINGS)]
 
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).

@@ -7397,8 +7397,12 @@ def run_pod_tab(pod_name):
                         _acc_is_fresh = _acc_age < 180  # 3-min propagation grace
                     except Exception:
                         _acc_is_fresh = False
-                if not _acc_is_fresh:
-                    _reassigned_back = True
+                # if not _acc_is_fresh: _reassigned_back = True
+                # RETURN-TO-DISPATCH disabled (May 30 2026 - Nick): the cached
+                # clusters_{pod} stayed stale after acceptance, so the grace
+                # would expire and bounce accepted routes back into Ready. If a
+                # route truly needs to go back to Dispatch, the dispatcher uses
+                # the re-route button (explicit, intentional).
             if _reassigned_back:
                 c['status'] = 'Ready'
                 ready.append(c)

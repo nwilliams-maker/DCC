@@ -264,7 +264,7 @@ def _fetch_onfleet_open_tasks_cached():
     # 🚫 Excluded teams — never include tasks in these team pools in any pod's
     # Ready/Flagged. Match is case-insensitive substring on team name.
     # Add more substrings here as Nick identifies more teams to exclude.
-    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team', 'hold']  # 'hold' -> any team with HOLD in its name (May 30 2026, Nick)
+    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team']
     excluded_team_ids = [t['id'] for t in teams_res if any(ex in str(t.get('name', '')).lower() for ex in _EXCLUDED_TEAM_SUBSTRINGS)]
 
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
@@ -342,6 +342,39 @@ def _fetch_onfleet_open_tasks_cached():
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
 
     unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
+    # ROUTE-PLAN EXCLUSION (May 30 2026, Nick): any OnFleet route plan whose
+    # name contains 'hold' or 'pause' is treated as a parking lot -- tasks
+    # inside it never enter the dispatchable pool. Case-insensitive substring.
+    # Filtering at this boundary so every downstream consumer inherits the
+    # pre-filtered list with no per-loop change.
+    _EXCLUDED_PLAN_SUBSTRINGS = ['hold', 'pause']
+    _excluded_plan_ids = set()
+    try:
+        _plans_raw = requests.get(
+            f"https://onfleet.com/api/v2/routePlans?from={time_window}",
+            headers=headers, timeout=15,
+        ).json()
+        if isinstance(_plans_raw, dict):
+            _plans_list = _plans_raw.get('routePlans') or _plans_raw.get('plans') or _plans_raw.get('data') or []
+        elif isinstance(_plans_raw, list):
+            _plans_list = _plans_raw
+        else:
+            _plans_list = []
+        for _p in _plans_list:
+            if not isinstance(_p, dict):
+                continue
+            _pname = str(_p.get('name', '')).lower()
+            if any(_ex in _pname for _ex in _EXCLUDED_PLAN_SUBSTRINGS):
+                _pid = _p.get('id') or _p.get('_id')
+                if _pid:
+                    _excluded_plan_ids.add(_pid)
+    except Exception as _rp_e:
+        _log_err("_fetch_onfleet_open_tasks_cached/routePlans", _rp_e)
+    if _excluded_plan_ids:
+        unique_tasks = [
+            t for t in unique_tasks
+            if (t.get('routePlan') or t.get('routePlanId') or '') not in _excluded_plan_ids
+        ]
     return {
         'tasks': unique_tasks,
         'target_team_ids': target_team_ids,

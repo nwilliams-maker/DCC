@@ -2722,7 +2722,7 @@ def _fn_ghost_to_cluster(g):
                     'id':              id_queue.pop(0),
                     'full':            addr,
                     'state':           _state,
-                    'zip':             _zip,
+                    'zip':             (str(sd.get('zip','') or '').strip() or _zip),
                     'venue_name':      venue,
                     'venue_id':        _venue_id,
                     'kiosk_id':        _kiosk_id,
@@ -2793,7 +2793,7 @@ def _fn_ghost_to_cluster(g):
             'id':              id_queue.pop(0),
             'full':            _addr,
             'state':           str(g.get('state', '') or '').strip().upper()[:2],
-            'zip':             '',
+            'zip':             str(_sd.get('zip','') or '').strip(),
             'venue_name':      _sd.get('venue', '') or '',
             'venue_id':        str(_sd.get('venueId', '') or '').strip(),
             'kiosk_id':        str(_sd.get('kioskId', '') or '').strip(),
@@ -5754,6 +5754,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
                         "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
                         "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
+                        "zip": next((str(t.get("zip","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("zip","")).strip()), ""),
                         "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
@@ -5820,6 +5821,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # an app rerun here is expected (it's a user action, not an
                 # automatic-poll-triggered rerun).
                 st.rerun(scope="app")
+            else:
+                # Surface any other GAS response so silent failures (auth gate
+                # returning {"error": "Unauthorized"} as HTTP 200, etc.) become
+                # visible instead of looking like a no-op. (May 30 2026 - Nick.)
+                _err_msg = (_dispatch_result.get("error") if isinstance(_dispatch_result, dict) else None) or "Unknown response from Google Apps Script (no success flag returned)."
+                st.error(f"❌ Save failed: {_err_msg}")
 
     # 📨 PERSISTENT DEFAULT MAIL BUTTON
     # Renders below the GENERATE button whenever the route is in email_sent state
@@ -5923,6 +5930,7 @@ text-decoration:none;">📨 Default Mail</a>
                     "customerType": next((str(t.get("customer_type","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("customer_type","")).strip()), ""),
                     "boostedStandard": next((str(t.get("boosted_standard","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("boosted_standard","")).strip()), ""),
                     "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
+                    "zip": next((str(t.get("zip","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("zip","")).strip()), ""),
                     "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                 } for addr, metrics in stop_metrics.items()]),
             }

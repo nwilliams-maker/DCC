@@ -2954,6 +2954,22 @@ def fetch_sync_status(since: int = 0):
         return (-1, [])
 
 
+def _csv_with_retry(url, attempts=3):
+    """pd.read_csv with brief linear-backoff retries. Google Sheets CSV export
+    occasionally returns a transient error when several tabs are fetched
+    back-to-back; a single miss used to surface a yellow "Could not load the
+    \'<tab>\' route tab" banner until the user manually refreshed. Three
+    attempts with 0.6s / 1.2s / 1.8s gaps clears nearly all of those without
+    visibly slowing the cache miss. (Jun 3 2026 -- Nick.)"""
+    _last = None
+    for _i in range(attempts):
+        try:
+            return pd.read_csv(url)
+        except Exception as _e:
+            _last = _e
+            time.sleep(0.6 * (_i + 1))
+    raise _last
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_fetch_sent_records_from_sheet():
     """
@@ -3001,7 +3017,7 @@ def _cached_fetch_sent_records_from_sheet():
         for gid, status_label in sheets_to_fetch:
             try:
                 # Ensure gid is cast to string just in case it's an integer
-                df = pd.read_csv(base_url + str(gid))
+                df = _csv_with_retry(base_url + str(gid))
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 
                 if 'json payload' in df.columns:
@@ -3186,7 +3202,7 @@ def _cached_fetch_sent_records_from_sheet():
         # still NEVER read into clustering — only into history_db.
         _archived_wos = set()
         try:
-            _archive_df = pd.read_csv(base_url + str(ARCHIVE_GID))
+            _archive_df = _csv_with_retry(base_url + str(ARCHIVE_GID))
             _archive_df.columns = [str(c).strip().lower() for c in _archive_df.columns]
             if 'json payload' in _archive_df.columns:
                 for _, _arow in _archive_df.iterrows():

@@ -1904,10 +1904,24 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         try:
             _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=15)
             if _ar.status_code == 200:
-                _archive_ok = True
-                break
-            _log_err("background_sheet_move/archive",
-                     f"HTTP {_ar.status_code} on attempt {_attempt + 1}")
+                # GAS always returns HTTP 200 even on rejections — parse the body
+                # to confirm it actually archived. The auth gate returns
+                # {"error":"Unauthorized"} on a wrong/missing DCC_SHARED_SECRET;
+                # the old status-only check treated that as success, so the sheet
+                # row never moved and the route reverted on next refresh. (Jun 3 2026 - Nick.)
+                try:
+                    _body = _ar.json()
+                except Exception:
+                    _body = None
+                if isinstance(_body, dict) and _body.get("error"):
+                    _log_err("background_sheet_move/archive",
+                             f"GAS error on attempt {_attempt + 1}: {_body.get('error')}")
+                else:
+                    _archive_ok = True
+                    break
+            else:
+                _log_err("background_sheet_move/archive",
+                         f"HTTP {_ar.status_code} on attempt {_attempt + 1}")
         except Exception as e:
             _log_err("background_sheet_move/archive",
                      f"attempt {_attempt + 1}: {type(e).__name__}: {e}")

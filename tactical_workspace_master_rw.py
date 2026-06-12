@@ -347,8 +347,11 @@ def _fetch_onfleet_open_tasks_cached():
     # inside it never enter the dispatchable pool. Case-insensitive substring.
     # Filtering at this boundary so every downstream consumer inherits the
     # pre-filtered list with no per-loop change.
-    _EXCLUDED_PLAN_SUBSTRINGS = ['hold', 'pause']
+    # Match ONLY when 'hold' or 'pause' appears as its own word (not as a substring
+    # of innocuous names like 'Household' or 'placeholder'). Word boundary regex.
+    _EXCLUDED_PLAN_REGEX = re.compile(r'(?:^|[^a-z])(hold|pause)(?:[^a-z]|$)', re.IGNORECASE)
     _excluded_plan_ids = set()
+    _excluded_plan_names = []
     try:
         _plans_raw = requests.get(
             f"https://onfleet.com/api/v2/routePlans?from={time_window}",
@@ -363,18 +366,31 @@ def _fetch_onfleet_open_tasks_cached():
         for _p in _plans_list:
             if not isinstance(_p, dict):
                 continue
-            _pname = str(_p.get('name', '')).lower()
-            if any(_ex in _pname for _ex in _EXCLUDED_PLAN_SUBSTRINGS):
+            _pname_raw = str(_p.get('name', ''))
+            if _EXCLUDED_PLAN_REGEX.search(_pname_raw):
                 _pid = _p.get('id') or _p.get('_id')
                 if _pid:
                     _excluded_plan_ids.add(_pid)
+                    _excluded_plan_names.append(_pname_raw)
     except Exception as _rp_e:
         _log_err("_fetch_onfleet_open_tasks_cached/routePlans", _rp_e)
+    _pre_filter_count = len(unique_tasks)
     if _excluded_plan_ids:
         unique_tasks = [
             t for t in unique_tasks
             if (t.get('routePlan') or t.get('routePlanId') or '') not in _excluded_plan_ids
         ]
+    _post_filter_count = len(unique_tasks)
+    # Stash debug info so a dispatcher (or ?debug=1) can see what got eaten.
+    try:
+        st.session_state['_hold_filter_debug'] = {
+            'excluded_plans': _excluded_plan_names,
+            'tasks_before': _pre_filter_count,
+            'tasks_after': _post_filter_count,
+            'tasks_removed': _pre_filter_count - _post_filter_count,
+        }
+    except Exception:
+        pass
     return {
         'tasks': unique_tasks,
         'target_team_ids': target_team_ids,
@@ -3174,6 +3190,26 @@ def _cached_fetch_sent_records_from_sheet():
                                     except:
                                         stop_data = []
 
+                                    # 🛠️ KIOSK COUNT — saveRoute/saveToFieldNation now stamp 'kCnt'
+                                    # into the payload, but older sheet rows predate that. Fallback:
+                                    # walk stop_data and count any task whose task_type contains
+                                    # 'install' (matches "Kiosk Install" + variants). Without this the
+                                    # Accepted/Sent/Finalized ghost cards have no Kiosk icon and the
+                                    # Shopify "Order Kiosks" button never renders.
+                                    _k_cnt_payload = p.get('kCnt', None)
+                                    if _k_cnt_payload in (None, 0):
+                                        _k_fallback = 0
+                                        for _sd in (stop_data or []):
+                                            try:
+                                                for _tk in (_sd.get('tasks', []) or []):
+                                                    _tt = str(_tk.get('task_type', '') or _tk.get('taskType', '')).lower()
+                                                    if 'install' in _tt:
+                                                        _k_fallback += 1
+                                            except Exception:
+                                                continue
+                                        _k_cnt_final = _k_fallback
+                                    else:
+                                        _k_cnt_final = int(_k_cnt_payload or 0)
                                     ghost_routes[pod_name].append({
                                         "contractor_name": c_name,
                                         "route_ts": ts_display,
@@ -3189,6 +3225,7 @@ def _cached_fetch_sent_records_from_sheet():
                                         "locs": p.get('locs', ''),
                                         "stop_data": stop_data,
                                         "task_ids": [str(t).strip() for t in tids if str(t).strip()],
+                                        "kCnt": _k_cnt_final,
                                     })
                         except Exception as _row_e:
                             # Security audit M6 - log malformed-row parse
@@ -7357,7 +7394,21 @@ def run_pod_tab(pod_name):
         cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
         live_hashes.add(cluster_hash) # Save hash
         
-        sheet_match = sent_db.get(next((tid for tid in task_ids if tid in sent_db), None))
+        # 🔗 BUNDLE-AWARE sheet_match (Jun 12 2026 — Nick: bundling Ready + previously-sent
+        # route was dumping merged cluster into Sent). Old code matched on ANY task being
+        # in sent_db, so a single orphan sent row (from a failed archive on a re-route)
+        # would pull the entire bundled Ready cluster into Sent. Require coherent
+        # membership: ALL cluster tasks must be in sent_db AND map to the same WO.
+        # Otherwise the cluster has been bundled with fresh Ready tasks and must stay Ready.
+        _candidate_ids = [tid for tid in task_ids if tid in sent_db]
+        if _candidate_ids and len(_candidate_ids) == len(task_ids):
+            _wo_set = {str(sent_db[tid].get('wo', '')).strip() for tid in _candidate_ids}
+            if len(_wo_set) <= 1:
+                sheet_match = sent_db[_candidate_ids[0]]
+            else:
+                sheet_match = None
+        else:
+            sheet_match = None
         route_state = st.session_state.get(f"route_state_{cluster_hash}")
         local_ts = st.session_state.get(f"sent_ts_{cluster_hash}", "")
         local_contractor = st.session_state.get(f"contractor_{cluster_hash}", "Unknown")

@@ -2165,13 +2165,19 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         except Exception as _bsm_e:
             _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 
-    try:
-        threading.Thread(target=_bg_reconcile, daemon=True).start()
-    except Exception as _t_e:
-        # If the thread can't start, fall back to inline so the sheet + Onfleet
-        # still reconcile (slower, but correct — never leaves a route un-archived).
-        _log_err("move_to_dispatch/bg-thread-start", _t_e)
-        _bg_reconcile()
+    # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):
+    # The daemon-thread version fails SILENTLY under Streamlit on Railway. The
+    # thread .start()s without error (so the except-fallback never fires), but
+    # the call site fires st.rerun() the instant move_to_dispatch returns —
+    # RerunException tears down the script-run context and the daemon thread is
+    # orphaned mid-PUT. Net effect: the reverted_ flag moves the route in the UI
+    # (looks done) but Onfleet never gets the unassign — Accepted-route tasks
+    # stay assigned to the contractor. This exact failure was documented and
+    # fixed once before ("SYNCHRONOUS parallel PUTs on the main thread") and got
+    # re-introduced. Run inline: the reverted_ flag set ABOVE already moved the
+    # route in the UI so the click still feels responsive — this just makes the
+    # Onfleet + sheet reconcile actually happen before the rerun.
+    _bg_reconcile()
 
     # Toast — completion-aware variant only when check_completed=True.
     if check_completed:
@@ -5372,7 +5378,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         _current_route_state = st.session_state.get(f"route_state_{cluster_hash}")
         if (not is_sent and not is_declined
                 and _current_route_state not in _bundle_blocked_states):
-            BUNDLE_RADIUS_MI = 50
+            # 🔗 Bundle radius cap REMOVED (May 2026 — "ability to bundle any
+            # route"): previously hard-capped to 50mi which hid every farther
+            # candidate. Distance is already in each option's label (sorted
+            # closest-first below), so the dispatcher decides whether the bundle
+            # makes sense rather than the code deciding for them.
             _pod_clusters_for_bundle = st.session_state.get(f"clusters_{pod_name}", [])
             _nearby_bundles = []
             for _other in _pod_clusters_for_bundle:
@@ -5400,8 +5410,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     continue
                 _o_dist = haversine(cluster['center'][0], cluster['center'][1],
                                      _other['center'][0], _other['center'][1])
-                if _o_dist > BUNDLE_RADIUS_MI:
-                    continue
                 _nearby_bundles.append((_o_dist, _o_hash, _other))
             _nearby_bundles.sort(key=lambda x: x[0])
 
@@ -5428,7 +5436,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _banner_color = "#1e40af" if not _in_preview else "#b45309"
                 _banner_bg    = "#eff6ff" if not _in_preview else "#fffbeb"
                 _banner_border= "#3b82f6" if not _in_preview else "#f59e0b"
-                _banner_text  = (f"🔗 Bundle Routes ({len(_nearby_bundles)} nearby) — select to preview"
+                _banner_text  = (f"🔗 Bundle Routes ({len(_nearby_bundles)} available, sorted by distance) — select to preview"
                                  if not _in_preview else
                                  f"🔍 PREVIEW — {len(_preview_hashes)} route(s) merged · {_preview_added_count} tasks added · click Confirm to commit, deselect to revert")
                 st.markdown(

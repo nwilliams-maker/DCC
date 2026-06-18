@@ -7448,15 +7448,33 @@ def run_pod_tab(pod_name):
             c['comp'] = local_comp
             c['due'] = local_due
         
-        # --- 🚦 THE NEW DIGITAL FLOW ---
-        if c.get('is_digital') and not sheet_match and route_state != "email_sent" and not is_reverted:
-            # 🛡️ DEDUP guard — same logic as the Ready/Review fallback below.
-            # `not sheet_match` here means no task is in sent_db, but ghost_db
-            # might still have these tasks (post-dispatch timing window).
-            if any(tid in _awaiting_tids for tid in task_ids):
+        # --- 🚦 DIGITAL OWNERSHIP RULE (Jun 18 2026 — Nick) ---
+        # Digital tasks MUST live in the per-pod Digital tab. They can NEVER
+        # appear in Ready/Flagged, regardless of:
+        #   - first pull (no sheet_match, no route_state)
+        #   - re-route (is_reverted=True)
+        #   - zombie sheet rows (sheet_match present but route was never sent)
+        # The ONLY exceptions are when the digital route is *actively* in the
+        # Awaiting Confirmation column: sent, accepted, declined, finalized,
+        # or field_nation. is_reverted bypasses all Awaiting checks because
+        # the dispatcher explicitly yanked the route back.
+        if c.get('is_digital'):
+            _digital_in_awaiting = False
+            if not is_reverted:
+                if route_state == "email_sent":
+                    _digital_in_awaiting = True
+                elif sheet_match:
+                    _sm_status = str(sheet_match.get('status', '')).lower()
+                    if _sm_status in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
+                        _digital_in_awaiting = True
+            if not _digital_in_awaiting:
+                # Dedup guard — only when not reverted (revoke WANTS this route
+                # to leave Awaiting and reappear in Digital).
+                if not is_reverted and any(tid in _awaiting_tids for tid in task_ids):
+                    continue
+                digital_ready.append(c)
                 continue
-            digital_ready.append(c)
-            continue
+            # else: fall through to the Awaiting bucket router below
 
         # --- PRIORITY: LIVE DATABASE OVERRIDES LOCAL STATE ---
         # 🌟 THE FIX: If we just clicked Finalize, override the Google Sheet instantly!

@@ -460,14 +460,37 @@ st.markdown("""
 import uuid as _uuid
 import streamlit.components.v1 as _components
 import os as _os
-# Prefer Railway-scoped deploy ID so all workers share the same INSTANCE_ID
-# per deploy. Without this, each worker has its own uuid → false-positive
-# 'app updated' banner whenever a new tab lands on a different worker.
-INSTANCE_ID = (
-    _os.environ.get('RAILWAY_DEPLOYMENT_ID')
-    or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
-    or str(_uuid.uuid4())
-)
+# 🔑 DETERMINISTIC INSTANCE_ID (Jun 18 2026 — Nick: phantom "App was updated"
+# banners firing without any deploy).
+# Old fallback chain: RAILWAY_DEPLOYMENT_ID → RAILWAY_GIT_COMMIT_SHA → uuid4().
+# When neither Railway env var is set (varies by plan/build mode), the uuid4
+# fallback regenerates on EVERY container restart — OOM, idle scale-to-zero,
+# healthcheck blip, all looked like a fresh deploy to the watcher → banner spam.
+# New fallback: an MD5 of the running script's contents. That's stable across
+# restarts of the same code, only changes when the code actually changes — so
+# the banner now fires ONLY on a real deploy, never on a transparent restart.
+def _compute_instance_id():
+    _rid = _os.environ.get('RAILWAY_DEPLOYMENT_ID') or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+    if _rid:
+        return _rid
+    try:
+        import hashlib as _hashlib
+        _self_path = _os.path.abspath(__file__)
+        with open(_self_path, 'rb') as _fh:
+            return _hashlib.md5(_fh.read()).hexdigest()
+    except Exception:
+        # Last-resort fallback: still deterministic across restarts of the same
+        # container — uses pid-less data so it doesn't churn on restart. We hash
+        # the working directory + python version so dev/prod don't collide.
+        try:
+            import sys as _sys, hashlib as _hashlib
+            return _hashlib.md5(
+                (_os.getcwd() + '|' + _sys.version).encode()
+            ).hexdigest()
+        except Exception:
+            return 'dcc-instance-fallback'
+
+INSTANCE_ID = _compute_instance_id()
 
 # /healthz endpoint — visit with ?healthz=1 to get a tiny status payload.
 # Useful for external uptime monitors (Railway, UptimeRobot, etc.) and for
@@ -10220,7 +10243,7 @@ with tabs[6]:
                                 st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gdfin_venues}</div>""", unsafe_allow_html=True)
                         with btn_col:
                             if not _is_dispatch_associate():
-                                with st.popover("↩️"):
+                                witAh st.popover("↩️"):
                                     st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
                                     if st.button("🚨 Yes, Remove", key=f"rev_ghost_d_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
                                         move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": "Global_Digital", "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})

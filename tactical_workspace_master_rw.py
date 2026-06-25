@@ -460,37 +460,14 @@ st.markdown("""
 import uuid as _uuid
 import streamlit.components.v1 as _components
 import os as _os
-# 🔑 DETERMINISTIC INSTANCE_ID (Jun 18 2026 — Nick: phantom "App was updated"
-# banners firing without any deploy).
-# Old fallback chain: RAILWAY_DEPLOYMENT_ID → RAILWAY_GIT_COMMIT_SHA → uuid4().
-# When neither Railway env var is set (varies by plan/build mode), the uuid4
-# fallback regenerates on EVERY container restart — OOM, idle scale-to-zero,
-# healthcheck blip, all looked like a fresh deploy to the watcher → banner spam.
-# New fallback: an MD5 of the running script's contents. That's stable across
-# restarts of the same code, only changes when the code actually changes — so
-# the banner now fires ONLY on a real deploy, never on a transparent restart.
-def _compute_instance_id():
-    _rid = _os.environ.get('RAILWAY_DEPLOYMENT_ID') or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
-    if _rid:
-        return _rid
-    try:
-        import hashlib as _hashlib
-        _self_path = _os.path.abspath(__file__)
-        with open(_self_path, 'rb') as _fh:
-            return _hashlib.md5(_fh.read()).hexdigest()
-    except Exception:
-        # Last-resort fallback: still deterministic across restarts of the same
-        # container — uses pid-less data so it doesn't churn on restart. We hash
-        # the working directory + python version so dev/prod don't collide.
-        try:
-            import sys as _sys, hashlib as _hashlib
-            return _hashlib.md5(
-                (_os.getcwd() + '|' + _sys.version).encode()
-            ).hexdigest()
-        except Exception:
-            return 'dcc-instance-fallback'
-
-INSTANCE_ID = _compute_instance_id()
+# Prefer Railway-scoped deploy ID so all workers share the same INSTANCE_ID
+# per deploy. Without this, each worker has its own uuid → false-positive
+# 'app updated' banner whenever a new tab lands on a different worker.
+INSTANCE_ID = (
+    _os.environ.get('RAILWAY_DEPLOYMENT_ID')
+    or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+    or str(_uuid.uuid4())
+)
 
 # /healthz endpoint — visit with ?healthz=1 to get a tiny status payload.
 # Useful for external uptime monitors (Railway, UptimeRobot, etc.) and for

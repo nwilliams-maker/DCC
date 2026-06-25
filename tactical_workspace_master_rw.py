@@ -460,14 +460,37 @@ st.markdown("""
 import uuid as _uuid
 import streamlit.components.v1 as _components
 import os as _os
-# Prefer Railway-scoped deploy ID so all workers share the same INSTANCE_ID
-# per deploy. Without this, each worker has its own uuid → false-positive
-# 'app updated' banner whenever a new tab lands on a different worker.
-INSTANCE_ID = (
-    _os.environ.get('RAILWAY_DEPLOYMENT_ID')
-    or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
-    or str(_uuid.uuid4())
-)
+# 🔑 DETERMINISTIC INSTANCE_ID (Jun 18 2026 — Nick: phantom "App was updated"
+# banners firing without any deploy).
+# Old fallback chain: RAILWAY_DEPLOYMENT_ID → RAILWAY_GIT_COMMIT_SHA → uuid4().
+# When neither Railway env var is set (varies by plan/build mode), the uuid4
+# fallback regenerates on EVERY container restart — OOM, idle scale-to-zero,
+# healthcheck blip, all looked like a fresh deploy to the watcher → banner spam.
+# New fallback: an MD5 of the running script's contents. That's stable across
+# restarts of the same code, only changes when the code actually changes — so
+# the banner now fires ONLY on a real deploy, never on a transparent restart.
+def _compute_instance_id():
+    _rid = _os.environ.get('RAILWAY_DEPLOYMENT_ID') or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+    if _rid:
+        return _rid
+    try:
+        import hashlib as _hashlib
+        _self_path = _os.path.abspath(__file__)
+        with open(_self_path, 'rb') as _fh:
+            return _hashlib.md5(_fh.read()).hexdigest()
+    except Exception:
+        # Last-resort fallback: still deterministic across restarts of the same
+        # container — uses pid-less data so it doesn't churn on restart. We hash
+        # the working directory + python version so dev/prod don't collide.
+        try:
+            import sys as _sys, hashlib as _hashlib
+            return _hashlib.md5(
+                (_os.getcwd() + '|' + _sys.version).encode()
+            ).hexdigest()
+        except Exception:
+            return 'dcc-instance-fallback'
+
+INSTANCE_ID = _compute_instance_id()
 
 # /healthz endpoint — visit with ?healthz=1 to get a tiny status payload.
 # Useful for external uptime monitors (Railway, UptimeRobot, etc.) and for
@@ -7402,21 +7425,32 @@ def run_pod_tab(pod_name):
         cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
         live_hashes.add(cluster_hash) # Save hash
         
-        # 🔗 BUNDLE-AWARE sheet_match (Jun 12 2026 — Nick: bundling Ready + previously-sent
-        # route was dumping merged cluster into Sent). Old code matched on ANY task being
-        # in sent_db, so a single orphan sent row (from a failed archive on a re-route)
-        # would pull the entire bundled Ready cluster into Sent. Require coherent
-        # membership: ALL cluster tasks must be in sent_db AND map to the same WO.
-        # Otherwise the cluster has been bundled with fresh Ready tasks and must stay Ready.
-        _candidate_ids = [tid for tid in task_ids if tid in sent_db]
-        if _candidate_ids and len(_candidate_ids) == len(task_ids):
-            _wo_set = {str(sent_db[tid].get('wo', '')).strip() for tid in _candidate_ids}
-            if len(_wo_set) <= 1:
-                sheet_match = sent_db[_candidate_ids[0]]
-            else:
-                sheet_match = None
-        else:
-            sheet_match = None
+        # 🔗 BUNDLE-AWARE sheet_match (Jun 12 2026, relaxed Jun 18 2026).
+        # Original problem: bundling Ready + previously-sent route dumped the merged
+        # cluster into Sent because any single orphan sheet row hijacked the routing.
+        # First fix required ALL cluster tasks be in sent_db with one WO — too strict.
+        # Live clusters legitimately pick up fresh OnFleet tasks (post-revoke returns,
+        # smart_sync merges) that aren't in sent_db yet; those got rejected and routes
+        # bounced back to Ready as if never dispatched. New rule:
+        #   - Walk the cluster; collect WOs of any tasks that ARE in sent_db.
+        #   - If we see >1 distinct WO → real multi-route bundle hijack → suppress match.
+        #   - Otherwise use the first sent_db row found. Single-WO matches go through,
+        #     even when only some of the cluster's tasks are in sent_db.
+        sheet_match = None
+        _first_match_row = None
+        _unique_wos = set()
+        for _tid in task_ids:
+            if _tid in sent_db:
+                _row = sent_db[_tid]
+                _wo = str(_row.get('wo', '')).strip()
+                if _wo:
+                    _unique_wos.add(_wo)
+                if _first_match_row is None:
+                    _first_match_row = _row
+        if _first_match_row and len(_unique_wos) <= 1:
+            sheet_match = _first_match_row
+        # If len(_unique_wos) >= 2 → multi-WO bundle, leave sheet_match=None so the
+        # merged cluster falls to Ready instead of inheriting any one row's status.
         route_state = st.session_state.get(f"route_state_{cluster_hash}")
         local_ts = st.session_state.get(f"sent_ts_{cluster_hash}", "")
         local_contractor = st.session_state.get(f"contractor_{cluster_hash}", "Unknown")
@@ -7448,25 +7482,27 @@ def run_pod_tab(pod_name):
             c['comp'] = local_comp
             c['due'] = local_due
         
-        # --- 🚦 DIGITAL OWNERSHIP RULE (Jun 18 2026 — Nick) ---
-        # Digital tasks MUST live in the per-pod Digital tab. They can NEVER
-        # appear in Ready/Flagged, regardless of:
-        #   - first pull (no sheet_match, no route_state)
-        #   - re-route (is_reverted=True)
-        #   - zombie sheet rows (sheet_match present but route was never sent)
-        # The ONLY exceptions are when the digital route is *actively* in the
-        # Awaiting Confirmation column: sent, accepted, declined, finalized,
-        # or field_nation. is_reverted bypasses all Awaiting checks because
-        # the dispatcher explicitly yanked the route back.
+        # --- 🚦 DIGITAL OWNERSHIP RULE (Jun 18 2026, refined for FN flow) ---
+        # Digital tasks live in the per-pod Digital tab UNLESS they're actively
+        # parked in the Awaiting Confirmation column (sent / accepted / declined /
+        # finalized / field_nation). Without this, revoked digital routes fall
+        # through to Ready/Flagged at line 7575 — Nick: "digital cannot go to
+        # ready/flagged". Subtleties:
+        #   - route_state == "email_sent" or "field_nation": instant-UI signal
+        #     immediately after Generate Link or "Assign to FN" click. Trust it
+        #     even if sheet_match is stale and is_reverted is set as a guard.
+        #   - sheet_match.status in any Awaiting state: persistent ownership.
+        #   - is_reverted + no route_state: an explicit revoke → must go back
+        #     to Digital (NOT Ready), so DO NOT honor stale sheet_match here.
         if c.get('is_digital'):
             _digital_in_awaiting = False
-            if not is_reverted:
-                if route_state == "email_sent":
+            if route_state in ("email_sent", "field_nation"):
+                # Local instant-UI flag wins, regardless of is_reverted/sheet_match.
+                _digital_in_awaiting = True
+            elif not is_reverted and sheet_match:
+                _sm_status = str(sheet_match.get('status', '')).lower()
+                if _sm_status in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
                     _digital_in_awaiting = True
-                elif sheet_match:
-                    _sm_status = str(sheet_match.get('status', '')).lower()
-                    if _sm_status in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
-                        _digital_in_awaiting = True
             if not _digital_in_awaiting:
                 # Dedup guard — only when not reverted (revoke WANTS this route
                 # to leave Awaiting and reappear in Digital).

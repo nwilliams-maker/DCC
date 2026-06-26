@@ -262,10 +262,22 @@ def _fetch_onfleet_open_tasks_cached():
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
     fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
     # 🚫 Excluded teams — never include tasks in these team pools in any pod's
-    # Ready/Flagged. Match is case-insensitive substring on team name.
-    # Add more substrings here as Nick identifies more teams to exclude.
+    # Ready/Flagged. Match is case-insensitive.
+    # _EXCLUDED_TEAM_SUBSTRINGS: literal substrings (full phrases).
+    # _EXCLUDED_TEAM_WORD_REGEX: word-boundary match on "test" (Jun 18 2026,
+    # Nick) — catches any team with "test" as its own word ("QA Test Team",
+    # "Test Pod") without false-positive on "Greatest", "Tested", etc.
     _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team']
-    excluded_team_ids = [t['id'] for t in teams_res if any(ex in str(t.get('name', '')).lower() for ex in _EXCLUDED_TEAM_SUBSTRINGS)]
+    _EXCLUDED_TEAM_WORD_REGEX = re.compile(r'(?:^|[^a-z])test(?:[^a-z]|$)', re.IGNORECASE)
+    def _is_excluded_team_name(_name):
+        _n = str(_name or '')
+        _nl = _n.lower()
+        if any(ex in _nl for ex in _EXCLUDED_TEAM_SUBSTRINGS):
+            return True
+        if _EXCLUDED_TEAM_WORD_REGEX.search(_n):
+            return True
+        return False
+    excluded_team_ids = [t['id'] for t in teams_res if _is_excluded_team_name(t.get('name', ''))]
 
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
     # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out

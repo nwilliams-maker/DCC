@@ -3646,19 +3646,98 @@ def get_gmaps(home, waypoints):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_worker_task_counts():
-    """Fetch current assigned task count per worker from Onfleet, keyed by phone. Cached 2 min."""
+    """Per-worker assigned-task count keyed by last-10 digits of phone. Cached 2 min.
+
+    Jun 18 2026 — Nick: 🔵N badge was 0 for every IC.
+    Old implementation depended on /workers?analytics=true returning a 'tasks'
+    array, which Onfleet has been inconsistent about. New strategy:
+      1. Try the legacy 'tasks' array on /workers?analytics=true (fast path).
+      2. Also accept 'taskCount' / 'numberOfTasks' / 'activeTasks' if present.
+      3. If everything resolves to zero, fall back to counting state=1+state=2
+         tasks from /tasks/all and grouping by worker id, then mapping back to
+         phone via the workers list. Heavier (2-3 extra HTTP calls) but it's the
+         only authoritative count when the analytics field is missing.
+    """
     try:
+        # ---------- Step 1: workers list (with analytics) ----------
         res = requests.get("https://onfleet.com/api/v2/workers?analytics=true", headers=headers, timeout=10)
         if res.status_code != 200:
-            _log_err("fetch_worker_task_counts", f"HTTP {res.status_code}")
+            _log_err("fetch_worker_task_counts/workers", f"HTTP {res.status_code}")
             return {}
-        workers = res.json()
+        workers = res.json() or []
+
         counts = {}
+        id_to_phone = {}
+        any_nonzero = False
         for w in workers:
-            phone = re.sub(r'\D', '', str(w.get('phone', '')))[-10:]
-            task_count = len(w.get('tasks', []))
-            if phone:
-                counts[phone] = task_count
+            _ph = re.sub(r'\D', '', str(w.get('phone', '')))[-10:]
+            if not _ph:
+                continue
+            if w.get('id'):
+                id_to_phone[w['id']] = _ph
+            # Try several shapes Onfleet has used over the years.
+            _tasks_field = w.get('tasks')
+            if isinstance(_tasks_field, list):
+                _cnt = len(_tasks_field)
+            elif isinstance(_tasks_field, int):
+                _cnt = _tasks_field
+            else:
+                _cnt = (
+                    w.get('taskCount')
+                    or w.get('numberOfTasks')
+                    or w.get('activeTasks')
+                    or (w.get('analytics') or {}).get('numberOfTasks')
+                    or 0
+                )
+                try:
+                    _cnt = int(_cnt)
+                except Exception:
+                    _cnt = 0
+            counts[_ph] = _cnt
+            if _cnt > 0:
+                any_nonzero = True
+
+        # ---------- Step 2: fast path success → return ----------
+        if any_nonzero:
+            return counts
+
+        # ---------- Step 3: fallback — count state=1 + state=2 tasks ----------
+        # Onfleet docs: state=1 (assigned), state=2 (active/in-progress).
+        # Bound the window to 30 days back to keep pagination short.
+        from time import time as _now
+        _since_ms = int((_now() - 30 * 86400) * 1000)
+        fallback_counts = {}
+        for _state in (1, 2):
+            _last_id = None
+            for _pg in range(50):  # 50-page cap × 100/page = 5000 tasks/state max
+                _url = f"https://onfleet.com/api/v2/tasks/all?state={_state}&from={_since_ms}"
+                if _last_id:
+                    _url += f"&lastId={_last_id}"
+                try:
+                    _tr = requests.get(_url, headers=headers, timeout=15)
+                except Exception as _e:
+                    _log_err("fetch_worker_task_counts/tasks-fetch", _e)
+                    break
+                if _tr.status_code != 200:
+                    _log_err("fetch_worker_task_counts/tasks", f"HTTP {_tr.status_code} state={_state}")
+                    break
+                _body = _tr.json()
+                _tasks = _body.get('tasks', []) if isinstance(_body, dict) else (_body or [])
+                for _t in _tasks:
+                    _wid = _t.get('worker')
+                    if not _wid:
+                        continue
+                    _ph = id_to_phone.get(_wid)
+                    if not _ph:
+                        continue
+                    fallback_counts[_ph] = fallback_counts.get(_ph, 0) + 1
+                _last_id = _body.get('lastId') if isinstance(_body, dict) else None
+                if not _last_id:
+                    break
+
+        # Merge fallback into counts (preserves phones with 0 from step 1 too).
+        for _ph, _cnt in fallback_counts.items():
+            counts[_ph] = _cnt
         return counts
     except Exception as e:
         _log_err("fetch_worker_task_counts", e)

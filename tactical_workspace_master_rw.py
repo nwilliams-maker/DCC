@@ -4882,6 +4882,83 @@ def group_and_sort_by_proximity(bucket):
         final_list.extend(sorted_st_cls)
     return final_list
 # 🌟 NEW HELPER: Groups Awaiting routes by Date Sent, unifying Live and Ghost routes
+def _merge_same_wo_ghosts(ghost_routes):
+    """Jun 18 2026 — Nick: bundled route showed as two separate cards in Sent
+    because saveRoute produced two sheet rows for the same WO. Merge ghosts
+    that share a WO + status into one display ghost so the dispatcher sees the
+    bundle they made, not the artifact of how it got written.
+
+    Merge rules:
+      - Group by (wo, status). Different statuses (sent vs accepted) stay
+        separate so we don't hide a transition.
+      - Combine task_ids, stops, tasks, pay. Sum pay across rows (each row's
+        comp came from one dispatch; if both were $60 the bundle is $120).
+      - Use earliest route_ts so sort order is stable and history makes sense.
+      - Keep first hash for popover/reroute identification — the revoke button
+        uses cluster_hash which the GAS archiveRoute accepts as a partial
+        match anyway.
+    """
+    if not ghost_routes:
+        return ghost_routes
+    by_key = {}
+    order = []
+    for g in ghost_routes:
+        _wo = str(g.get('wo', '') or '').strip()
+        _status = str(g.get('status', '') or '').strip().lower()
+        if not _wo:
+            # Routes without a WO can't be merged safely — keep as-is.
+            _key = ('__no_wo__', id(g))
+        else:
+            _key = (_wo, _status)
+        if _key in by_key:
+            _existing = by_key[_key]
+            # Combine task_ids (de-dup, preserve order)
+            _seen = set(str(t).strip() for t in _existing.get('task_ids', []))
+            for _t in g.get('task_ids', []) or []:
+                _t = str(_t).strip()
+                if _t and _t not in _seen:
+                    _existing.setdefault('task_ids', []).append(_t)
+                    _seen.add(_t)
+            # Sum scalar metrics
+            try:
+                _existing['stops'] = int(_existing.get('stops', 0)) + int(g.get('stops', 0) or 0)
+            except Exception:
+                pass
+            try:
+                _existing['tasks'] = int(_existing.get('tasks', 0)) + int(g.get('tasks', 0) or 0)
+            except Exception:
+                pass
+            try:
+                _existing['pay'] = float(_existing.get('pay', 0) or 0) + float(g.get('pay', 0) or 0)
+            except Exception:
+                pass
+            try:
+                _existing['kCnt'] = int(_existing.get('kCnt', 0) or 0) + int(g.get('kCnt', 0) or 0)
+            except Exception:
+                pass
+            # Combine locs strings (already pipe-delimited)
+            _e_locs = (_existing.get('locs', '') or '').strip()
+            _g_locs = (g.get('locs', '') or '').strip()
+            if _g_locs and _g_locs not in _e_locs:
+                _existing['locs'] = (_e_locs + ' | ' + _g_locs).strip(' |') if _e_locs else _g_locs
+            # Combine stop_data lists
+            _existing.setdefault('stop_data', []).extend(g.get('stop_data', []) or [])
+            # Keep earliest route_ts (sort field is route_ts; oldest wins so the
+            # bundle stays at its original date in the column).
+            _e_ts = str(_existing.get('route_ts', '') or '')
+            _g_ts = str(g.get('route_ts', '') or '')
+            if _g_ts and (not _e_ts or _g_ts < _e_ts):
+                _existing['route_ts'] = _g_ts
+            # Flag so the card can show a tiny "Bundled" badge if rendering supports it.
+            _existing['_merged_count'] = int(_existing.get('_merged_count', 1) or 1) + 1
+        else:
+            # Clone so we don't mutate the original dict
+            by_key[_key] = dict(g)
+            by_key[_key]['_merged_count'] = 1
+            order.append(_key)
+    return [by_key[k] for k in order]
+
+
 def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     """Combine live (in-progress) clusters with ghost (sheet-only) routes for
     display in Sent / Accepted / Finalized tabs. Resolves three cases:
@@ -4896,7 +4973,12 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
          state can't replay it. The live pieces will repopulate as a single
          live cluster again the next time the dispatcher re-bundles, or once
          the durable bundle history feature lands.
+
+    Jun 18 2026 — pre-pass merges same-WO ghost rows into one display ghost so a
+    bundle dispatcher made in Ready (that got written as two sheet rows for any
+    reason) stays presented as one card.
     """
+    ghost_routes = _merge_same_wo_ghosts(ghost_routes or [])
     unified = []
 
     # Build per-live-cluster task-ID sets so we can spot bundled ghosts whose

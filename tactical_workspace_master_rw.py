@@ -5211,7 +5211,17 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     cert_val = str(r.get('digital certified', '')).strip().upper()
                     cert_icon = " 🔌" if cert_val in ['YES', 'Y', 'TRUE', '1', '1.0'] else ""
                     ic_name = r.get('name', 'Unknown')
-                    _phone_raw = str(r.get(_phone_col, '')) if _phone_col else ''
+                    _phone_raw = str(r.get(_phone_col, '')).strip() if _phone_col else ''
+                    # Strip pandas float artifact: numeric phone columns load as
+                    # 18087220610.0 — the regex below kept the trailing 0 and
+                    # shifted the last 10 digits by one (Vance Nouchi: real
+                    # 8087220610 became 0872206100, never matched Onfleet).
+                    # int(float()) handles plain floats AND scientific notation.
+                    if _phone_raw and _phone_raw not in ('nan', 'None'):
+                        try:
+                            _phone_raw = str(int(float(_phone_raw)))
+                        except (ValueError, TypeError):
+                            pass
                     _ic_phone = re.sub(r'\D', '', _phone_raw)[-10:]
                     # Distinguish "fetcher returned no data at all" (empty dict)
                     # from "this worker genuinely has 0 active tasks" so the badge
@@ -9206,7 +9216,12 @@ if st.query_params.get("debug") == "1":
                         _matched = 0
                         _empty = 0
                         for _, _row in _ic_df.head(50).iterrows():
-                            _raw = str(_row.get(_used_col, ''))
+                            _raw = str(_row.get(_used_col, '')).strip()
+                            if _raw and _raw not in ('nan', 'None'):
+                                try:
+                                    _raw = str(int(float(_raw)))
+                                except (ValueError, TypeError):
+                                    pass
                             _norm = re.sub(r'\D', '', _raw)[-10:]
                             if not _norm:
                                 _empty += 1
@@ -9226,7 +9241,13 @@ if st.query_params.get("debug") == "1":
                         _matched_with_tasks = 0
                         _ic_match_details = []
                         for _, _row in _ic_df.iterrows():
-                            _norm = re.sub(r'\D', '', str(_row.get(_used_col, '')))[-10:]
+                            _raw_b = str(_row.get(_used_col, '')).strip()
+                            if _raw_b and _raw_b not in ('nan', 'None'):
+                                try:
+                                    _raw_b = str(int(float(_raw_b)))
+                                except (ValueError, TypeError):
+                                    pass
+                            _norm = re.sub(r'\D', '', _raw_b)[-10:]
                             if _norm and _norm in _wcounts:
                                 _full_matched += 1
                                 _wname, _wcnt = _wcounts[_norm]

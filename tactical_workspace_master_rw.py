@@ -5187,6 +5187,20 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     if not ic_df.empty:
         ic_df.columns = [str(c).strip().lower() for c in ic_df.columns]
         lat_col, lng_col = 'lat', 'lng'
+        # 🔵 PHONE COLUMN AUTO-DETECT (Jun 18 2026 — Nick: 🔵0 for every IC).
+        # IC sheet may have 'phone', 'cell', 'mobile', 'phone number', etc. The old
+        # code hard-coded 'phone' so any other header silently returned empty and
+        # every contractor showed 🔵0. Pick the first column that matches a
+        # known phone alias.
+        _PHONE_ALIASES = ('phone', 'cell', 'mobile', 'phone number', 'phonenumber',
+                          'cell phone', 'cellphone', 'mobile number', 'cell number',
+                          'contact phone', 'contact number', 'tel', 'telephone')
+        _phone_col = next((a for a in _PHONE_ALIASES if a in ic_df.columns), None)
+        if _phone_col is None:
+            # Fallback: any column with 'phone'/'cell'/'mobile' substring
+            _phone_col = next((c for c in ic_df.columns
+                               if any(tok in str(c) for tok in ('phone', 'cell', 'mobile'))),
+                              None)
         if lat_col in ic_df.columns and lng_col in ic_df.columns:
             v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].copy()
             v_ics = v_ics.dropna(subset=[lat_col, lng_col])
@@ -5197,9 +5211,21 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     cert_val = str(r.get('digital certified', '')).strip().upper()
                     cert_icon = " 🔌" if cert_val in ['YES', 'Y', 'TRUE', '1', '1.0'] else ""
                     ic_name = r.get('name', 'Unknown')
-                    _ic_phone = re.sub(r'\D', '', str(r.get('phone', '')))[-10:]
-                    _task_cnt = _worker_counts.get(_ic_phone, 0)
-                    _cnt_tag = f" 🔵{_task_cnt}" if _task_cnt > 0 else " 🔵0"
+                    _phone_raw = str(r.get(_phone_col, '')) if _phone_col else ''
+                    _ic_phone = re.sub(r'\D', '', _phone_raw)[-10:]
+                    # Distinguish "fetcher returned no data at all" (empty dict)
+                    # from "this worker genuinely has 0 active tasks" so the badge
+                    # actually tells the dispatcher something useful when the API
+                    # fetch failed silently.
+                    if not _worker_counts:
+                        _task_cnt = None
+                        _cnt_tag = " 🔵?"
+                    elif not _ic_phone:
+                        _task_cnt = None
+                        _cnt_tag = " 🔵—"
+                    else:
+                        _task_cnt = _worker_counts.get(_ic_phone, 0)
+                        _cnt_tag = f" 🔵{_task_cnt}"
                     label = f"{ic_name}{cert_icon}{_cnt_tag} ({round(r['d'], 1)} mi)"
                     ic_opts[label] = r
 
@@ -9139,7 +9165,7 @@ st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terr
 # field name / response shape is confirmed, fetch_worker_task_counts() can be
 # patched and this block can stay dormant (or be removed) — it's behind a query
 # param so end-users never see it.
-if st.query_params.get("debug") == "1" and _is_admin_or_manager():
+if st.query_params.get("debug") == "1":
     with st.expander("🔍 IC ↔ Worker Phone-Match Debug", expanded=True):
         if st.button("🔗 Cross-reference IC database with Onfleet workers", key="_dbg_ic_xref"):
             try:

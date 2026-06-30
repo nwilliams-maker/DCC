@@ -2677,7 +2677,7 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
     except Exception as e:
         _log_err("assign_tasks_to_fn_team", e)
         
-def revoke_field_nation(cluster_hash, pod_name):
+def revoke_field_nation(cluster_hash, pod_name, cluster_data=None):
     """Removes route from Field Nation sheet tab AND resets UI state.
 
     Fires two GAS calls intentionally:
@@ -2690,12 +2690,28 @@ def revoke_field_nation(cluster_hash, pod_name):
     Both calls run inline (was daemon=True, which dropped silently under
     Streamlit's thread context — same pattern that bit the assign path and
     the move_to_dispatch Onfleet PUTs before it).
+
+    🌟 cluster_data + check_completed=True (May 2026 fix — "FN checkbox doesn't
+    push back to pool"): FN tasks are at Onfleet state=1 under the FN worker
+    (assign_tasks_to_fn_team put them there). To return them to state=0 so
+    DCC's main pull sees them again, the Onfleet PUT in _bg_reconcile MUST
+    fire — that PUT is gated on `outstanding_ids AND check_completed`. Pass
+    cluster_data so step 1 can extract the task IDs, and check_completed=True
+    so the gate opens. Without this, the FN sheet row was removed but the
+    tasks stayed locked at state=1 forever, so the route was invisible
+    everywhere — gone from FN, never came back to Ready.
     """
     try:
         background_fn_revoke(cluster_hash)
     except Exception as _e:
         _log_err("revoke_field_nation/fn_revoke", _e)
-    move_to_dispatch(cluster_hash, "Field Nation", pod_name, action_label="Field Nation Revoked", check_onfleet=True)
+    move_to_dispatch(
+        cluster_hash, "Field Nation", pod_name,
+        action_label="Field Nation Revoked",
+        check_onfleet=True,
+        cluster_data=cluster_data,
+        check_completed=True,
+    )
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
@@ -6271,7 +6287,10 @@ text-decoration:none;">📨 Default Mail</a>
                 st.error("Remove this route from Field Nation tracking?")
                 # 🌟 THE FIX: Upgraded to a callback so it doesn't freeze the screen!
                 if st.button("🚨 Yes, Revoke FN", key=f"fn_rev_confirm_{pod_name}_{cluster_hash}", type="primary", use_container_width=True):
-                    revoke_field_nation(**{"cluster_hash": cluster_hash, "pod_name": pod_name})
+                    # Pass the in-scope `cluster` so revoke_field_nation can hand
+                    # task_ids to move_to_dispatch's Onfleet PUT (otherwise the PUT
+                    # is skipped — task_ids list is empty without cluster_data).
+                    revoke_field_nation(cluster_hash=cluster_hash, pod_name=pod_name, cluster_data=cluster)
                     fetch_sent_records_from_sheet.clear()   # bust the sheet cache so the rerun sees the post-revoke state
                     st.rerun(scope="app")  # security audit L6 - bucket re-sort is app-scoped
             st.stop()

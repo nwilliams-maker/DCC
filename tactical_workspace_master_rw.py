@@ -3850,7 +3850,10 @@ def process_digital_pool(master_bar=None):
     
     # 🌟 STRICT DIGITAL FILTER
     # --- 🌟 STRICT DIGITAL FILTER ---
-    DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
+    # 🌟 Site Survey added to digital classification (May 2026) — Onfleet tasks whose
+    # taskType contains "site survey" now flow into the Digital pool alongside Service /
+    # Ins-Rem / Offline. Same treatment as the other digital types (grouped into Digital tab).
+    DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey"]
     fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
     st.session_state['_history_db'] = _history_db
     st.session_state.sent_db = fresh_sent_db
@@ -3963,8 +3966,8 @@ def process_digital_pool(master_bar=None):
         is_digital_task = False
 
         if not is_exempt:
-            # Rule A: Task Type contains service, ins/rem, or offline
-            if any(trigger in custom_task_type for trigger in ["service", "ins/rem", "offline"]):
+            # Rule A: Task Type contains service, ins/rem, offline, or site survey
+            if any(trigger in custom_task_type for trigger in ["service", "ins/rem", "offline", "site survey"]):
                 is_digital_task = True
             # 🌟 Rule B: Boosted Standard contains the word 'digital' (Matches 'Premium_Digital')
             elif "digital" in custom_boosted:
@@ -4391,7 +4394,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             
                 # 3. APPLY DIGITAL RULES
                 # Locked strictly to the triggers you defined
-                DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
+                # 🌟 May 2026 — Site Survey added; see comment at first DIGITAL_WHITELIST.
+                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey"]
                 is_digital_task = False
 
                 if not is_exempt:
@@ -5566,12 +5570,18 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             loc_tasks = [t for t in cluster['data'] if t.get('full') == addr]
             _camp_groups = _dd(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
             for t in loc_tasks:
-                cmp = t.get('client_company','')
-                if not cmp: continue
+                # 🌟 May 2026 — Blank client_company / campaign falls back to the
+                # task type text so the accordion row still shows meaningful info
+                # (previously the row was silently skipped, leaving the venue
+                # accordion empty for tasks with no client_company data).
+                cmp = (t.get('client_company','') or '').strip()
                 tt = str(t.get('task_type','')).lower()
+                if not cmp:
+                    cmp = str(t.get('task_type','') or '').strip() or 'Unknown'
                 if t.get('is_digital'):
                     if 'offline' in tt: tt_badge = "📵 Offline"
                     elif 'ins/re' in tt: tt_badge = "🔧 Ins/Rem"
+                    elif 'site survey' in tt: tt_badge = "🔍 Site Survey"
                     else: tt_badge = "⚙️ Service"
                 elif 'install' in tt: tt_badge = "🛠️ Install"
                 elif any(x in tt for x in ['kiosk removal','remove kiosk']): tt_badge = "🗑️ Removal"
@@ -6933,12 +6943,16 @@ def make_venue_details(data):
         from collections import defaultdict
         camp_groups = defaultdict(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
         for t in loc_tasks:
-            cmp = t.get('client_company','')
-            if not cmp: continue
+            # 🌟 May 2026 — Blank client_company / campaign falls back to the
+            # task type text so the accordion row still shows meaningful info.
+            cmp = (t.get('client_company','') or '').strip()
             tt = str(t.get('task_type','')).lower()
+            if not cmp:
+                cmp = str(t.get('task_type','') or '').strip() or 'Unknown'
             if t.get('is_digital'):
                 if 'offline' in tt: tt_badge = "📵 Offline"
                 elif 'ins/re' in tt: tt_badge = "🔧 Ins/Rem"
+                elif 'site survey' in tt: tt_badge = "🔍 Site Survey"
                 else: tt_badge = "⚙️ Service"
             elif 'install' in tt: tt_badge = "🛠️ Install"
             elif any(x in tt for x in ['kiosk removal','remove kiosk']): tt_badge = "🗑️ Removal"

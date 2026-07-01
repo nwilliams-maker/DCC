@@ -2096,25 +2096,16 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             _log_err("move_to_dispatch/task_ids-parse", e)
             all_task_ids = []
 
-    # 2. Pick which task_ids actually get unassigned.
-    #    - check_completed=False → unassign all (Sent/Declined behavior, unchanged).
-    #    - check_completed=True  → parallel GET, skip any task already completed.
+    # 2. Pick which task_ids get unassigned.
+    #    - check_completed=False → unassign all (Sent/Declined behavior).
+    #    - check_completed=True  → 🌟 May 2026 revoke-speedup: was doing a
+    #      parallel GET per task to filter out state=3 (completed) — but that
+    #      only fed the "M completed kept" toast text. Onfleet's PUT on a
+    #      completed task is either a harmless no-op or a 4xx we already log;
+    #      the actual re-route behavior is identical either way. Skip the GET
+    #      to save ~1s per revoke and give the dispatcher a snappier button.
     outstanding_ids = list(all_task_ids)
     completed_count = 0
-    if check_completed and all_task_ids:
-        try:
-            auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}"}
-            with ThreadPoolExecutor(max_workers=min(10, len(all_task_ids))) as ex:
-                results = list(ex.map(lambda tid: _onfleet_get_state(tid, auth), all_task_ids))
-            outstanding_ids = []
-            for tid, is_done in results:
-                if is_done:
-                    completed_count += 1
-                else:
-                    outstanding_ids.append(tid)
-        except Exception as e:
-            _log_err("move_to_dispatch/state-check", e)
-            outstanding_ids = list(all_task_ids)  # fallback: unassign everything
 
     # 🚀 INSTANT UI MOVE — set the reverted flag + clear per-route state +
     # record the action FIRST, synchronously, before any network I/O. The
@@ -2174,10 +2165,14 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     import copy as _copy_h7
     _cluster_snapshot = _copy_h7.deepcopy(cluster_data) if cluster_data is not None else None
     def _bg_reconcile():
-        # Onfleet unassign — only for Accepted/Finalized re-routes (check_completed=
-        # True) whose tasks are actively assigned. Sent/Declined/FN tasks are still
-        # Onfleet state=0, so their PUTs would be pure no-ops — skip them.
-        if outstanding_ids and check_completed:
+        # 🌟 PARALLEL RECONCILE (May 2026 revoke-speedup): the Onfleet PUTs and
+        # the GAS archiveRoute POST have no dependency on each other — running
+        # them sequentially cost 3-7s per revoke; running them in parallel
+        # drops revoke wall-clock to max(PUTs, GAS) ≈ 2-5s. Still inline (no
+        # daemon), still reliable, just parallel across the two network calls.
+        def _do_onfleet_unassigns():
+            if not (outstanding_ids and check_completed):
+                return
             try:
                 _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
                 _put_payload = json.dumps({"worker": None, "metadata": []})
@@ -2194,11 +2189,19 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
                     list(_ex.map(_do_put, outstanding_ids))
             except Exception as e:
                 _log_err("move_to_dispatch/unassign-outer", e)
-        # Sheet archival — the GAS archiveRoute POST (multi-second).
-        try:
-            background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name)
-        except Exception as _bsm_e:
-            _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
+
+        def _do_sheet_archive():
+            try:
+                background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name)
+            except Exception as _bsm_e:
+                _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
+
+        with ThreadPoolExecutor(max_workers=2) as _rec_ex:
+            _f1 = _rec_ex.submit(_do_onfleet_unassigns)
+            _f2 = _rec_ex.submit(_do_sheet_archive)
+            for _f in (_f1, _f2):
+                try: _f.result(timeout=20)
+                except Exception as _fe: _log_err("_bg_reconcile/future", _fe)
 
     # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):
     # The daemon-thread version fails SILENTLY under Streamlit on Railway. The
@@ -3874,7 +3877,16 @@ def process_digital_pool(master_bar=None):
             and str(_f.get('value', '')).strip()
             for _f in (t.get('customFields') or [])
         )
-        if not _has_state_cf:
+        # 🌟 May 2026 — TX task rescue: previously dropped ANY task without a
+        # state customField, silently kicking real TX tasks that came in via
+        # manual Onfleet entry / alt integrations. Fall back to
+        # destination.address.state — if the address has a US state the task
+        # is bucketable, customField or not. The customField still wins as
+        # authoritative dispatch tagging (normalize_state below reads addr).
+        _addr_state_probe = ''
+        try: _addr_state_probe = str((t.get('destination') or {}).get('address', {}).get('state', '') or '').strip()
+        except Exception: _addr_state_probe = ''
+        if not _has_state_cf and not _addr_state_probe:
             continue
 
         container = t.get('container', {})
@@ -4276,7 +4288,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     and str(_f.get('value', '')).strip()
                     for _f in (t.get('customFields') or [])
                 )
-                if not _has_state_cf:
+                # 🌟 May 2026 — TX task rescue (see comment at other gate site).
+                _addr_state_probe = ''
+                try: _addr_state_probe = str((t.get('destination') or {}).get('address', {}).get('state', '') or '').strip()
+                except Exception: _addr_state_probe = ''
+                if not _has_state_cf and not _addr_state_probe:
                     _skipped_no_state_cf += 1
                     continue
 
@@ -4790,6 +4806,74 @@ def _bundle_clusters_store(pod_name):
         return "global_digital_clusters"
     return f"clusters_{pod_name}"
 
+# 🔗 BUNDLE PERSISTENCE (May 2026): _bundle_map lived only in st.session_state,
+# so a browser refresh (or a stale-deploy reload) wiped every bundle the
+# dispatcher had committed. These helpers push the bundle map to GAS Script
+# Properties keyed by pod, and pull it back on first visit each session so
+# bundles survive reloads. Requires GAS handlers `saveBundleMap` and
+# `loadBundleMap` — see companion diff in the GAS file.
+def _save_bundle_map_to_gas(pod_name):
+    """Fire-and-forget POST of the current session's bundle map for pod_name."""
+    try:
+        _bm = st.session_state.get('_bundle_map', {}) or {}
+        _entries = _bm.get(pod_name, []) or []
+        _payload = [",".join(sorted(list(_e))) for _e in _entries if _e]
+        requests.post(GAS_WEB_APP_URL, json={
+            "action": "saveBundleMap",
+            "auth_secret": GAS_AUTH,
+            "pod": pod_name,
+            "bundles": _payload,
+        }, timeout=8)
+    except Exception as _e:
+        _log_err(f"_save_bundle_map_to_gas/{pod_name}", _e)
+
+
+def _load_bundle_map_from_gas(pod_name):
+    """Fetch persisted bundle map for pod_name from GAS. Returns list of sets
+    of task IDs (same shape as st.session_state['_bundle_map'][pod_name]).
+    Returns [] on any error so the caller falls back cleanly."""
+    try:
+        _r = requests.post(GAS_WEB_APP_URL, json={
+            "action": "loadBundleMap",
+            "auth_secret": GAS_AUTH,
+            "pod": pod_name,
+        }, timeout=8)
+        _data = _r.json() if _r.status_code == 200 else {}
+        _raw = _data.get('bundles', []) or []
+        _out = []
+        for _b in _raw:
+            _ids = set(str(_s).strip() for _s in str(_b).split(',') if str(_s).strip())
+            if _ids:
+                _out.append(_ids)
+        return _out
+    except Exception as _e:
+        _log_err(f"_load_bundle_map_from_gas/{pod_name}", _e)
+        return []
+
+
+def _hydrate_bundle_map_once(pod_name):
+    """Called from run_pod_tab on first visit per session per pod. Loads the
+    persisted bundle map from GAS into st.session_state['_bundle_map'][pod_name]
+    exactly once, gated by a session flag. Idempotent + safe under Streamlit
+    reruns (the flag survives)."""
+    _flag_key = f"_bundle_map_hydrated_{pod_name}"
+    if st.session_state.get(_flag_key):
+        return
+    _loaded = _load_bundle_map_from_gas(pod_name)
+    if _loaded:
+        _bm = st.session_state.setdefault('_bundle_map', {})
+        # Merge, not overwrite — preserves any bundles committed this session
+        # before the load completed (shouldn't happen in practice, but safe).
+        _existing = _bm.get(pod_name, []) or []
+        _combined = list(_existing)
+        for _new in _loaded:
+            if not any(_new == _e for _e in _combined):
+                _combined.append(_new)
+        _bm[pod_name] = _combined
+        st.session_state['_bundle_map'] = _bm
+    st.session_state[_flag_key] = True
+
+
 def _commit_bundle(pod_name, target_task_ids, source_task_ids):
     """Record that target_task_ids and source_task_ids should be in the same cluster.
     Idempotent — overlapping entries get merged into one set so a route bundled three
@@ -4805,6 +4889,9 @@ def _commit_bundle(pod_name, target_task_ids, source_task_ids):
             keep.append(entry)
     keep.append(combined)
     bm[pod_name] = keep
+    # 🔗 Persist the just-committed bundle map for this pod so a page reload
+    # doesn't wipe it. Fire-and-forget; failure is logged, doesn't block UI.
+    _save_bundle_map_to_gas(pod_name)
 
 def _replay_bundles(pod_name):
     """Re-merge any clusters that the dispatcher previously bundled. Safe to call after
@@ -6638,7 +6725,16 @@ def smart_sync_pod(pod_name):
             and str(_f.get('value', '')).strip()
             for _f in (t.get('customFields') or [])
         )
-        if not _has_state_cf:
+        # 🌟 May 2026 — TX task rescue: previously dropped ANY task without a
+        # state customField, silently kicking real TX tasks that came in via
+        # manual Onfleet entry / alt integrations. Fall back to
+        # destination.address.state — if the address has a US state the task
+        # is bucketable, customField or not. The customField still wins as
+        # authoritative dispatch tagging (normalize_state below reads addr).
+        _addr_state_probe = ''
+        try: _addr_state_probe = str((t.get('destination') or {}).get('address', {}).get('state', '') or '').strip()
+        except Exception: _addr_state_probe = ''
+        if not _has_state_cf and not _addr_state_probe:
             continue
 
         container = t.get('container', {})
@@ -7251,6 +7347,11 @@ def run_pod_tab(pod_name):
     if not st.session_state.get('_asc_ran_this_render'):
         st.session_state['_asc_ran_this_render'] = True
         auto_sync_checker(pod_name)  # patches sent_db in-memory on each rerun.
+
+    # 🔗 Hydrate persisted bundle map for this pod (once per session per pod)
+    # so dispatcher bundles survive page reloads / redeploy reloads. Gated by
+    # a session flag inside the helper so subsequent renders are free.
+    _hydrate_bundle_map_once(pod_name)
 
     # Grab the contractor database from session state
     ic_df = st.session_state.get('ic_df', pd.DataFrame())

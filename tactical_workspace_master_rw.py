@@ -4874,6 +4874,34 @@ def _hydrate_bundle_map_once(pod_name):
     st.session_state[_flag_key] = True
 
 
+def _unbundle_cluster(pod_name, cluster_task_ids):
+    """Reverse a bundle: remove any _bundle_map entries that overlap with this
+    cluster's task_ids so the constituent routes reappear as separate clusters.
+    Also clears the pod's cached cluster list so process_pod rebuilds fresh.
+    Returns True if anything was removed, False if there was no bundle to undo.
+
+    Jun 18 2026 — Nick: added "revert bundled work orders back to original routes"
+    button. Bundles were previously one-way after Confirm; the only workaround was
+    to sign out or restart the Python process."""
+    _target_set = {str(_t).strip() for _t in cluster_task_ids if str(_t).strip()}
+    if not _target_set:
+        return False
+    bm = st.session_state.get('_bundle_map', {}) or {}
+    pm = bm.get(pod_name, []) or []
+    if not pm:
+        return False
+    _kept = [entry for entry in pm if not (entry & _target_set)]
+    if len(_kept) == len(pm):
+        return False  # nothing overlapped
+    bm[pod_name] = _kept
+    st.session_state['_bundle_map'] = bm
+    # Force re-cluster on the next render so the merged cluster splits back.
+    _store_key = _bundle_clusters_store(pod_name)
+    st.session_state.pop(_store_key, None)
+    # Wipe stale bundle_count so the pill disappears immediately.
+    return True
+
+
 def _commit_bundle(pod_name, target_task_ids, source_task_ids):
     """Record that target_task_ids and source_task_ids should be in the same cluster.
     Idempotent — overlapping entries get merged into one set so a route bundled three
@@ -5802,6 +5830,25 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     label_visibility="collapsed",
                     placeholder="Select nearby routes to preview a merged version...",
                 )
+
+                # 🔁 UNBUNDLE — shown when this cluster is currently a bundle
+                # (bundle_count > 0). Splits the merged cluster back into its original
+                # pieces by dropping the bundle_map entries that share these task_ids.
+                _bundle_n = int(cluster.get('bundle_count', 0) or 0)
+                if _bundle_n > 0 and not _in_preview:
+                    _unbundle_key = f"bundle_unbundle_{cluster_hash}"
+                    if st.button(
+                        f"🔁 Unbundle ({_bundle_n + 1} routes → split apart)",
+                        key=_unbundle_key,
+                        use_container_width=True,
+                        help="Revert this bundle so each original route becomes its own card again.",
+                    ):
+                        _ub_ok = _unbundle_cluster(pod_name, task_ids)
+                        if _ub_ok:
+                            st.toast(f"🔁 Unbundled — {_bundle_n + 1} routes split back to originals")
+                        else:
+                            st.toast("Nothing to unbundle for this cluster.")
+                        st.rerun()
 
                 # Confirm button only shows while preview is active. No "Clear" button —
                 # the multiselect chips have built-in × icons that achieve the same thing.

@@ -2498,7 +2498,7 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
     """Isolates checkbox reruns so the whole page doesn\'t reload, making checks instant.
 
     is_fn=True (Field Nation routes assigned to an FN rep) renders only 2 checklist
-    items — \"Dispatched in Route Planning\" and \"Packing list created\". The OnFleet
+    items — \"Work Order Created\" and \"Packing list created\". The OnFleet
     optimization step doesn\'t apply because Field Nation handles their own routing."""
     st.markdown("<p style='font-size: 13px; font-weight: 600;'>Finalization Checklist:</p>", unsafe_allow_html=True)
     # Stack checkboxes vertically — Streamlit 1.39 enforces 1-level column
@@ -2506,8 +2506,8 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
     # st.columns() here would exceed the limit and raise StreamlitAPIException.
     if is_fn:
         # FN routes skip the OnFleet route planning step.
-        chk1 = st.checkbox("Dispatched in Route Planning.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
-        chk2 = st.checkbox("Packing list created.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
+        chk1 = st.checkbox("Work Order Created.", key=f"{prefix}_fnd_{cluster_hash}_{pod_name}")
+        chk2 = st.checkbox("Attach Packing Slip to Production Line.", key=f"{prefix}_fnp_{cluster_hash}_{pod_name}")
         if has_kiosks:
             chk_k = st.checkbox("Ordered Kiosk(s).", key=f"{prefix}_fnk_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2 and chk_k
@@ -2515,8 +2515,8 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
             _all_checked = chk1 and chk2
     else:
         chk1 = st.checkbox("Optimized Route in OnFleet.", key=f"{prefix}1_{cluster_hash}_{pod_name}")
-        chk2 = st.checkbox("Dispatched in Route Planning.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
-        chk3 = st.checkbox("Packing list created.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
+        chk2 = st.checkbox("Work Order Created.", key=f"{prefix}2_{cluster_hash}_{pod_name}")
+        chk3 = st.checkbox("Attach Packing Slip to Production Line.", key=f"{prefix}3_{cluster_hash}_{pod_name}")
         if has_kiosks:
             chk4 = st.checkbox("Ordered Kiosk(s).", key=f"{prefix}4_{cluster_hash}_{pod_name}")
             _all_checked = chk1 and chk2 and chk3 and chk4

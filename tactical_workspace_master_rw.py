@@ -5094,6 +5094,8 @@ def _merge_same_wo_ghosts(ghost_routes):
                 _existing['route_ts'] = _g_ts
             # Flag so the card can show a tiny "Bundled" badge if rendering supports it.
             _existing['_merged_count'] = int(_existing.get('_merged_count', 1) or 1) + 1
+            if g.get('hash') and g.get('hash') not in _existing['_merged_hashes']:
+                _existing['_merged_hashes'].append(g.get('hash'))
         else:
             # Clone so we don't mutate the original dict
             by_key[_key] = dict(g)
@@ -9074,7 +9076,13 @@ def run_pod_tab(pod_name):
                             with st.popover("↩️"):
                                 st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
                                 if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                    # Jul 2 2026 — Nick: bundled ghost revoke must archive
+                                    # ALL rows in the bundle so the merged tasks return to
+                                    # Dispatch as ONE cluster, not multiple. _replay_bundles
+                                    # will re-merge in Ready via the existing _bundle_map.
+                                    _all_hashes = g.get('_merged_hashes') or [ghost_hash]
+                                    for _mh in _all_hashes:
+                                        move_to_dispatch(**{"cluster_hash": _mh, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
                                     st.session_state['_close_reroute_popover'] = True
                                     st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
         with t_sent:

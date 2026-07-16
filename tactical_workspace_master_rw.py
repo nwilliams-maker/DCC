@@ -8407,8 +8407,9 @@ def run_pod_tab(pod_name):
             elif not ready: st.info("No tasks ready for dispatch.")
             else:
                 sorted_ready = group_and_sort_by_proximity(ready)
+                _pg_items, _pg_start = _paginate_panel(sorted_ready, f"{pod_name}_ready", per_page=25)
                 current_state = None
-                for i, c in enumerate(sorted_ready):
+                for i, c in enumerate(_pg_items, start=_pg_start):
                     # 🌟 Insert State Header
                     if c['state'] != current_state:
                         current_state = c['state']
@@ -8444,8 +8445,9 @@ def run_pod_tab(pod_name):
             elif not review: st.info("No flagged tasks requiring review.")
             else:
                 sorted_review = group_and_sort_by_proximity(review)
+                _pg_items, _pg_start = _paginate_panel(sorted_review, f"{pod_name}_flagged", per_page=25)
                 current_state = None
-                for i, c in enumerate(sorted_review):
+                for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
                         current_state = c['state']
                         st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
@@ -8904,12 +8906,12 @@ def run_pod_tab(pod_name):
             elif not digital_ready: st.info("No digital service tasks pending.")
             else:
                 sorted_digi = group_and_sort_by_proximity(digital_ready)
+                _pg_items, _pg_start = _paginate_panel(sorted_digi, f"{pod_name}_digital", per_page=25)
                 current_state = None
-                for i, c in enumerate(sorted_digi):
+                for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
                         current_state = c['state']
                         st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
-                    
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""

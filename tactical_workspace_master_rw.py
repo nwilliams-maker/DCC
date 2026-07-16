@@ -5024,6 +5024,52 @@ def group_and_sort_by_proximity(bucket):
         
         final_list.extend(sorted_st_cls)
     return final_list
+# 🌟 COLLAPSIBLE + PAGINATED GROUP RENDER — Jul 16 2026
+# Cuts DOM by only rendering expanded groups. Usage:
+#   for item, i in _collapsible_grouped_render(items, pod_name, 'ready',
+#           group_fn=lambda x: x.get('state','UNKNOWN'),
+#           label_fn=lambda k, n: f"📍 {k}  ·  {n} route(s)"):
+#       # existing per-item render code here
+def _collapsible_grouped_render(items, pod_name, tab_key, group_fn, label_fn, page_size=25):
+    if not items:
+        return
+    from collections import OrderedDict as _OD
+    _grouped = _OD()
+    for it in items:
+        _grouped.setdefault(group_fn(it), []).append(it)
+    for _key, _lst in _grouped.items():
+        n = len(_lst)
+        _open_k = f"_grp_open_{pod_name}_{tab_key}_{_key}"
+        _page_k = f"_grp_page_{pod_name}_{tab_key}_{_key}"
+        _open = st.session_state.get(_open_k, False)
+        _icon = "▼" if _open else "▶"
+        if st.button(f"{_icon}  {label_fn(_key, n)}",
+                     key=f"btn_{_open_k}", use_container_width=True):
+            st.session_state[_open_k] = not _open
+            st.rerun()
+        if not _open:
+            continue
+        if n > page_size:
+            _p = int(st.session_state.get(_page_k, 0))
+            _tp = (n + page_size - 1) // page_size
+            _p = max(0, min(_p, _tp - 1))
+            _start = _p * page_size
+            for i, it in enumerate(_lst[_start:_start + page_size], start=_start):
+                yield it, i
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c1:
+                if _p > 0 and st.button("← Prev", key=f"prv_{_open_k}"):
+                    st.session_state[_page_k] = _p - 1
+                    st.rerun()
+            with c2:
+                st.caption(f"Page {_p + 1} of {_tp}  ·  showing {_start + 1}–{min(_start + page_size, n)} of {n}")
+            with c3:
+                if _p + 1 < _tp and st.button("Next →", key=f"nxt_{_open_k}"):
+                    st.session_state[_page_k] = _p + 1
+                    st.rerun()
+        else:
+            for i, it in enumerate(_lst):
+                yield it, i
 # 🌟 NEW HELPER: Groups Awaiting routes by Date Sent, unifying Live and Ghost routes
 def _merge_same_wo_ghosts(ghost_routes):
     """Jun 18 2026 — Nick: bundled route showed as two separate cards in Sent
@@ -8407,12 +8453,11 @@ def run_pod_tab(pod_name):
             elif not ready: st.info("No tasks ready for dispatch.")
             else:
                 sorted_ready = group_and_sort_by_proximity(ready)
-                current_state = None
-                for i, c in enumerate(sorted_ready):
-                    # 🌟 Insert State Header
-                    if c['state'] != current_state:
-                        current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                for c, i in _collapsible_grouped_render(
+                    sorted_ready, pod_name, 'ready',
+                    group_fn=lambda x: x.get('state', 'UNKNOWN'),
+                    label_fn=lambda k, n: f"📍 {k}  ·  {n} route{'s' if n != 1 else ''}",
+                ):
                         
                     badges = ""
                     if not ic_df.empty:
@@ -8444,11 +8489,11 @@ def run_pod_tab(pod_name):
             elif not review: st.info("No flagged tasks requiring review.")
             else:
                 sorted_review = group_and_sort_by_proximity(review)
-                current_state = None
-                for i, c in enumerate(sorted_review):
-                    if c['state'] != current_state:
-                        current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                for c, i in _collapsible_grouped_render(
+                    sorted_review, pod_name, 'flagged',
+                    group_fn=lambda x: x.get('state', 'UNKNOWN'),
+                    label_fn=lambda k, n: f"📍 {k}  ·  {n} route{'s' if n != 1 else ''}",
+                ):
                     
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
@@ -8904,11 +8949,11 @@ def run_pod_tab(pod_name):
             elif not digital_ready: st.info("No digital service tasks pending.")
             else:
                 sorted_digi = group_and_sort_by_proximity(digital_ready)
-                current_state = None
-                for i, c in enumerate(sorted_digi):
-                    if c['state'] != current_state:
-                        current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                for c, i in _collapsible_grouped_render(
+                    sorted_digi, pod_name, 'digital',
+                    group_fn=lambda x: x.get('state', 'UNKNOWN'),
+                    label_fn=lambda k, n: f"📍 {k}  ·  {n} route{'s' if n != 1 else ''}",
+                ):
                     
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
@@ -8990,13 +9035,11 @@ def run_pod_tab(pod_name):
                 )
             if not unified_sent: st.info("No pending routes sent.")
             
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_sent, f"{pod_name}_sent")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
+            for item, i in _collapsible_grouped_render(
+                unified_sent, pod_name, 'sent',
+                group_fn=lambda x: x.get('sort_date', 'Unknown Date'),
+                label_fn=lambda k, n: f"📅 SENT: {k}  ·  {n} route{'s' if n != 1 else ''}",
+            ):
                 
                 if not item['is_ghost']:
                     c = item
@@ -9114,13 +9157,11 @@ def run_pod_tab(pod_name):
             unified_acc = unify_and_sort_by_date(_live_acc, _live_acc_ghosts, live_hashes)
             if not unified_acc: st.info("Waiting for portal acceptances...")
             
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_acc, f"{pod_name}_acc")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
+            for item, i in _collapsible_grouped_render(
+                unified_acc, pod_name, 'acc',
+                group_fn=lambda x: x.get('sort_date', 'Unknown Date'),
+                label_fn=lambda k, n: f"📅 ACCEPTED: {k}  ·  {n} route{'s' if n != 1 else ''}",
+            ):
                 
                 if not item['is_ghost']:
                     c = item
@@ -9206,13 +9247,11 @@ def run_pod_tab(pod_name):
             unified_dec = unify_and_sort_by_date(_live_dec, [], live_hashes)
             if not unified_dec: st.info("No declined routes.")
             
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_dec, f"{pod_name}_dec")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
+            for item, i in _collapsible_grouped_render(
+                unified_dec, pod_name, 'dec',
+                group_fn=lambda x: x.get('sort_date', 'Unknown Date'),
+                label_fn=lambda k, n: f"📅 DECLINED: {k}  ·  {n} route{'s' if n != 1 else ''}",
+            ):
                 
                 c = item
                 ic_name = c.get('contractor_name', 'Unknown')
@@ -9244,13 +9283,11 @@ def run_pod_tab(pod_name):
             unified_fin = unify_and_sort_by_date(_live_fin, _live_fin_ghosts, live_hashes)
             if not unified_fin: st.info("No finalized routes.") 
             
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_fin, f"{pod_name}_fin")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
+            for item, i in _collapsible_grouped_render(
+                unified_fin, pod_name, 'fin',
+                group_fn=lambda x: x.get('sort_date', 'Unknown Date'),
+                label_fn=lambda k, n: f"📅 FINALIZED: {k}  ·  {n} route{'s' if n != 1 else ''}",
+            ):
                 
                 if not item['is_ghost']:
                     c = item

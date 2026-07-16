@@ -1961,7 +1961,7 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
     _archive_ok = False
     for _attempt in range(3):
         try:
-            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=15)
+            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=8)
             if _ar.status_code == 200:
                 # GAS always returns HTTP 200 even on rejections — parse the body
                 # to confirm it actually archived. The auth gate returns
@@ -1985,7 +1985,7 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
             _log_err("background_sheet_move/archive",
                      f"attempt {_attempt + 1}: {type(e).__name__}: {e}")
         if _attempt < 2:
-            time.sleep(2 ** _attempt)
+            time.sleep(0.4 * (_attempt + 1))  # 0.4s, 0.8s — was 1s, 2s
     if not _archive_ok:
         try:
             _RECONCILE_FAILURES.add(str(cluster_hash))

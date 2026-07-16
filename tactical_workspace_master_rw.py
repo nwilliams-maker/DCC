@@ -734,8 +734,16 @@ _components.html(
               var t = (_bn.textContent || '').toLowerCase();
               if (t.indexOf('app was updated') >= 0 && t.indexOf('auto-refreshing') >= 0) {
                 if (_bn.closest && _bn.closest('#dcc-update-banner')) continue;
-                _hardReload('updated banner (text)');
-                return;
+                // Jul 2 2026 — Nick: banner should only fire on REAL code deploys.
+                // Streamlit's built-in banner also fires on container restarts (idle wake,
+                // healthcheck, OOM), which spammed the dispatcher. Hide it here; our
+                // custom banner (INSTANCE_ID-driven, code-hash based) is the sole notifier.
+                var _hideTgt = _bn.closest('[data-testid="stAppDeployedNotification"]')
+                            || _bn.closest('div[role="alert"]')
+                            || _bn.parentElement
+                            || _bn;
+                try { if (_hideTgt && _hideTgt.style) _hideTgt.style.display = 'none'; } catch(e) {}
+                continue;
               }
             }
 

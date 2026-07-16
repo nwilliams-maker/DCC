@@ -4950,6 +4950,15 @@ def _replay_bundles(pod_name):
             if tids & entry:
                 members.append(ci)
         if len(members) < 2:
+            # Bundle intent still exists — mark the surviving cluster as bundled
+            # so the pill persists after process_pod naturally re-merges the
+            # source routes (common when they're within cluster radius).
+            if len(members) == 1:
+                _tgt = cls[members[0]]
+                _tgt_tids = {str(t['id']).strip() for t in _tgt.get('data', [])}
+                if entry.issubset(_tgt_tids) and not _tgt.get('bundle_count'):
+                    _tgt['bundle_count'] = 1
+                    _changed = True
             continue  # already merged, or members no longer present
         target_idx = members[0]
         source_indices = members[1:]

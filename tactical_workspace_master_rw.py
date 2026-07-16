@@ -5094,6 +5094,7 @@ def _merge_same_wo_ghosts(ghost_routes):
                 _existing['route_ts'] = _g_ts
             # Flag so the card can show a tiny "Bundled" badge if rendering supports it.
             _existing['_merged_count'] = int(_existing.get('_merged_count', 1) or 1) + 1
+            _existing.setdefault('_merged_hashes', [_existing.get('hash')])
             if g.get('hash') and g.get('hash') not in _existing['_merged_hashes']:
                 _existing['_merged_hashes'].append(g.get('hash'))
         else:

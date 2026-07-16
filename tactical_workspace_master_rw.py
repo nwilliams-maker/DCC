@@ -5902,7 +5902,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                             # fresh. No manual pop needed (post-render widget writes would
                             # crash anyway).
                             st.toast(f"🔗 Bundled {_src_count} route(s) — {_preview_added_count} tasks added")
-                            st.rerun()
+                            st.rerun(scope="app")
 
         if not is_sent and not is_declined and len(stop_metrics) > 1:
             _all_addrs = list(stop_metrics.keys())

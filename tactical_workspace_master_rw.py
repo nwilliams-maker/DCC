@@ -484,6 +484,13 @@ _components.html(
 (function () {
   var STORAGE_KEY = 'dcc_state_collapsed_v1';
   var doc = window.parent.document;
+  // On FRESH page loads start collapsed. window.parent persists across
+  // Streamlit reruns (same window) but resets on hard reload / tab close —
+  // so this flag distinguishes "fresh page" from "in-session rerun".
+  if (!window.parent._dccCollapseInitialized) {
+    window.parent._dccCollapseInitialized = true;
+    try { window.parent.sessionStorage.removeItem(STORAGE_KEY); } catch (_e) {}
+  }
   function getStored() {
     try { return JSON.parse(window.parent.sessionStorage.getItem(STORAGE_KEY) || '{}'); }
     catch (_e) { return {}; }
@@ -502,7 +509,7 @@ _components.html(
     if (!c) return;
     var next = c.nextElementSibling;
     while (next) {
-      if (next.querySelector && next.querySelector('.dcc-state-header')) break;
+      if (next.querySelector && (next.querySelector('.dcc-state-header') || next.querySelector('.dcc-collapse-boundary'))) break;
       next.classList.toggle('dcc-state-hidden', !expanded);
       next = next.nextElementSibling;
     }
@@ -7608,7 +7615,7 @@ def run_pod_tab(pod_name):
     # (The python-side _auto_sync_done_{pod} flag below is preserved as a
     # cheap idempotency guard so any leftover edge-case can't double-fire.)
     _auto_sync_key = f"_auto_sync_done_{pod_name}"
-    if is_initialized and not st.session_state.get(_auto_sync_key):
+    if False:  # auto Check New Tasks on page load disabled — dispatcher clicks manually
         # Mark fired immediately so a Streamlit rerun cycle can't queue two
         # JS-clicks. The actual click is deferred to the JS snippet below.
         st.session_state[_auto_sync_key] = True
@@ -8895,7 +8902,7 @@ def run_pod_tab(pod_name):
 
                 def _fn_section_banner(_label, _count, _bg, _border, _fg, _emoji, _margin_top="6px"):
                     st.markdown(
-                        f"<div style='background:{_bg}; border-left:3px solid {_border}; "
+                        f"<div class='dcc-collapse-boundary' style='background:{_bg}; border-left:3px solid {_border}; "
                         f"padding:6px 12px; margin:{_margin_top} 0 4px 0; border-radius:6px;'>"
                         f"<span style='font-size:11px; font-weight:900; color:{_fg}; "
                         f"text-transform:uppercase; letter-spacing:0.08em;'>{_emoji} {_label} · "

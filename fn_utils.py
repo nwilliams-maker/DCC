@@ -424,6 +424,14 @@ def generate_combined_fn_upload(clusters: list):
     if not addr_tasks:
         return None, 0, included_hashes
 
+    # Jul 2026 (Nick): blank the Bundle # for any route that contributed
+    # exactly one address to the deduped output. A single-stop "bundle" isn't
+    # a bundle — the label just clutters FN's grouping. Mirrors the rule
+    # applied in _fn_stop_rows for the single-cluster path.
+    from collections import Counter as _Counter
+    _bundle_counts = _Counter(addr_bundle.values())
+    _single_stop_bundles = {b for b, c in _bundle_counts.items() if c == 1}
+
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(_fn_csv_headers())
@@ -442,11 +450,13 @@ def generate_combined_fn_upload(clusters: list):
         venue_name = next((t.get('venue_name', '') for t in tasks if t.get('venue_name')), 'Terraboost Media')
         manager    = FN_STATE_MANAGER.get(state, '')
 
+        _bundle_val = addr_bundle.get(key, "")
+        if _bundle_val in _single_stop_bundles:
+            _bundle_val = ""  # single-stop "bundle" isn't a bundle — leave blank
         base_row = [
-            addr_bundle.get(key, ""),  # Bundle # — the route (1, 2, 3, ...)
-                 # that first contributed this address. See addr_bundle build
-                 # above. Field Nation groups WOs sharing a Bundle value into
-                 # one bundle on FN.com, so each DCC route's stops bundle.
+            _bundle_val,  # Bundle # — the route (1, 2, 3, ...) that first
+                 # contributed this address. Blank when the route contributed
+                 # only one address to the deduped output.
             _csv_safe(venue_name),
             _csv_safe(street),
             _csv_safe(city),

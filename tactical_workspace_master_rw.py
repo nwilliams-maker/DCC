@@ -5976,8 +5976,17 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         prev_ic_name = cluster.get('contractor_name', 'Unknown')
         ic_name = ic.get('name', 'Unknown Contractor') 
     
+        # 🌟 STICKY WO RESERVATION (Jul 2026): once a WO is computed for this
+        # (cluster, IC) pair in the current session, reuse it. Prevents same-IC
+        # collisions between two not-yet-dispatched routes (sent_db can't see
+        # the first one yet, so both would compute "-1" without this).
+        _wo_sticky_key = f"_wo_sticky_{cluster_hash}_{ic_name}"
+        _wo_sticky = st.session_state.get(_wo_sticky_key)
+
         if ic_name == prev_ic_name and cluster.get('wo', 'none') != 'none':
             wo_val = cluster['wo']
+        elif _wo_sticky:
+            wo_val = _wo_sticky
         else:
             _base_wo = f"{ic.get('name', 'Unknown')}-{datetime.now().strftime('%m%d%Y')}"
             # Compute next suffix from the max of (active sent WOs ∪ archived WOs) for this IC today.
@@ -5993,6 +6002,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             for _w in _archived_wos_set:
                 if str(_w).startswith(_base_wo):
                     _candidate_wos.add(str(_w))
+            # 🌟 IN-SESSION WO SCAN: also pick up WOs "reserved" for other
+            # clusters this session (not yet in sent_db).
+            for _k, _v in st.session_state.items():
+                if isinstance(_k, str) and _k.startswith('_wo_sticky_') and _k != _wo_sticky_key:
+                    _vs = str(_v or '')
+                    if _vs.startswith(_base_wo):
+                        _candidate_wos.add(_vs)
             _max_suffix = 0
             for _w in _candidate_wos:
                 try:
@@ -6006,6 +6022,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     _log_err("wo_suffix_parse", f"bad WO '{_w}': {_wo_e}")
             _wo_num = _max_suffix + 1
             wo_val = f"{_base_wo}-{_wo_num}"
+            # Reserve this WO for the current (cluster, IC) so subsequent
+            # same-IC cluster renders pick -N+1 instead of colliding.
+            st.session_state[_wo_sticky_key] = wo_val
             # Security audit M5 - if the Archive sheet could not be read,
             # consumed WO suffixes are invisible and this number may collide.
             if st.session_state.get('_archive_read_failed'):

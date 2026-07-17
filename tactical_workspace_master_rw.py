@@ -3934,7 +3934,7 @@ def process_digital_pool(master_bar=None):
     # 🌟 Site Survey added to digital classification (May 2026) — Onfleet tasks whose
     # taskType contains "site survey" now flow into the Digital pool alongside Service /
     # Ins-Rem / Offline. Same treatment as the other digital types (grouped into Digital tab).
-    DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey"]
+    DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
     fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
     st.session_state['_history_db'] = _history_db
     st.session_state.sent_db = fresh_sent_db
@@ -4489,7 +4489,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 # 3. APPLY DIGITAL RULES
                 # Locked strictly to the triggers you defined
                 # 🌟 May 2026 — Site Survey added; see comment at first DIGITAL_WHITELIST.
-                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey"]
+                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey",]
                 is_digital_task = False
 
                 if not is_exempt:
@@ -6973,7 +6973,7 @@ def smart_sync_pod(pod_name):
         search_string = f"{native_details} {custom_task_type}".lower()
         REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
         is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
-        DIGITAL_WHITELIST = ["service", "ins/rem", "offline"]
+        DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
         is_digital_task = False
         if not is_exempt:
             if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):

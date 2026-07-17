@@ -516,18 +516,22 @@ _components.html(
   }
   function setup() {
     var stored = getStored();
-    var headers = doc.querySelectorAll('.dcc-state-header:not([data-dcc-wired])');
+    var headers = doc.querySelectorAll('.dcc-state-header');
     headers.forEach(function (hdr) {
-      hdr.setAttribute('data-dcc-wired', '1');
       var key = hdr.getAttribute('data-state-key') || hdr.textContent.trim();
+      if (!hdr.hasAttribute('data-dcc-wired')) {
+        hdr.setAttribute('data-dcc-wired', '1');
+        hdr.addEventListener('click', function () {
+          var willExpand = hdr.classList.contains('dcc-collapsed');
+          applyState(hdr, willExpand);
+          var s = getStored();
+          if (willExpand) s[key] = 1; else delete s[key];
+          setStored(s);
+        });
+      }
+      // Re-apply state on every observer tick so cards that render AFTER the
+      // header wires up (typical for the first state header) still get hidden.
       applyState(hdr, !!stored[key]);
-      hdr.addEventListener('click', function () {
-        var willExpand = hdr.classList.contains('dcc-collapsed');
-        applyState(hdr, willExpand);
-        var s = getStored();
-        if (willExpand) s[key] = 1; else delete s[key];
-        setStored(s);
-      });
     });
   }
   var obs = new MutationObserver(setup);

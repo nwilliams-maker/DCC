@@ -472,6 +472,65 @@ st.markdown("""
 import uuid as _uuid
 import streamlit.components.v1 as _components
 import os as _os
+
+# 🌟 STATE-GROUP COLLAPSE (client-side, zero Streamlit reruns) — pairs with
+# the .dcc-state-header class emitted by each state header markdown below.
+# Clicks toggle sibling visibility in the DOM; sessionStorage remembers
+# which groups the dispatcher has opened so choices survive Streamlit
+# reruns and full page reloads. All state headers start collapsed.
+_components.html(
+    """
+<script>
+(function () {
+  var STORAGE_KEY = 'dcc_state_collapsed_v1';
+  var doc = window.parent.document;
+  function getStored() {
+    try { return JSON.parse(window.parent.sessionStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch (_e) { return {}; }
+  }
+  function setStored(m) {
+    try { window.parent.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(m)); }
+    catch (_e) {}
+  }
+  function containerOf(el) {
+    return el.closest('[data-testid="stElementContainer"]') || el.parentElement;
+  }
+  function applyState(hdr, expanded) {
+    hdr.classList.toggle('dcc-expanded', expanded);
+    hdr.classList.toggle('dcc-collapsed', !expanded);
+    var c = containerOf(hdr);
+    if (!c) return;
+    var next = c.nextElementSibling;
+    while (next) {
+      if (next.querySelector && next.querySelector('.dcc-state-header')) break;
+      next.classList.toggle('dcc-state-hidden', !expanded);
+      next = next.nextElementSibling;
+    }
+  }
+  function setup() {
+    var stored = getStored();
+    var headers = doc.querySelectorAll('.dcc-state-header:not([data-dcc-wired])');
+    headers.forEach(function (hdr) {
+      hdr.setAttribute('data-dcc-wired', '1');
+      var key = hdr.getAttribute('data-state-key') || hdr.textContent.trim();
+      applyState(hdr, !!stored[key]);
+      hdr.addEventListener('click', function () {
+        var willExpand = hdr.classList.contains('dcc-collapsed');
+        applyState(hdr, willExpand);
+        var s = getStored();
+        if (willExpand) s[key] = 1; else delete s[key];
+        setStored(s);
+      });
+    });
+  }
+  var obs = new MutationObserver(setup);
+  if (doc.body) obs.observe(doc.body, { childList: true, subtree: true });
+  setup();
+})();
+</script>
+    """,
+    height=0,
+)
 # 🔑 DETERMINISTIC INSTANCE_ID (Jun 18 2026 — Nick: phantom "App was updated"
 # banners firing without any deploy).
 # Old fallback chain: RAILWAY_DEPLOYMENT_ID → RAILWAY_GIT_COMMIT_SHA → uuid4().
@@ -1238,7 +1297,7 @@ st.components.v1.html("""
 
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap'); .dcc-state-header {{ font-size: 12px !important; font-weight: 800 !important; color: #94a3b8 !important; margin-top: 15px !important; margin-bottom: 5px !important; border-bottom: 1px solid #e2e8f0 !important; padding-bottom: 2px !important; text-transform: uppercase !important; letter-spacing: 1px !important; cursor: pointer !important; user-select: none !important; display: flex !important; align-items: center !important; gap: 6px !important; }} .dcc-state-chevron {{ display: inline-block; font-size: 11px; color: #94a3b8; transition: transform 0.15s ease; }} .dcc-state-header.dcc-expanded .dcc-state-chevron {{ transform: rotate(90deg); }} .dcc-state-hidden {{ display: none !important; }}
 .stApp {{ background-color: {TB_APP_BG} !important; color: #000000 !important; font-family: 'Inter', sans-serif !important; }}
 /* Streamlit injects a fixed-position header bar by default with a dark/black background.
    Recolor it to match the page so the logo doesn't sit on a black strip. Header still
@@ -8441,7 +8500,7 @@ def run_pod_tab(pod_name):
                     # 🌟 Insert State Header
                     if c['state'] != current_state:
                         current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                         
                     badges = ""
                     if not ic_df.empty:
@@ -8478,7 +8537,7 @@ def run_pod_tab(pod_name):
                 for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
                         current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                     
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
@@ -8874,7 +8933,7 @@ def run_pod_tab(pod_name):
 
                     if c['state'] != current_state:
                         current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
 
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     digi_pill = " 🔌" if c.get('is_digital') else ""
@@ -8939,7 +8998,7 @@ def run_pod_tab(pod_name):
                 for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
                         current_state = c['state']
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                     _DIG_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     _dig_boosted_pill = f" | {next((v for k,v in _DIG_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _DIG_BOOSTED) else ""
                     _dig_esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
@@ -10210,7 +10269,7 @@ with tabs[6]:
                     for i, c in enumerate(sorted_d_ready):
                         if c['state'] != current_state:
                             current_state = c['state']
-                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                         _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
                         _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
@@ -10225,7 +10284,7 @@ with tabs[6]:
                     for i, c in enumerate(sorted_d_flagged):
                         if c['state'] != current_state:
                             current_state = c['state']
-                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                         _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
                         _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
@@ -10447,7 +10506,7 @@ with tabs[6]:
                             _entered_sent_zone = True
                         if c['state'] != current_state:
                             current_state = c['state']
-                            st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📍 {current_state}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                         _GDFN_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdfn_boost = f" | {next((v for k,v in _GDFN_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDFN_BOOSTED) else ""
                         _gdfn_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""

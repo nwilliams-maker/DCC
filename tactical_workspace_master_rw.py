@@ -89,7 +89,7 @@ def _paginate_panel(items, page_key, per_page=20):
     try:
         items = list(items or [])
         total = len(items)
-        if total <= per_page:
+        if True:  # pagination removed May 2026 — state-group collapse handles long lists
             return items, 0
         n_pages = (total + per_page - 1) // per_page
         _sk = f"_panel_page_{page_key}"
@@ -9085,7 +9085,7 @@ def run_pod_tab(pod_name):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='sent-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
                 
                 if not item['is_ghost']:
                     c = item
@@ -9209,7 +9209,7 @@ def run_pod_tab(pod_name):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='accepted-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
                 
                 if not item['is_ghost']:
                     c = item
@@ -9301,7 +9301,7 @@ def run_pod_tab(pod_name):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='declined-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
                 
                 c = item
                 ic_name = c.get('contractor_name', 'Unknown')
@@ -9339,7 +9339,7 @@ def run_pod_tab(pod_name):
                 date_str = item['sort_date']
                 if date_str != current_date:
                     current_date = date_str
-                    st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='finalized-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
                 
                 if not item['is_ghost']:
                     c = item
@@ -10553,7 +10553,7 @@ with tabs[6]:
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='sent-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
                     
                     if not item['is_ghost']:
                         c = item
@@ -10616,7 +10616,7 @@ with tabs[6]:
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='accepted-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
                     
                     if not item['is_ghost']:
                         c = item
@@ -10683,7 +10683,7 @@ with tabs[6]:
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='declined-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
                     
                     c = item
                     task_ids = [str(t['id']).strip() for t in c['data']]
@@ -10713,7 +10713,7 @@ with tabs[6]:
                     date_str = item['sort_date']
                     if date_str != current_date:
                         current_date = date_str
-                        st.markdown(f"<div style='font-size: 12px; font-weight: 800; color: #94a3b8; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px; text-transform: uppercase; letter-spacing: 1px;'>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='finalized-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
                     
                     if not item['is_ghost']:
                         c = item

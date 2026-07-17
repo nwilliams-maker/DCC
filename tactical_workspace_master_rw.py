@@ -4485,21 +4485,24 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 search_string = f"{native_details} {custom_task_type}".lower()
                 REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
                 is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
-            
+
                 # 3. APPLY DIGITAL RULES
                 # Locked strictly to the triggers you defined
                 # 🌟 May 2026 — Site Survey added; see comment at first DIGITAL_WHITELIST.
-                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey",]
+                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
                 is_digital_task = False
-
-                if not is_exempt:
+                # Jul 2026 (Nick): "Digital Install" custom task type wins over the
+                # kiosk exemption. Otherwise notes like "install kiosk here" trip
+                # the "kiosk" exemption above and the task lands in static.
+                if "digital install" in custom_task_type:
+                    is_digital_task = True
+                elif not is_exempt:
                     # Rule A: Official Task Type matches whitelist
                     if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
                         is_digital_task = True
                     # 🌟 Rule B: Boosted Standard contains the word 'digital' (matches 'Premium_Digital')
                     elif "digital" in custom_boosted:
                         is_digital_task = True
-
                 # --- 3. ASSIGN STATUS & POOL ---
                 t_status = 'ready'
                 t_wo = 'none'

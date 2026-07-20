@@ -7882,19 +7882,25 @@ def run_pod_tab(pod_name):
         else: pod_ghosts.append(g)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # PARTIAL-UNASSIGN SPLIT — Jul 2026 (Nick)
+    # UNASSIGN RECLAIM — Jul 2026 (Nick)
     # ═══════════════════════════════════════════════════════════════════════════
-    # When a dispatcher unassigns SOME (not all) of an accepted route's tasks
-    # in OnFleet, split the cluster: still-assigned tasks stay with the
-    # contractor (Accepted), newly-unassigned tasks fan out as a fresh Ready
-    # cluster for redispatch. All-unassigned is handled by RETURN-TO-DISPATCH
-    # inside the bucket loop; this block covers the partial case.
-    _fresh_state0 = st.session_state.get(f'_state0_ids_{pod_name}', set())
-    _fresh_fetch_ts = st.session_state.get(f'_state0_fetch_ts_{pod_name}')
-    if _fresh_state0 and _fresh_fetch_ts is not None:
+    # Authoritative rule: if OnFleet's fresh state=0 fetch contains a task that
+    # sent_db thinks is accepted/finalized, the task was manually unassigned.
+    # It gets pulled out of the accepted route and back into Ready for redispatch.
+    # Works for partial (some tasks) and full (all tasks) unassigns in one pass.
+    # Self-contained — fetches state=0 directly, doesn't depend on any stashed
+    # session state from process_pod or smart_sync_pod.
+    _fresh_state0 = set()
+    try:
+        _reclaim_pull = _fetch_onfleet_open_tasks_cached()
+        _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
+    except Exception as _rec_e:
+        _log_err(f"unassign_reclaim/{pod_name}/fetch", _rec_e)
+    if _fresh_state0:
         _split_cls = []
         _recovered_tids = set()
         _ghosts_to_suppress = set()
+        _now_ts = pd.Timestamp.now()
         for _sc in cls:
             _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]
             _sc_hash = hashlib.md5("".join(sorted(_sc_tids)).encode()).hexdigest()
@@ -7916,22 +7922,23 @@ def run_pod_tab(pod_name):
             if str(_sm_row.get('name', '')).strip().lower() == 'field nation':
                 _split_cls.append(_sc)
                 continue
+            # 90s propagation grace — OnFleet's state=0 cache is 60s TTL, so
+            # a just-accepted route (worker-assign PUT still in flight) could
+            # still show its tasks as state=0. Wait 90s before reclaiming.
             _sm_raw_ts = _sm_row.get('raw_ts')
             try:
-                _fetch_ok = (_sm_raw_ts is None) or (_fresh_fetch_ts > _sm_raw_ts)
+                if _sm_raw_ts is not None:
+                    _age = (_now_ts - _sm_raw_ts).total_seconds()
+                    if _age < 90:
+                        _split_cls.append(_sc)
+                        continue
             except Exception:
-                _fetch_ok = True
-            if not _fetch_ok:
-                _split_cls.append(_sc)
-                continue
+                pass
             _un = [t for t in _sc['data'] if str(t['id']).strip() in _fresh_state0]
             _st = [t for t in _sc['data'] if str(t['id']).strip() not in _fresh_state0]
-            if not _un or not _st:
-                # No unassigned OR all unassigned — either no split needed, or
-                # RETURN-TO-DISPATCH inside the bucket loop handles the full bounce.
+            if not _un:
                 _split_cls.append(_sc)
                 continue
-            # Genuine partial unassign: split into two sub-clusters.
             def _recompute(_data):
                 _bs_vals = [str(x.get('boosted_standard', '')).lower() for x in _data if x.get('boosted_standard')]
                 _btag = ('local plus' if any('local plus' in v for v in _bs_vals)
@@ -7943,10 +7950,12 @@ def run_pod_tab(pod_name):
                     'esc_count': sum(1 for x in _data if x.get('escalated')),
                     'boosted_tag': _btag,
                 }
-            _assigned_c = dict(_sc)
-            _assigned_c['data'] = _st
-            _assigned_c.update(_recompute(_st))
-            _split_cls.append(_assigned_c)
+            if _st:
+                # Partial unassign: keep still-assigned in Accepted, split unassigned into Ready.
+                _assigned_c = dict(_sc)
+                _assigned_c['data'] = _st
+                _assigned_c.update(_recompute(_st))
+                _split_cls.append(_assigned_c)
             _recovered_c = dict(_sc)
             _recovered_c['data'] = _un
             _recovered_c.update(_recompute(_un))
@@ -7959,9 +7968,6 @@ def run_pod_tab(pod_name):
             _split_cls.append(_recovered_c)
             for t in _un:
                 _recovered_tids.add(str(t['id']).strip())
-            # Ghost suppression: any pod ghost whose task_ids overlap with the
-            # original cluster's task_ids would otherwise re-materialize the
-            # pre-split row via unify_and_sort_by_date's fragmented-ghost case.
             _sc_tid_set = set(_sc_tids)
             for _g in pod_ghosts:
                 _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
@@ -7969,18 +7975,46 @@ def run_pod_tab(pod_name):
                     if _g.get('hash'):
                         _ghosts_to_suppress.add(_g.get('hash'))
         cls = _split_cls
-        # Drop recovered task_ids from sent_db so the bucket router's
-        # sheet_match lookup returns None for them → they fall through to Ready.
         for _tid in _recovered_tids:
             sent_db.pop(_tid, None)
-        # Filter suppressed ghosts so they don't show as duplicate cards AND
-        # so their task_ids don't seed the AWAITING-DEDUP set below.
+        # Also reclaim tasks that are state=0 AND accepted/finalized in sent_db
+        # but NOT in any current cluster. Happens when clusters got rebuilt
+        # while the tasks were state=1 (accepted), and now they're state=0
+        # again but haven't been re-clustered by smart_sync yet.
+        _cls_all_tids = set()
+        for _c_scan in cls:
+            for _t_scan in _c_scan.get('data', []):
+                _cls_all_tids.add(str(_t_scan.get('id', '')).strip())
+        for _tid in list(sent_db.keys()):
+            if _tid in _fresh_state0 and _tid not in _cls_all_tids:
+                _rec = sent_db[_tid]
+                _st_str = str(_rec.get('status', '')).lower()
+                if _st_str in ('accepted', 'finalized'):
+                    _name_str = str(_rec.get('name', '')).strip().lower()
+                    if _name_str != 'field nation':
+                        _raw_ts = _rec.get('raw_ts')
+                        try:
+                            if _raw_ts is not None:
+                                _age2 = (_now_ts - _raw_ts).total_seconds()
+                                if _age2 < 90:
+                                    continue
+                        except Exception:
+                            pass
+                        sent_db.pop(_tid, None)
+                        # Suppress matching ghost too so it doesn't rehydrate.
+                        for _g in pod_ghosts:
+                            _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
+                            if _tid in _g_tids and _g.get('hash'):
+                                _ghosts_to_suppress.add(_g.get('hash'))
         if _ghosts_to_suppress:
             pod_ghosts[:] = [g for g in pod_ghosts if g.get('hash') not in _ghosts_to_suppress]
             _gd_pod = ghost_db.get(pod_name, [])
             if isinstance(_gd_pod, list):
                 ghost_db[pod_name] = [g for g in _gd_pod if g.get('hash') not in _ghosts_to_suppress]
 
+    # 1. 📂 DEFINE BUCKETS
+    ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
+    live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
     # 1. 📂 DEFINE BUCKETS
     ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
     live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
@@ -8186,8 +8220,9 @@ def run_pod_tab(pod_name):
                             _fetch_after_accept = _fresh_fetch_ts > _acc_raw_ts
                     except Exception:
                         _fetch_after_accept = True
-                    if _fetch_after_accept and all(_tid in _fresh_state0 for _tid in task_ids):
-                        _reassigned_back = True
+                    # RETURN-TO-DISPATCH now handled entirely by the UNASSIGN
+                    # RECLAIM preprocessing above (Jul 2026). Nothing to do here.
+                    pass
             if _reassigned_back:
                 c['status'] = 'Ready'
                 ready.append(c)

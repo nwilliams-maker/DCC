@@ -4278,6 +4278,13 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             except Exception:
                 pass
         all_tasks          = _onfleet_data['tasks']
+        # Jul 2026 — save the fresh state=0 task-ID set so run_pod_tab can
+        # tell whether a cluster's tasks are ACTUALLY unassigned in OnFleet
+        # (not just still present in a stale cached cluster). Bucket router
+        # uses this to bounce manually-unassigned routes back to Ready.
+        if not warm_only:
+            st.session_state[f'_state0_ids_{pod_name}'] = {str(_t.get('id', '')).strip() for _t in all_tasks}
+            st.session_state[f'_state0_fetch_ts_{pod_name}'] = datetime.now()
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
             if not warm_only: st.warning(f"\u26a0\ufe0f Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
@@ -6856,6 +6863,10 @@ def smart_sync_pod(pod_name):
     if _fn_team_id_local:
         _excluded_team_set.add(_fn_team_id_local)
     all_tasks_raw      = _onfleet_data['tasks']
+    # Same fresh state=0 stash as process_pod so RETURN-TO-DISPATCH has
+    # up-to-date OnFleet truth after every Check New Tasks click.
+    st.session_state[f'_state0_ids_{pod_name}'] = {str(_t.get('id', '')).strip() for _t in all_tasks_raw}
+    st.session_state[f'_state0_fetch_ts_{pod_name}'] = datetime.now()
     if _onfleet_data.get('_hit_cap'):
         _log_err("smart_sync_pod", f"hit pagination cap (200 pages)")
         st.warning(f"⚠️ Hit pagination cap of 200 pages during Smart Sync. Some new tasks may be missing.")
@@ -8050,28 +8061,33 @@ def run_pod_tab(pod_name):
             _reassigned_back = False
             # 🌐 FN-assigned routes are managed by Field Nation, not DCC.
             # Their OnFleet tasks can legitimately sit in the state=0 feed (DCC
-            # never worker-assigns an FN route), so the "accepted route with
-            # unassigned tasks -> back to Dispatch" rule must NOT fire for them
-            # — otherwise every FN route bounces out of Accepted into Ready once
-            # the 3-min grace expires. markFNAssigned always stamps the
-            # contractor as "Field Nation"; a real contractor name never
-            # collides with that. (May 23 2026 — Nick.)
+            # never worker-assigns an FN route), so RETURN-TO-DISPATCH must NOT
+            # fire for them — otherwise every FN route bounces out of Accepted
+            # into Ready. markFNAssigned always stamps the contractor as
+            # "Field Nation"; a real contractor name never collides.
             _is_fn_route = str(sheet_match.get('name', '')).strip().lower() == 'field nation'
             if raw_status in ('accepted', 'finalized') and not _is_fn_route:
+                # RETURN-TO-DISPATCH re-enabled Jul 2026 (Nick: "manually
+                # unassigned in OnFleet needs to flow back to a pool").
+                # The May-2026 version bounced on cached clusters and got
+                # disabled. This one bounces ONLY when the most recent
+                # OnFleet state=0 fetch actually contained every task in
+                # the cluster AND the fetch happened AFTER the acceptance.
+                # Both conditions together mean the tasks were assigned
+                # (post-accept) and then unassigned back to state=0 — the
+                # exact scenario we want to catch.
+                _fresh_state0 = st.session_state.get(f'_state0_ids_{pod_name}', set())
+                _fresh_fetch_ts = st.session_state.get(f'_state0_fetch_ts_{pod_name}')
                 _acc_raw_ts = sheet_match.get('raw_ts')
-                _acc_is_fresh = False
-                if _acc_raw_ts is not None:
+                if _fresh_state0 and _fresh_fetch_ts is not None:
+                    _fetch_after_accept = True
                     try:
-                        _acc_age = (pd.Timestamp.now() - _acc_raw_ts).total_seconds()
-                        _acc_is_fresh = _acc_age < 180  # 3-min propagation grace
+                        if _acc_raw_ts is not None:
+                            _fetch_after_accept = _fresh_fetch_ts > _acc_raw_ts
                     except Exception:
-                        _acc_is_fresh = False
-                # if not _acc_is_fresh: _reassigned_back = True
-                # RETURN-TO-DISPATCH disabled (May 30 2026 - Nick): the cached
-                # clusters_{pod} stayed stale after acceptance, so the grace
-                # would expire and bounce accepted routes back into Ready. If a
-                # route truly needs to go back to Dispatch, the dispatcher uses
-                # the re-route button (explicit, intentional).
+                        _fetch_after_accept = True
+                    if _fetch_after_accept and all(_tid in _fresh_state0 for _tid in task_ids):
+                        _reassigned_back = True
             if _reassigned_back:
                 c['status'] = 'Ready'
                 ready.append(c)

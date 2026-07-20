@@ -7881,6 +7881,106 @@ def run_pod_tab(pod_name):
         elif g_stat == "field_nation": fn_ghosts.append(g)
         else: pod_ghosts.append(g)
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PARTIAL-UNASSIGN SPLIT — Jul 2026 (Nick)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # When a dispatcher unassigns SOME (not all) of an accepted route's tasks
+    # in OnFleet, split the cluster: still-assigned tasks stay with the
+    # contractor (Accepted), newly-unassigned tasks fan out as a fresh Ready
+    # cluster for redispatch. All-unassigned is handled by RETURN-TO-DISPATCH
+    # inside the bucket loop; this block covers the partial case.
+    _fresh_state0 = st.session_state.get(f'_state0_ids_{pod_name}', set())
+    _fresh_fetch_ts = st.session_state.get(f'_state0_fetch_ts_{pod_name}')
+    if _fresh_state0 and _fresh_fetch_ts is not None:
+        _split_cls = []
+        _recovered_tids = set()
+        _ghosts_to_suppress = set()
+        for _sc in cls:
+            _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]
+            _sc_hash = hashlib.md5("".join(sorted(_sc_tids)).encode()).hexdigest()
+            if st.session_state.get(f"reverted_{_sc_hash}", False):
+                _split_cls.append(_sc)
+                continue
+            _sm_row = None
+            for _tid in _sc_tids:
+                if _tid in sent_db:
+                    _sm_row = sent_db[_tid]
+                    break
+            if not _sm_row:
+                _split_cls.append(_sc)
+                continue
+            _sm_status = str(_sm_row.get('status', '')).lower()
+            if _sm_status not in ('accepted', 'finalized'):
+                _split_cls.append(_sc)
+                continue
+            if str(_sm_row.get('name', '')).strip().lower() == 'field nation':
+                _split_cls.append(_sc)
+                continue
+            _sm_raw_ts = _sm_row.get('raw_ts')
+            try:
+                _fetch_ok = (_sm_raw_ts is None) or (_fresh_fetch_ts > _sm_raw_ts)
+            except Exception:
+                _fetch_ok = True
+            if not _fetch_ok:
+                _split_cls.append(_sc)
+                continue
+            _un = [t for t in _sc['data'] if str(t['id']).strip() in _fresh_state0]
+            _st = [t for t in _sc['data'] if str(t['id']).strip() not in _fresh_state0]
+            if not _un or not _st:
+                # No unassigned OR all unassigned — either no split needed, or
+                # RETURN-TO-DISPATCH inside the bucket loop handles the full bounce.
+                _split_cls.append(_sc)
+                continue
+            # Genuine partial unassign: split into two sub-clusters.
+            def _recompute(_data):
+                _bs_vals = [str(x.get('boosted_standard', '')).lower() for x in _data if x.get('boosted_standard')]
+                _btag = ('local plus' if any('local plus' in v for v in _bs_vals)
+                         else ('boosted' if any('boosted' in v for v in _bs_vals) else ''))
+                return {
+                    'stops': len(set(x['full'] for x in _data)),
+                    'inst_count': sum(1 for x in _data if 'install' in str(x.get('task_type','')).lower()),
+                    'remov_count': sum(1 for x in _data if str(x.get('task_type','')).lower() in ('kiosk removal','remove kiosk')),
+                    'esc_count': sum(1 for x in _data if x.get('escalated')),
+                    'boosted_tag': _btag,
+                }
+            _assigned_c = dict(_sc)
+            _assigned_c['data'] = _st
+            _assigned_c.update(_recompute(_st))
+            _split_cls.append(_assigned_c)
+            _recovered_c = dict(_sc)
+            _recovered_c['data'] = _un
+            _recovered_c.update(_recompute(_un))
+            _recovered_c['status'] = 'Ready'
+            _recovered_c['contractor_name'] = 'Unknown'
+            _recovered_c['wo'] = ''
+            _recovered_c['comp'] = 0
+            _recovered_c['due'] = 'N/A'
+            _recovered_c['route_ts'] = ''
+            _split_cls.append(_recovered_c)
+            for t in _un:
+                _recovered_tids.add(str(t['id']).strip())
+            # Ghost suppression: any pod ghost whose task_ids overlap with the
+            # original cluster's task_ids would otherwise re-materialize the
+            # pre-split row via unify_and_sort_by_date's fragmented-ghost case.
+            _sc_tid_set = set(_sc_tids)
+            for _g in pod_ghosts:
+                _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
+                if _g_tids and _g_tids & _sc_tid_set:
+                    if _g.get('hash'):
+                        _ghosts_to_suppress.add(_g.get('hash'))
+        cls = _split_cls
+        # Drop recovered task_ids from sent_db so the bucket router's
+        # sheet_match lookup returns None for them → they fall through to Ready.
+        for _tid in _recovered_tids:
+            sent_db.pop(_tid, None)
+        # Filter suppressed ghosts so they don't show as duplicate cards AND
+        # so their task_ids don't seed the AWAITING-DEDUP set below.
+        if _ghosts_to_suppress:
+            pod_ghosts[:] = [g for g in pod_ghosts if g.get('hash') not in _ghosts_to_suppress]
+            _gd_pod = ghost_db.get(pod_name, [])
+            if isinstance(_gd_pod, list):
+                ghost_db[pod_name] = [g for g in _gd_pod if g.get('hash') not in _ghosts_to_suppress]
+
     # 1. 📂 DEFINE BUCKETS
     ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
     live_hashes = set() # 🌟 Track live routes so we don't duplicate them!

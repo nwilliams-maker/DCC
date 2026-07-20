@@ -7047,9 +7047,9 @@ def smart_sync_pod(pod_name):
         _new_is_digital = bool(new_task.get('is_digital', False))
         _new_is_removal = bool(new_task.get('is_removal', False))
         for cluster in existing_clusters:
-            # Digital / Removal / Standard never mix — mirror process_pod's Rule 1.
-            # Without this, smart_sync_pod merged new digital tasks into static
-            # clusters within 20mi and dispatchers saw a mixed route. (Jul 2026 — Nick.)
+            # Digital / CVS Removal / Standard never mix — mirror process_pod's Rule 1.
+            # Without this guard, smart_sync merged new CVS removals and digital
+            # tasks into whichever static cluster was within 20mi. (Jul 2026 — Nick.)
             if bool(cluster.get('is_digital', False)) != _new_is_digital: continue
             if bool(cluster.get('is_removal', False)) != _new_is_removal: continue
             dist = haversine(cluster['center'][0], cluster['center'][1], new_task['lat'], new_task['lon'])

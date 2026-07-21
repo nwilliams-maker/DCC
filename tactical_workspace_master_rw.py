@@ -261,6 +261,10 @@ def _fetch_onfleet_open_tasks_cached():
     esc_team_ids = [t['id'] for t in teams_res if 'escalation' in str(t.get('name', '')).lower()]
     cvs_remov_team_ids = [t['id'] for t in teams_res if 'cvs kiosk remov' in str(t.get('name', '')).lower()]
     fn_team_ids = [t['id'] for t in teams_res if 'field nation' in str(t.get('name', '')).lower()]
+    # Jul 2026 (Nick): any task in the "D - Digital Routes" team stays in the
+    # Digital tab regardless of its task type. Overrides REGULAR_EXEMPTIONS
+    # and DIGITAL_WHITELIST — team membership wins.
+    digital_team_ids = [t['id'] for t in teams_res if 'digital routes' in str(t.get('name', '')).lower()]
     # 🚫 Excluded teams — never include tasks in these team pools in any pod's
     # Ready/Flagged. Match is case-insensitive.
     # _EXCLUDED_TEAM_SUBSTRINGS: literal substrings (full phrases).
@@ -408,6 +412,7 @@ def _fetch_onfleet_open_tasks_cached():
         'target_team_ids': target_team_ids,
         'esc_team_ids': esc_team_ids,
         'cvs_remov_team_ids': cvs_remov_team_ids,
+        'digital_team_ids': digital_team_ids,
         'fn_team_id': (fn_team_ids[0] if fn_team_ids else None),
         'excluded_team_ids': excluded_team_ids,
         'fn_worker_id': fn_worker_id,
@@ -4502,6 +4507,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 # kiosk exemption. Otherwise notes like "install kiosk here" trip
                 # the "kiosk" exemption above and the task lands in static.
                 if "digital install" in custom_task_type:
+                    is_digital_task = False
+                # Jul 2026 (Nick): tasks in the "D - Digital Routes" OnFleet
+                # team override the whitelist/exemption path — team membership
+                # wins so the task always lands in the Digital tab.
+                _digital_team_ids_local = _onfleet_data.get('digital_team_ids', [])
+                if c_type == 'TEAM' and container.get('team') in _digital_team_ids_local:
                     is_digital_task = True
                 elif not is_exempt:
                     # Rule A: Official Task Type matches whitelist

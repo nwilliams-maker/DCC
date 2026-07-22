@@ -8023,13 +8023,65 @@ def run_pod_tab(pod_name):
             if isinstance(_gd_pod, list):
                 ghost_db[pod_name] = [g for g in _gd_pod if g.get('hash') not in _ghosts_to_suppress]
 
-    # 1. 📂 DEFINE BUCKETS
-    ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
-    live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
-    # 1. 📂 DEFINE BUCKETS
-    ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
-    live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STATE=0 IS AUTHORITATIVE — Jul 2026 (Nick)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # If OnFleet's fresh state=0 fetch contains a task that sent_db thinks was
+    # Accepted or Finalized, the task was unassigned in OnFleet — reclaim it
+    # into Ready. Sent stays in Sent (contractor still deciding), Declined
+    # stays in Declined (history), Field Nation stays put (FN owns state).
+    # 90s grace keeps just-accepted routes from bouncing during OnFleet's cache
+    # propagation window.
+    _fresh_state0 = set()
+    try:
+        _reclaim_pull = _fetch_onfleet_open_tasks_cached()
+        _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
+    except Exception as _rec_e:
+        _log_err(f"state0_authoritative/{pod_name}/fetch", _rec_e)
+    if _fresh_state0:
+        _now_ts = pd.Timestamp.now()
+        _reclaimed_tids = set()
+        _ghosts_to_suppress = set()
+        for _tid in list(sent_db.keys()):
+            if _tid not in _fresh_state0:
+                continue
+            _rec = sent_db[_tid]
+            _st_str = str(_rec.get('status', '')).lower()
+            # Only reclaim if the task was actually ASSIGNED to a worker
+            # (accepted/finalized). Sent = still pending decision, keep in
+            # Sent. Declined = keep in Declined for visibility.
+            if _st_str not in ('accepted', 'finalized'):
+                continue
+            _name_str = str(_rec.get('name', '')).strip().lower()
+            if _name_str == 'field nation':
+                continue
+            _raw_ts = _rec.get('raw_ts')
+            try:
+                if _raw_ts is not None:
+                    _age = (_now_ts - _raw_ts).total_seconds()
+                    if _age < 90:
+                        continue
+            except Exception:
+                pass
+            sent_db.pop(_tid, None)
+            _reclaimed_tids.add(_tid)
+        # Suppress ghosts that reference reclaimed tasks so they don't
+        # rehydrate as phantom Awaiting cards.
+        if _reclaimed_tids:
+            for _g in pod_ghosts:
+                _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
+                if _g_tids & _reclaimed_tids and _g.get('hash'):
+                    _ghosts_to_suppress.add(_g.get('hash'))
+        if _ghosts_to_suppress:
+            pod_ghosts[:] = [g for g in pod_ghosts if g.get('hash') not in _ghosts_to_suppress]
+            _gd_pod = ghost_db.get(pod_name, [])
+            if isinstance(_gd_pod, list):
+                ghost_db[pod_name] = [g for g in _gd_pod if g.get('hash') not in _ghosts_to_suppress]
 
+    # 1. 📂 DEFINE BUCKETS
+    ready, review, sent, accepted, declined, finalized, field_nation, digital_ready = [], [], [], [], [], [], [], []
+    live_hashes = set() # 🌟 Track live routes so we don't duplicate them!
+    
     # 🛡️ AWAITING-CONFIRMATION DEDUP GUARD (May 18 2026 — v2 strengthened)
     # A task ID must never appear in BOTH the Awaiting column (Sent/Accepted/
     # Declined/Finalized) AND the main Dispatch column (Ready/Flagged) at the

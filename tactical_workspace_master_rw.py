@@ -8025,30 +8025,120 @@ def run_pod_tab(pod_name):
     # STATE=0 IS AUTHORITATIVE — Jul 2026 (Nick)
     # ═══════════════════════════════════════════════════════════════════════════
     # Reads the fresh state=0 set stashed by process_pod / smart_sync_pod. No
-    # OnFleet fetch here — this keeps render latency at zero. Reclaim only
-    # fires when the stash is present (populated on Initialize Data or Check
-    # New Tasks click). If stash is missing, nothing runs and buckets follow
-    # the existing sheet_match logic.
+    # OnFleet fetch here — zero added render latency.
+    #
+    # Two behaviors:
+    #   1. Full unassign: all tasks of an accepted/finalized cluster are in
+    #      state=0 → whole cluster flips to Ready.
+    #   2. Partial unassign: some tasks of an accepted/finalized cluster are in
+    #      state=0, others aren't → split. Still-assigned tasks stay with the
+    #      contractor in Accepted, unassigned tasks fan out as a Ready cluster.
+    #   3. Orphan reclaim: tasks in sent_db but NOT in any current cluster,
+    #      confirmed state=0 → drop from sent_db so next Check New Tasks
+    #      picks them up as fresh Ready work.
+    #
+    # Sent / Declined / FN routes are always excluded — only Accepted and
+    # Finalized get reclaimed. 90-second grace on raw_ts prevents just-accepted
+    # routes from bouncing during OnFleet's worker-assign propagation window.
     _fresh_state0 = st.session_state.get(f'_state0_ids_{pod_name}', set())
     if _fresh_state0:
         _now_ts = pd.Timestamp.now()
         _reclaimed_tids = set()
         _ghosts_to_suppress = set()
+        _split_cls = []
+        for _sc in cls:
+            _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]
+            _sc_hash = hashlib.md5("".join(sorted(_sc_tids)).encode()).hexdigest()
+            if st.session_state.get(f"reverted_{_sc_hash}", False):
+                _split_cls.append(_sc)
+                continue
+            # Find sheet_match to check status
+            _sm_row = None
+            for _tid in _sc_tids:
+                if _tid in sent_db:
+                    _sm_row = sent_db[_tid]
+                    break
+            if not _sm_row:
+                _split_cls.append(_sc)
+                continue
+            _sm_status = str(_sm_row.get('status', '')).lower()
+            if _sm_status not in ('accepted', 'finalized'):
+                _split_cls.append(_sc)
+                continue
+            if str(_sm_row.get('name', '')).strip().lower() == 'field nation':
+                _split_cls.append(_sc)
+                continue
+            # 90s grace
+            _sm_raw_ts = _sm_row.get('raw_ts')
+            try:
+                if _sm_raw_ts is not None:
+                    _age = (_now_ts - _sm_raw_ts).total_seconds()
+                    if _age < 90:
+                        _split_cls.append(_sc)
+                        continue
+            except Exception:
+                pass
+            # Partition: unassigned (in fresh state=0) vs still-assigned
+            _un = [t for t in _sc['data'] if str(t['id']).strip() in _fresh_state0]
+            _st = [t for t in _sc['data'] if str(t['id']).strip() not in _fresh_state0]
+            if not _un:
+                # All still assigned — no change
+                _split_cls.append(_sc)
+                continue
+            def _recompute(_data):
+                _bs_vals = [str(x.get('boosted_standard', '')).lower() for x in _data if x.get('boosted_standard')]
+                _btag = ('local plus' if any('local plus' in v for v in _bs_vals)
+                         else ('boosted' if any('boosted' in v for v in _bs_vals) else ''))
+                return {
+                    'stops': len(set(x['full'] for x in _data)),
+                    'inst_count': sum(1 for x in _data if 'install' in str(x.get('task_type','')).lower()),
+                    'remov_count': sum(1 for x in _data if str(x.get('task_type','')).lower() in ('kiosk removal','remove kiosk')),
+                    'esc_count': sum(1 for x in _data if x.get('escalated')),
+                    'boosted_tag': _btag,
+                }
+            if _st:
+                # Partial unassign: keep still-assigned as accepted cluster,
+                # split unassigned into a new Ready cluster.
+                _assigned_c = dict(_sc)
+                _assigned_c['data'] = _st
+                _assigned_c.update(_recompute(_st))
+                _split_cls.append(_assigned_c)
+            _recovered_c = dict(_sc)
+            _recovered_c['data'] = _un
+            _recovered_c.update(_recompute(_un))
+            _recovered_c['status'] = 'Ready'
+            _recovered_c['contractor_name'] = 'Unknown'
+            _recovered_c['wo'] = ''
+            _recovered_c['comp'] = 0
+            _recovered_c['due'] = 'N/A'
+            _recovered_c['route_ts'] = ''
+            _split_cls.append(_recovered_c)
+            for t in _un:
+                _reclaimed_tids.add(str(t['id']).strip())
+            # Suppress ghost row for the original cluster
+            _sc_tid_set = set(_sc_tids)
+            for _g in pod_ghosts:
+                _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
+                if _g_tids and _g_tids & _sc_tid_set and _g.get('hash'):
+                    _ghosts_to_suppress.add(_g.get('hash'))
+        cls = _split_cls
+        # Orphan reclaim: tasks in sent_db but NOT in any current cluster
+        _cls_all_tids = set()
+        for _c_scan in cls:
+            for _t_scan in _c_scan.get('data', []):
+                _cls_all_tids.add(str(_t_scan.get('id', '')).strip())
         for _tid in list(sent_db.keys()):
             if _tid not in _fresh_state0:
                 continue
+            if _tid in _cls_all_tids:
+                continue  # already handled above
             _rec = sent_db[_tid]
             _st_str = str(_rec.get('status', '')).lower()
-            # Only reclaim tasks that were actually ASSIGNED to a worker
-            # (accepted/finalized). Sent stays in Sent, Declined stays in
-            # Declined, Field Nation stays in FN.
             if _st_str not in ('accepted', 'finalized'):
                 continue
             _name_str = str(_rec.get('name', '')).strip().lower()
             if _name_str == 'field nation':
                 continue
-            # 90s grace so a just-accepted route isn't reclaimed during OnFleet's
-            # worker-assign PUT propagation window.
             _raw_ts = _rec.get('raw_ts')
             try:
                 if _raw_ts is not None:
@@ -8057,15 +8147,17 @@ def run_pod_tab(pod_name):
                         continue
             except Exception:
                 pass
-            sent_db.pop(_tid, None)
             _reclaimed_tids.add(_tid)
-        # Suppress ghosts that reference reclaimed tasks so they don't
-        # rehydrate as phantom Awaiting cards.
-        if _reclaimed_tids:
+            # Suppress matching ghost
             for _g in pod_ghosts:
                 _g_tids = set(str(_t).strip() for _t in _g.get('task_ids', []) if str(_t).strip())
-                if _g_tids & _reclaimed_tids and _g.get('hash'):
+                if _tid in _g_tids and _g.get('hash'):
                     _ghosts_to_suppress.add(_g.get('hash'))
+        # Drop reclaimed task_ids from sent_db so bucket router puts recovered
+        # clusters in Ready (no sheet_match → fallback path).
+        for _tid in _reclaimed_tids:
+            sent_db.pop(_tid, None)
+        # Filter suppressed ghosts.
         if _ghosts_to_suppress:
             pod_ghosts[:] = [g for g in pod_ghosts if g.get('hash') not in _ghosts_to_suppress]
             _gd_pod = ghost_db.get(pod_name, [])

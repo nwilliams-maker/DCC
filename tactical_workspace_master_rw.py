@@ -557,18 +557,22 @@ _components.html(
 # restarts of the same code, only changes when the code actually changes — so
 # the banner now fires ONLY on a real deploy, never on a transparent restart.
 def _compute_instance_id():
-    _rid = _os.environ.get('RAILWAY_DEPLOYMENT_ID') or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
-    if _rid:
-        return _rid
+    # Jul 2026 (Nick): "App was updated" was firing without a real deploy.
+    # RAILWAY_DEPLOYMENT_ID / _GIT_COMMIT_SHA can churn on container restarts,
+    # worker reshuffles, or Railway-internal events even when the code didn't
+    # change. Use the file-content MD5 as the primary source — it only differs
+    # when the code actually differs, so the banner only fires on real deploys.
     try:
         import hashlib as _hashlib
         _self_path = _os.path.abspath(__file__)
         with open(_self_path, 'rb') as _fh:
             return _hashlib.md5(_fh.read()).hexdigest()
     except Exception:
-        # Last-resort fallback: still deterministic across restarts of the same
-        # container — uses pid-less data so it doesn't churn on restart. We hash
-        # the working directory + python version so dev/prod don't collide.
+        # File-read failed (rare — permissions, missing __file__, etc.). Fall
+        # back to Railway env vars if present, then to cwd+python-version hash.
+        _rid = _os.environ.get('RAILWAY_DEPLOYMENT_ID') or _os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+        if _rid:
+            return _rid
         try:
             import sys as _sys, hashlib as _hashlib
             return _hashlib.md5(

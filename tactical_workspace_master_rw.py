@@ -4283,13 +4283,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             except Exception:
                 pass
         all_tasks          = _onfleet_data['tasks']
-        # Jul 2026 — save the fresh state=0 task-ID set so run_pod_tab can
-        # tell whether a cluster's tasks are ACTUALLY unassigned in OnFleet
-        # (not just still present in a stale cached cluster). Bucket router
-        # uses this to bounce manually-unassigned routes back to Ready.
+        # Stash fresh state=0 IDs for STATE=0 IS AUTHORITATIVE reclaim in run_pod_tab.
         if not warm_only:
             st.session_state[f'_state0_ids_{pod_name}'] = {str(_t.get('id', '')).strip() for _t in all_tasks}
-            st.session_state[f'_state0_fetch_ts_{pod_name}'] = datetime.now()
         if _onfleet_data.get('_hit_cap'):
             _log_err("process_pod", f"hit pagination cap (200 pages)")
             if not warm_only: st.warning(f"\u26a0\ufe0f Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
@@ -6874,10 +6870,8 @@ def smart_sync_pod(pod_name):
     if _fn_team_id_local:
         _excluded_team_set.add(_fn_team_id_local)
     all_tasks_raw      = _onfleet_data['tasks']
-    # Same fresh state=0 stash as process_pod so RETURN-TO-DISPATCH has
-    # up-to-date OnFleet truth after every Check New Tasks click.
+    # Stash fresh state=0 IDs for STATE=0 IS AUTHORITATIVE reclaim in run_pod_tab.
     st.session_state[f'_state0_ids_{pod_name}'] = {str(_t.get('id', '')).strip() for _t in all_tasks_raw}
-    st.session_state[f'_state0_fetch_ts_{pod_name}'] = datetime.now()
     if _onfleet_data.get('_hit_cap'):
         _log_err("smart_sync_pod", f"hit pagination cap (200 pages)")
         st.warning(f"⚠️ Hit pagination cap of 200 pages during Smart Sync. Some new tasks may be missing.")
@@ -8026,18 +8020,12 @@ def run_pod_tab(pod_name):
     # ═══════════════════════════════════════════════════════════════════════════
     # STATE=0 IS AUTHORITATIVE — Jul 2026 (Nick)
     # ═══════════════════════════════════════════════════════════════════════════
-    # If OnFleet's fresh state=0 fetch contains a task that sent_db thinks was
-    # Accepted or Finalized, the task was unassigned in OnFleet — reclaim it
-    # into Ready. Sent stays in Sent (contractor still deciding), Declined
-    # stays in Declined (history), Field Nation stays put (FN owns state).
-    # 90s grace keeps just-accepted routes from bouncing during OnFleet's cache
-    # propagation window.
-    _fresh_state0 = set()
-    try:
-        _reclaim_pull = _fetch_onfleet_open_tasks_cached()
-        _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
-    except Exception as _rec_e:
-        _log_err(f"state0_authoritative/{pod_name}/fetch", _rec_e)
+    # Reads the fresh state=0 set stashed by process_pod / smart_sync_pod. No
+    # OnFleet fetch here — this keeps render latency at zero. Reclaim only
+    # fires when the stash is present (populated on Initialize Data or Check
+    # New Tasks click). If stash is missing, nothing runs and buckets follow
+    # the existing sheet_match logic.
+    _fresh_state0 = st.session_state.get(f'_state0_ids_{pod_name}', set())
     if _fresh_state0:
         _now_ts = pd.Timestamp.now()
         _reclaimed_tids = set()
@@ -8047,14 +8035,16 @@ def run_pod_tab(pod_name):
                 continue
             _rec = sent_db[_tid]
             _st_str = str(_rec.get('status', '')).lower()
-            # Only reclaim if the task was actually ASSIGNED to a worker
-            # (accepted/finalized). Sent = still pending decision, keep in
-            # Sent. Declined = keep in Declined for visibility.
+            # Only reclaim tasks that were actually ASSIGNED to a worker
+            # (accepted/finalized). Sent stays in Sent, Declined stays in
+            # Declined, Field Nation stays in FN.
             if _st_str not in ('accepted', 'finalized'):
                 continue
             _name_str = str(_rec.get('name', '')).strip().lower()
             if _name_str == 'field nation':
                 continue
+            # 90s grace so a just-accepted route isn't reclaimed during OnFleet's
+            # worker-assign PUT propagation window.
             _raw_ts = _rec.get('raw_ts')
             try:
                 if _raw_ts is not None:

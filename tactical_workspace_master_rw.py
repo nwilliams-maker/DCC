@@ -7899,12 +7899,20 @@ def run_pod_tab(pod_name):
     # Works for partial (some tasks) and full (all tasks) unassigns in one pass.
     # Self-contained — fetches state=0 directly, doesn't depend on any stashed
     # session state from process_pod or smart_sync_pod.
+    # 🚀 THROTTLE — Jul 23 2026 — Nick: reclaim block was running on EVERY
+    # widget click/rerun, causing lag for pods with 200+ clusters. 20s TTL per
+    # pod keeps it responsive without burning CPU on every interaction.
+    _reclaim_ts_key = f'_reclaim_last_ts_{pod_name}'
+    _reclaim_now = time.time()
+    _skip_reclaim = (_reclaim_now - st.session_state.get(_reclaim_ts_key, 0)) < 20
     _fresh_state0 = set()
-    try:
-        _reclaim_pull = _fetch_onfleet_open_tasks_cached()
-        _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
-    except Exception as _rec_e:
-        _log_err(f"unassign_reclaim/{pod_name}/fetch", _rec_e)
+    if not _skip_reclaim:
+        st.session_state[_reclaim_ts_key] = _reclaim_now
+        try:
+            _reclaim_pull = _fetch_onfleet_open_tasks_cached()
+            _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
+        except Exception as _rec_e:
+            _log_err(f"unassign_reclaim/{pod_name}/fetch", _rec_e)
     if _fresh_state0:
         _split_cls = []
         _recovered_tids = set()

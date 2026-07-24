@@ -5988,15 +5988,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
 
 
-        # Jul 2026 — wrap the pre-button computation so an exception during the
-        # WO sticky-reservation walk, sig_preview build, or email-preview render
-        # doesn't silently kill the button row below. Without this wrapper, a
-        # 5-route bundle with a bloated sent_db can trip a hidden exception and
-        # the Generate Link / Assign to FN buttons vanish from the card.
-        _prebtn_ok = True
-        _prebtn_err = None
-        try:
-            stops_text = ""
+        stops_text = ""
         
         if len(stop_metrics) > 2:
             stops_text += f"   ... and {len(stop_metrics) - 2} more stops.\n"
@@ -6192,22 +6184,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             email_body_content = st.text_area("Email Content Preview", value=sig_preview, height=120, key=f"txt_area_{pod_name}_{current_data_fingerprint}_{cluster_hash}", disabled=not is_unlocked)
         else:
             email_body_content = sig_preview
-
-        except Exception as _prebtn_exc:
-            _prebtn_ok = False
-            _prebtn_err = _prebtn_exc
-            _log_err(f"render_dispatch/prebtn/{cluster_hash[:8]}", _prebtn_exc)
-            # Fallback defaults so the button render below has something valid
-            # to work with — dispatcher can still send the link with baseline
-            # values. Real data flows once whatever tripped the exception clears.
-            due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
-            is_already_sent = is_sent or is_declined or st.session_state.get(f"route_state_{cluster_hash}") == "email_sent"
-            prev_ic_name = cluster.get('contractor_name', 'Unknown')
-            ic_name = ic.get('name', 'Unknown Contractor')
-            wo_val = cluster.get('wo', f"{ic_name}-{datetime.now().strftime('%m%d%Y')}-1") or f"{ic_name}-{datetime.now().strftime('%m%d%Y')}-1"
-            active_tx_key = f"tx_{pod_name}_{cluster_hash}_fallback"
-            email_body_content = f"Route dispatch for {ic_name} — WO {wo_val} — {cluster.get('stops', '?')} stops, due {due}"
-            st.warning(f"⚠️ Route preview couldn't be built (see Railway logs for `render_dispatch/prebtn/{cluster_hash[:8]}`). Dispatch button still works with baseline values below.")
 
         # --- HIGH-SPEED DISPATCH BUTTON ---
         btn_label = "RESEND LINK & OPEN GMAIL" if is_already_sent else "GENERATE LINK & OPEN GMAIL"

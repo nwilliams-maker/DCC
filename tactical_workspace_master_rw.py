@@ -7407,8 +7407,11 @@ def run_pod_tab(pod_name):
     # a rerun cycle. Hiding the visual panel keeps the dispatcher in a clean
     # view while Streamlit's own retry resolves it transparently. Does NOT
     # hide info/success/warning alerts or toasts — only the red error UIs.
+    # DIAGNOSTIC (temporary — Jul 2026): un-hide Streamlit's exception panels
+    # so we can see what's crashing the render on bundled routes. Restore the
+    # `display:none` line above once the root cause is identified and fixed.
     st.markdown(
-        '<style>[data-testid="stException"]{display:none !important;}</style>',
+        '<style>[data-testid="stException"]{display:block !important;}</style>',
         unsafe_allow_html=True,
     )
     _components.html(

@@ -167,8 +167,12 @@
     }
   }, 15000);
 
-  // 4s stuck-skeleton recovery — force reload if Streamlit is in skeleton state with no real content.
+  // 4s stuck-skeleton recovery — show banner instead of force-reload. Option A
+  // (Jul 2026): dispatcher decides when to reload. Once shown, banner sticks
+  // until dismissed or clicked, so a genuine stuck state is still recoverable
+  // with one click.
   var stuckCheckStart = null;
+  var stuckBannerShown = false;
   setInterval(function() {
     var stApp = doc.querySelector('[data-testid="stApp"]');
     if (!stApp) return;
@@ -178,44 +182,21 @@
     var isStuck = (connState === "DISCONNECTED") || (!hasContent && skeletonCount > 0);
     if (isStuck) {
       if (stuckCheckStart === null) stuckCheckStart = Date.now();
-      if (Date.now() - stuckCheckStart > 4000) { win.location.reload(); }
+      if (Date.now() - stuckCheckStart > 4000 && !stuckBannerShown) {
+        stuckBannerShown = true;
+        showBanner("📦 Page didn't finish loading — click Reload now to retry, or Dismiss to stay.");
+      }
     } else {
       stuckCheckStart = null;
+      stuckBannerShown = false;
     }
   }, 2000);
 
-  // WebSocket hook — fires on Streamlit's stream WS close.
-  try {
-    var OrigWS = win.WebSocket;
-    if (OrigWS && !win._dccWSHooked) {
-      win._dccWSHooked = true;
-      var W = function(url, p) {
-        var ws = (p !== undefined) ? new OrigWS(url, p) : new OrigWS(url);
-        try {
-          if (typeof url === "string" && url.indexOf("/_stcore/stream") >= 0) {
-            var openedOnce = false;
-            ws.addEventListener("open", function() { openedOnce = true; });
-            ws.addEventListener("close", function(ev) {
-              if (openedOnce && ev && ev.code !== 1000 && ev.code !== 1001) {
-                showBanner("📦 App was updated — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-                if (win._dccPendingReload) {
-                  try { clearTimeout(win._dccPendingReload); } catch (_) {}
-                }
-                win._dccPendingReload = setTimeout(function() { win.location.reload(); }, 30000);
-              }
-            });
-          }
-        } catch (_) {}
-        return ws;
-      };
-      W.prototype = OrigWS.prototype;
-      W.CONNECTING = OrigWS.CONNECTING;
-      W.OPEN = OrigWS.OPEN;
-      W.CLOSING = OrigWS.CLOSING;
-      W.CLOSED = OrigWS.CLOSED;
-      win.WebSocket = W;
-    }
-  } catch (_) {}
+  // WebSocket close hook DISABLED — Jul 2026 (Nick, Option A): any non-clean
+  // WS close was firing the banner (Railway recycles, network blips, idle-tab
+  // drops). Deploy detection is now handled solely by the 15-second
+  // INSTANCE_ID poll — that only fires when the server-side INSTANCE_ID (MD5
+  // of the running script) actually differs from the browser's baseline.
 
 
   // Streamlit server-side exception DOM watcher — catches the red error box that
@@ -238,11 +219,9 @@
     }
     if (text && isFragmentErr(text)) {
       try { node.style.setProperty("display", "none", "important"); } catch (_) {}
-      showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-      if (win._dccPendingReload) {
-        try { clearTimeout(win._dccPendingReload); } catch (_) {}
-      }
-      win._dccPendingReload = setTimeout(function() { win.location.reload(); }, 30000);
+      // Option A (Jul 2026): banner only, no auto-reload. Dispatcher decides
+      // when to reload via the banner's "Reload now" button.
+      showBanner("📦 Reconnecting — click Reload now when ready, or Dismiss to stay.");
       return true;
     }
     return false;
@@ -312,11 +291,8 @@
     var m = String((e && e.message) || (e && e.error && e.error.message) || "");
     if (isStreamlitErr(m)) {
       try { e.preventDefault(); } catch (_) {}
-      showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-      if (win._dccPendingReload) {
-        try { clearTimeout(win._dccPendingReload); } catch (_) {}
-      }
-      win._dccPendingReload = setTimeout(function() { win.location.reload(); }, 30000);
+      // Option A (Jul 2026): banner only, no auto-reload.
+      showBanner("📦 Reconnecting — click Reload now when ready, or Dismiss to stay.");
     }
   }, true);
   win.addEventListener("unhandledrejection", function(e) {
@@ -324,11 +300,8 @@
     try { m = String((e.reason && (e.reason.message || e.reason)) || ""); } catch (_) {}
     if (isStreamlitErr(m)) {
       try { e.preventDefault(); } catch (_) {}
-      showBanner("📦 Reconnecting — auto-refreshing in 30s. Click Reload now to skip, Dismiss to stay.");
-      if (win._dccPendingReload) {
-        try { clearTimeout(win._dccPendingReload); } catch (_) {}
-      }
-      win._dccPendingReload = setTimeout(function() { win.location.reload(); }, 30000);
+      // Option A (Jul 2026): banner only, no auto-reload.
+      showBanner("📦 Reconnecting — click Reload now when ready, or Dismiss to stay.");
     }
   }, true);
 

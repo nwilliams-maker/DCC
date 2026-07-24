@@ -829,14 +829,23 @@ _components.html(
             // Streamlit's error modals render in a portal; match by the
             // distinctive header text instead of class names (which are
             // hashed and change between Streamlit versions).
+            // Option A (Jul 2026): show banner instead of hard-reloading —
+            // dispatcher decides when to reload. Uses window._dccShowBanner
+            // exposed by dcc_watcher.js when it has loaded; falls back to a
+            // no-op if the watcher isn't up yet.
             var headers = doc.querySelectorAll('h1, h2, h3, [class*="StyledModalHeader"]');
             for (var j = 0; j < headers.length; j++) {
               var ht = (headers[j].textContent || '').toLowerCase();
               if (ht.indexOf('bad message format') >= 0 ||
                   ht.indexOf('connection error') >= 0) {
-                _hardReload(headers[j].textContent.trim());
+                try {
+                  if (typeof w._dccShowBanner === 'function') {
+                    w._dccShowBanner("📦 Reconnecting — click Reload now when ready, or Dismiss to stay.");
+                  }
+                } catch (_) {}
                 return;
               }
+            }
             }
           } catch (e) {}
         }
@@ -1232,66 +1241,10 @@ else:
     st.sidebar.error("Logo file not found! Check the file name.")
 
 # --- UI STYLING ---
-# 🛡️ SessionInfo / Bad-message auto-refresh.
-# Streamlit's "Bad message format / Tried to use SessionInfo before it was
-# initialized" modal can appear under heavy init load or after a redeploy.
-# It's a framework-side race condition, not a DCC bug — the documented fix
-# is a hard refresh. We do that automatically (once, then a 60s cooldown
-# to prevent reload loops on real persistent errors).
-st.components.v1.html("""
-<script>
-(function() {
-    var REFRESH_KEY = '_dcc_sessioninfo_refresh_ts';
-    var COOLDOWN_MS = 60000;  // don't auto-refresh more than once per minute
-    function shouldRefresh() {
-        try {
-            var last = parseInt(sessionStorage.getItem(REFRESH_KEY) || '0', 10);
-            return (Date.now() - last) > COOLDOWN_MS;
-        } catch (e) { return true; }
-    }
-    function markRefreshed() {
-        try { sessionStorage.setItem(REFRESH_KEY, String(Date.now())); } catch (e) {}
-    }
-    function checkForSessionInfoModal() {
-        var doc = window.parent.document;
-        var modals = doc.querySelectorAll('[role="dialog"], [data-testid="stException"]');
-        // Magic strings — every Streamlit framework race / stale-chunk-after-deploy
-        // surfaces as a modal containing one of these. They all want the same fix:
-        // a hard refresh to get the new JS chunks + a fresh WebSocket session.
-        var TRIGGERS = [
-            'sessioninfo',
-            'bad message format',
-            'failed to process a websocket message',
-            'axioserror',
-            'request failed with status code 4',
-            'could not find fragment id',
-            'bad setin index',
-            'connection error'
-        ];
-        for (var i = 0; i < modals.length; i++) {
-            var txt = (modals[i].innerText || '').toLowerCase();
-            for (var j = 0; j < TRIGGERS.length; j++) {
-                if (txt.indexOf(TRIGGERS[j]) !== -1) {
-                    if (shouldRefresh()) {
-                        markRefreshed();
-                        console.log('[dcc] Streamlit error modal detected (' + TRIGGERS[j] + ') -> auto-refresh');
-                        window.parent.location.reload();
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    // Run once on first paint, then watch via MutationObserver.
-    setTimeout(checkForSessionInfoModal, 500);
-    try {
-        var obs = new MutationObserver(function() { checkForSessionInfoModal(); });
-        obs.observe(window.parent.document.body, { childList: true, subtree: true });
-    } catch (e) { console.warn('[dcc] sessioninfo-watcher observer failed:', e); }
-})();
-</script>
-""", height=0)
+# 🛡️ SessionInfo / Bad-message auto-refresh — DISABLED Jul 2026 (Nick, Option A).
+# Replaced by banner-only behavior in dcc_watcher.js. When a Streamlit error
+# modal appears, dcc_watcher.js hides it and shows the DCC banner; the
+# dispatcher clicks "Reload now" when they're ready. No silent reloads.
 
 st.components.v1.html("""
 <script>

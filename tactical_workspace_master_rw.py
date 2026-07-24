@@ -6045,11 +6045,21 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     _candidate_wos.add(str(_w))
             # 🌟 IN-SESSION WO SCAN: also pick up WOs "reserved" for other
             # clusters this session (not yet in sent_db).
-            for _k, _v in st.session_state.items():
-                if isinstance(_k, str) and _k.startswith('_wo_sticky_') and _k != _wo_sticky_key:
-                    _vs = str(_v or '')
-                    if _vs.startswith(_base_wo):
-                        _candidate_wos.add(_vs)
+            # Jul 2026 — iterate a snapshot of keys instead of .items() because
+            # Streamlit's session_state raises KeyError when unpacking widget
+            # entries whose widget was destroyed mid-iteration (e.g., a bundle
+            # multiselect from a prior render whose cluster_hash changed). Filter
+            # first, then explicitly fetch each value with try/except.
+            for _k in list(st.session_state.keys()):
+                if not (isinstance(_k, str) and _k.startswith('_wo_sticky_') and _k != _wo_sticky_key):
+                    continue
+                try:
+                    _v = st.session_state[_k]
+                except KeyError:
+                    continue
+                _vs = str(_v or '')
+                if _vs.startswith(_base_wo):
+                    _candidate_wos.add(_vs)
             _max_suffix = 0
             for _w in _candidate_wos:
                 try:

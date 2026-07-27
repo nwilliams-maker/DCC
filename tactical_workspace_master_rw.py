@@ -5179,9 +5179,9 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
         ))
         _lh_key = ",".join(sorted(str(h) for h in (live_hashes or set())))
         _cache_key = hashlib.md5(f"{_lr_key}||{_gr_key}||{_lh_key}".encode()).hexdigest()
-        _cache = st.session_state.get('_unify_cache', {})
-        if _cache.get('_key') == _cache_key and '_val' in _cache:
-            return _cache['_val']
+        _cache = st.session_state.setdefault('_unify_cache', {})
+        if _cache_key in _cache:
+            return _cache[_cache_key]
     except Exception:
         _cache_key = None
 
@@ -5236,7 +5236,12 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     unified.sort(key=lambda x: x['sort_date'], reverse=True)
 
     if _cache_key:
-        st.session_state['_unify_cache'] = {'_key': _cache_key, '_val': unified}
+        _c = st.session_state.setdefault('_unify_cache', {})
+        _c[_cache_key] = unified
+        # Bound cache size to prevent memory bloat (4 panels × 5 pods = 20 max)
+        if len(_c) > 24:
+            _oldest = next(iter(_c))
+            _c.pop(_oldest, None)
     return unified
     
 # --- DISPATCH RENDERING ---

@@ -7896,7 +7896,7 @@ def run_pod_tab(pod_name):
         _now_ts = pd.Timestamp.now()
         # Jul 23 2026 — Nick: 315 tasks missing from Blue Dispatch. Instrument
         # every skip reason so we can see WHY reclaim isn't firing on them.
-                    'is_fn': 0, 'grace_window': 0, 'no_unassigned': 0,
+                'is_fn': 0, 'grace_window': 0, 'no_unassigned': 0,
                     'split_ok': 0, 'orphan_reclaimed': 0, 'orphan_grace': 0}
         for _sc in cls:
             _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]

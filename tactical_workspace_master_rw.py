@@ -6741,7 +6741,20 @@ text-decoration:none;">📨 Default Mail</a>
                         # stop Monday lookups + WO/installer mutations. An 11-stop
                         # route can fire ~120+ HTTP calls server-side; the old 25s
                         # cap timed out on bigger routes. (May 17 2026.)
-                        res = requests.post(GAS_WEB_APP_URL, json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=90).json()
+                        # Jul 27 2026 — Nick: "Route hash not found" errors when task set drifts.
+                        # Send task_ids too; GAS can fall back to task-ID intersection when
+                        # the exact cluster_hash no longer matches the stored payload's hash.
+                        _mfa_tids = ",".join(str(t['id']).strip() for t in cluster.get('data', []))
+                        res = requests.post(
+                            GAS_WEB_APP_URL,
+                            json={
+                                "action": "markFNAssigned",
+                                "auth_secret": GAS_AUTH,
+                                "cluster_hash": cluster_hash,
+                                "taskIds": _mfa_tids,
+                            },
+                            timeout=90,
+                        ).json()
                         if res.get("success"):
                             # Local state: route moves to Accepted (treated as already accepted by the FN rep).
                             # contractor_name stays "Field Nation" so the Accepted-tab badge + shortened

@@ -5239,7 +5239,6 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
         st.session_state['_unify_cache'] = {'_key': _cache_key, '_val': unified}
     return unified
     
-    
 # --- DISPATCH RENDERING ---
 # render_dispatch is a fragment — st.rerun() inside (Streamlit 1.39) defaults
 # to fragment scope, so clicks re-render only this one route card, not the

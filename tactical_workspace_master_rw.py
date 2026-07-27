@@ -5160,6 +5160,84 @@ def _merge_same_wo_ghosts(ghost_routes):
 
 def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     """Combine live (in-progress) clusters with ghost (sheet-only) routes for
+    display in Sent / Accepted / Finalized tabs.
+
+    Jul 23 2026 — added session_state memoization. Was iterating hundreds of
+    ghosts on every fragment rerun; now runs once per unique input hash. Cache
+    key = hash(live task_ids | ghost task_ids | live_hashes) so any real change
+    invalidates. Cheap to compute vs the full merge + sort.
+    """
+    # Fast cache-key hash — join task IDs (sorted) into a single string, hash once
+    try:
+        _lr_key = "|".join(sorted(
+            ",".join(sorted(str(t.get('id','')) for t in (c.get('data') or [])))
+            for c in (live_routes or [])
+        ))
+        _gr_key = "|".join(sorted(
+            (str(g.get('hash','')) + ":" + ",".join(sorted(str(t) for t in (g.get('task_ids') or []))))
+            for g in (ghost_routes or [])
+        ))
+        _lh_key = ",".join(sorted(str(h) for h in (live_hashes or set())))
+        _cache_key = hashlib.md5(f"{_lr_key}||{_gr_key}||{_lh_key}".encode()).hexdigest()
+        _cache = st.session_state.get('_unify_cache', {})
+        if _cache.get('_key') == _cache_key and '_val' in _cache:
+            return _cache['_val']
+    except Exception:
+        _cache_key = None
+
+    ghost_routes = _merge_same_wo_ghosts(ghost_routes or [])
+    unified = []
+    live_clusters_with_tids = []
+    for c in live_routes:
+        tids = {str(t.get('id', '')).strip() for t in c.get('data', []) if t.get('id')}
+        live_clusters_with_tids.append((c, tids))
+    live_task_ids = set().union(*(s for _, s in live_clusters_with_tids)) if live_clusters_with_tids else set()
+
+    suppressed_live_ids = set()
+    fragmented_ghosts = set()
+    for g in ghost_routes:
+        g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+        if not g_tids:
+            continue
+        if g.get('hash') in live_hashes:
+            continue
+        matching_live = [c for c, tids in live_clusters_with_tids if tids & set(g_tids)]
+        if len(matching_live) >= 2:
+            covered_ids = set().union(*(set(str(t.get('id','')).strip() for t in c.get('data', [])) for c in matching_live))
+            if all(tid in covered_ids for tid in g_tids):
+                for c in matching_live:
+                    suppressed_live_ids.add(id(c))
+                fragmented_ghosts.add(g.get('hash'))
+
+    for c in live_routes:
+        if id(c) in suppressed_live_ids:
+            continue
+        c_copy = c.copy()
+        c_copy['is_ghost'] = False
+        ts = c_copy.get('route_ts', '')
+        c_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
+        unified.append(c_copy)
+
+    for g in ghost_routes:
+        if g.get('hash') in fragmented_ghosts:
+            pass
+        else:
+            if g.get('hash') in live_hashes:
+                continue
+            g_tids = [str(_t).strip() for _t in g.get('task_ids', []) if str(_t).strip()]
+            if g_tids and all(tid in live_task_ids for tid in g_tids):
+                continue
+        g_copy = g.copy()
+        g_copy['is_ghost'] = True
+        ts = g_copy.get('route_ts', '')
+        g_copy['sort_date'] = str(ts).split(' ')[0] if ts else 'Unknown Date'
+        unified.append(g_copy)
+
+    unified.sort(key=lambda x: x['sort_date'], reverse=True)
+
+    if _cache_key:
+        st.session_state['_unify_cache'] = {'_key': _cache_key, '_val': unified}
+    return unified
     display in Sent / Accepted / Finalized tabs. Resolves three cases:
 
       1. Live and ghost agree (same hash) → show LIVE only.

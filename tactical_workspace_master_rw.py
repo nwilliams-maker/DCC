@@ -7894,10 +7894,16 @@ def run_pod_tab(pod_name):
         _recovered_tids = set()
         _ghosts_to_suppress = set()
         _now_ts = pd.Timestamp.now()
+        # Jul 23 2026 — Nick: 315 tasks missing from Blue Dispatch. Instrument
+        # every skip reason so we can see WHY reclaim isn't firing on them.
+        _rc_skip = {'reverted': 0, 'no_sent_match': 0, 'wrong_status': 0,
+                    'is_fn': 0, 'grace_window': 0, 'no_unassigned': 0,
+                    'split_ok': 0, 'orphan_reclaimed': 0, 'orphan_grace': 0}
         for _sc in cls:
             _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]
             _sc_hash = hashlib.md5("".join(sorted(_sc_tids)).encode()).hexdigest()
             if st.session_state.get(f"reverted_{_sc_hash}", False):
+                _rc_skip['reverted'] += 1
                 _split_cls.append(_sc)
                 continue
             _sm_row = None
@@ -7906,23 +7912,27 @@ def run_pod_tab(pod_name):
                     _sm_row = sent_db[_tid]
                     break
             if not _sm_row:
+                _rc_skip['no_sent_match'] += 1
                 _split_cls.append(_sc)
                 continue
             _sm_status = str(_sm_row.get('status', '')).lower()
             if _sm_status not in ('accepted', 'finalized'):
+                _rc_skip['wrong_status'] += 1
                 _split_cls.append(_sc)
                 continue
             if str(_sm_row.get('name', '')).strip().lower() == 'field nation':
+                _rc_skip['is_fn'] += 1
                 _split_cls.append(_sc)
                 continue
-            # 90s propagation grace — OnFleet's state=0 cache is 60s TTL, so
-            # a just-accepted route (worker-assign PUT still in flight) could
-            # still show its tasks as state=0. Wait 90s before reclaiming.
+            # Jul 23 2026 — Nick: shortened 90s → 30s. The throttle above already
+            # limits how often this block runs; the grace was preventing legit
+            # reclaims when a route got unassigned within ~1.5 min of accept.
             _sm_raw_ts = _sm_row.get('raw_ts')
             try:
                 if _sm_raw_ts is not None:
                     _age = (_now_ts - _sm_raw_ts).total_seconds()
-                    if _age < 90:
+                    if _age < 30:
+                        _rc_skip['grace_window'] += 1
                         _split_cls.append(_sc)
                         continue
             except Exception:
@@ -7930,8 +7940,10 @@ def run_pod_tab(pod_name):
             _un = [t for t in _sc['data'] if str(t['id']).strip() in _fresh_state0]
             _st = [t for t in _sc['data'] if str(t['id']).strip() not in _fresh_state0]
             if not _un:
+                _rc_skip['no_unassigned'] += 1
                 _split_cls.append(_sc)
                 continue
+            _rc_skip['split_ok'] += 1
             def _recompute(_data):
                 _bs_vals = [str(x.get('boosted_standard', '')).lower() for x in _data if x.get('boosted_standard')]
                 _btag = ('local plus' if any('local plus' in v for v in _bs_vals)
@@ -7989,10 +8001,12 @@ def run_pod_tab(pod_name):
                         try:
                             if _raw_ts is not None:
                                 _age2 = (_now_ts - _raw_ts).total_seconds()
-                                if _age2 < 90:
+                                if _age2 < 30:
+                                    _rc_skip['orphan_grace'] += 1
                                     continue
                         except Exception:
                             pass
+                        _rc_skip['orphan_reclaimed'] += 1
                         sent_db.pop(_tid, None)
                         # Suppress matching ghost too so it doesn't rehydrate.
                         for _g in pod_ghosts:
@@ -8004,6 +8018,15 @@ def run_pod_tab(pod_name):
             _gd_pod = ghost_db.get(pod_name, [])
             if isinstance(_gd_pod, list):
                 ghost_db[pod_name] = [g for g in _gd_pod if g.get('hash') not in _ghosts_to_suppress]
+        # Surface the skip counter so ?debug=1 can display it.
+        st.session_state[f'_reclaim_debug_{pod_name}'] = {
+            'ts': _now_ts.strftime('%H:%M:%S'),
+            'fresh_state0_count': len(_fresh_state0),
+            'clusters_scanned': len(cls) if isinstance(cls, list) else 0,
+            'ghosts_suppressed': len(_ghosts_to_suppress),
+            'sent_db_size': len(sent_db) if isinstance(sent_db, dict) else 0,
+            **_rc_skip,
+        }
     
     # STATE=0 IS AUTHORITATIVE block deleted Jul 2026 (Nick) — it was a duplicate
     # of UNASSIGN RECLAIM above. Running both produced duplicated route cards

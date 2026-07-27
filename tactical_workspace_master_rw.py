@@ -7894,10 +7894,6 @@ def run_pod_tab(pod_name):
         _recovered_tids = set()
         _ghosts_to_suppress = set()
         _now_ts = pd.Timestamp.now()
-        # Jul 23 2026 — Nick: 315 tasks missing from Blue Dispatch. Instrument
-        # every skip reason so we can see WHY reclaim isn't firing on them.
-                'is_fn': 0, 'grace_window': 0, 'no_unassigned': 0,
-                    'split_ok': 0, 'orphan_reclaimed': 0, 'orphan_grace': 0}
         for _sc in cls:
             _sc_tids = [str(t['id']).strip() for t in _sc.get('data', [])]
             _sc_hash = hashlib.md5("".join(sorted(_sc_tids)).encode()).hexdigest()
@@ -7919,9 +7915,9 @@ def run_pod_tab(pod_name):
             if str(_sm_row.get('name', '')).strip().lower() == 'field nation':
                 _split_cls.append(_sc)
                 continue
-            # Jul 23 2026 — Nick: shortened 90s → 30s. The throttle above already
-            # limits how often this block runs; the grace was preventing legit
-            # reclaims when a route got unassigned within ~1.5 min of accept.
+            # 90s propagation grace — OnFleet's state=0 cache is 60s TTL, so
+            # a just-accepted route (worker-assign PUT still in flight) could
+            # still show its tasks as state=0. Wait 90s before reclaiming.
             _sm_raw_ts = _sm_row.get('raw_ts')
             try:
                 if _sm_raw_ts is not None:

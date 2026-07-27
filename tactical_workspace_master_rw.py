@@ -5167,8 +5167,25 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     key = hash(live task_ids | ghost task_ids | live_hashes) so any real change
     invalidates. Cheap to compute vs the full merge + sort.
     """
+    # Fast cache-key hash — join task IDs (sorted) into a single string, hash once
+    try:
+        _lr_key = "|".join(sorted(
+            ",".join(sorted(str(t.get('id','')) for t in (c.get('data') or [])))
+            for c in (live_routes or [])
+        ))
+        _gr_key = "|".join(sorted(
+            (str(g.get('hash','')) + ":" + ",".join(sorted(str(t) for t in (g.get('task_ids') or []))))
+            for g in (ghost_routes or [])
+        ))
+        _lh_key = ",".join(sorted(str(h) for h in (live_hashes or set())))
+        _cache_key = hashlib.md5(f"{_lr_key}||{_gr_key}||{_lh_key}".encode()).hexdigest()
+        _cache = st.session_state.setdefault('_unify_cache', {})
+        if _cache_key in _cache:
+            return _cache[_cache_key]
+    except Exception:
+        _cache_key = None
+
     ghost_routes = _merge_same_wo_ghosts(ghost_routes or [])
-    _cache_key = None  # 🛡️ prevent NameError if cache-key build below fails before assignment
     unified = []
     live_clusters_with_tids = []
     for c in live_routes:
@@ -5221,8 +5238,10 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     if _cache_key:
         _c = st.session_state.setdefault('_unify_cache', {})
         _c[_cache_key] = unified
+        # Bound cache size to prevent memory bloat (4 panels × 5 pods = 20 max)
         if len(_c) > 24:
-            _c.pop(next(iter(_c)), None)
+            _oldest = next(iter(_c))
+            _c.pop(_oldest, None)
     return unified
     
 # --- DISPATCH RENDERING ---
@@ -8703,456 +8722,443 @@ def run_pod_tab(pod_name):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
-            # 🔍 FN DIAG — Jul 23 2026 — Nick reported Blue FN tab renders empty
-            # under load with no error surfaced. Caption gives raw counts even when
-            # every downstream branch bails; try/except surfaces any silent render
-            # exception (KeyError on missing 'id', geocode timeout, etc.) instead of
-            # letting Streamlit swallow it into a blank tab.
-            try:
-                st.caption(f"🔍 FN diag — field_nation={len(field_nation)} · fn_ghosts={len(fn_ghosts)} · pod={pod_name}")
-                if not field_nation:
-                    st.info("No routes currently moved to Field Nation.")
-                else:
-                    sorted_fn = group_and_sort_by_proximity(field_nation)
-                    # FN-tab button slimming (May 23 2026) -- scoped to fn_-keyed
-                    # widgets so it never affects buttons on other tabs.
-                    st.markdown(
-                        """
-                        <style>
-                        div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button,
-                        div[data-testid="stLinkButton"] a {
-                            background: #faf9fd !important;
-                            border: 1px solid #d9d4ec !important;
-                            border-radius: 8px !important;
-                            box-shadow: none !important;
-                            color: #7a72a8 !important;
-                            min-height: 2rem !important;
-                            height: 2rem !important;
-                            padding: 0.1rem 0.5rem !important;
-                            line-height: 1.1 !important;
-                        }
-                        div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button p,
-                        div[data-testid="stLinkButton"] a p {
-                            font-size: 0.8rem !important;
-                            font-weight: 500 !important;
-                            color: #7a72a8 !important;
-                        }
-                        div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-fn_sel_"]) {
-                            gap: 0 !important;
-                        }
-                        div[class*="st-key-fn_sel_"] button {
-                            border-radius: 0 !important;
-                            border: 0.5px solid #c9c2e6 !important;
-                            background: #ffffff !important;
-                            color: #534AB7 !important;
-                            box-shadow: none !important;
-                            font-weight: 500 !important;
-                            min-height: 1.85rem !important;
-                            height: 1.85rem !important;
-                        }
-                        div[class*="st-key-fn_sel_"] button p { font-size: 0.72rem !important; }
-                        div[class*="st-key-fn_sel_"] button:disabled {
-                            color: #b3aecb !important;
-                            background: #f7f6fb !important;
-                        }
-                        div[class*="st-key-fn_sel_all_"] button {
-                            border-top-left-radius: 7px !important;
-                            border-bottom-left-radius: 7px !important;
-                        }
-                        div[class*="st-key-fn_sel_clear_"] button {
-                            border-top-right-radius: 7px !important;
-                            border-bottom-right-radius: 7px !important;
-                            color: #8b8898 !important;
-                        }
-                        </style>
-                        """,
-                        unsafe_allow_html=True,
+            if not field_nation: st.info("No routes currently moved to Field Nation.")
+            else:
+                sorted_fn = group_and_sort_by_proximity(field_nation)
+                # FN-tab button slimming (May 23 2026) -- scoped to fn_-keyed
+                # widgets so it never affects buttons on other tabs.
+                st.markdown(
+                    """
+                    <style>
+                    div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button,
+                    div[data-testid="stLinkButton"] a {
+                        background: #faf9fd !important;
+                        border: 1px solid #d9d4ec !important;
+                        border-radius: 8px !important;
+                        box-shadow: none !important;
+                        color: #7a72a8 !important;
+                        min-height: 2rem !important;
+                        height: 2rem !important;
+                        padding: 0.1rem 0.5rem !important;
+                        line-height: 1.1 !important;
+                    }
+                    div[class*="st-key-fn_"]:not([class*="st-key-fn_sel_"]):not([class*="st-key-fn_combined_select_"]) button p,
+                    div[data-testid="stLinkButton"] a p {
+                        font-size: 0.8rem !important;
+                        font-weight: 500 !important;
+                        color: #7a72a8 !important;
+                    }
+                    div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-fn_sel_"]) {
+                        gap: 0 !important;
+                    }
+                    div[class*="st-key-fn_sel_"] button {
+                        border-radius: 0 !important;
+                        border: 0.5px solid #c9c2e6 !important;
+                        background: #ffffff !important;
+                        color: #534AB7 !important;
+                        box-shadow: none !important;
+                        font-weight: 500 !important;
+                        min-height: 1.85rem !important;
+                        height: 1.85rem !important;
+                    }
+                    div[class*="st-key-fn_sel_"] button p { font-size: 0.72rem !important; }
+                    div[class*="st-key-fn_sel_"] button:disabled {
+                        color: #b3aecb !important;
+                        background: #f7f6fb !important;
+                    }
+                    div[class*="st-key-fn_sel_all_"] button {
+                        border-top-left-radius: 7px !important;
+                        border-bottom-left-radius: 7px !important;
+                    }
+                    div[class*="st-key-fn_sel_clear_"] button {
+                        border-top-right-radius: 7px !important;
+                        border-bottom-right-radius: 7px !important;
+                        color: #8b8898 !important;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # 🌐 FN TAB — 3-section model (May 16 2026):
+                #   Pending  = no fn_posted_ts (not yet posted to FN)
+                #   Posted   = fn_posted_ts set, but fn_provider not yet filled
+                #   Assigned = fn_provider filled (ready to move to Accepted)
+                # Selecting one-by-one was tedious, so we replaced the bare multiselect
+                # with section-scoped "Select all" buttons that bulk-populate it.
+                # All four bulk actions (CSV / Mark Posted / Assigned → Accepted /
+                # Revert to Pending) operate on the same selection but each filters
+                # to the routes whose state makes the action meaningful.
+                _fn_exported = st.session_state.setdefault('_fn_exported', {})
+                _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
+                _fn_provider_dict = st.session_state.setdefault('_fn_provider', {})
+                _fn_assigned_dict = st.session_state.setdefault('_fn_assigned', {})
+
+                # Partition routes into Pending / Posted / Assigned
+                _fn_route_lookup = {}    # hash -> cluster
+                _fn_pending_hashes = []
+                _fn_posted_hashes = []
+                _fn_assigned_hashes = []
+                for _fc in sorted_fn:
+                    _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
+                    if not _fc_tids:
+                        continue
+                    _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
+                    _fn_route_lookup[_fc_hash] = _fc
+                    _has_provider = bool((_fn_provider_dict.get(_fc_hash) or '').strip())
+                    _is_posted = _fc_hash in _fn_posted_dict
+                    if _has_provider:
+                        _fn_assigned_hashes.append(_fc_hash)
+                    elif _is_posted:
+                        _fn_posted_hashes.append(_fc_hash)
+                    else:
+                        _fn_pending_hashes.append(_fc_hash)
+                _fn_all_hashes = _fn_pending_hashes + _fn_posted_hashes + _fn_assigned_hashes
+
+                _fn_select_key = f"fn_combined_select_{pod_name}"
+                if _fn_select_key not in st.session_state:
+                    st.session_state[_fn_select_key] = []
+
+                # Short per-route label for the multiselect chip list.
+                def _fn_label_for(h):
+                    _c = _fn_route_lookup.get(h, {})
+                    _prov = (_fn_provider_dict.get(h) or '').strip()
+                    if h in _fn_assigned_hashes:
+                        _tag = '🌐'
+                    elif h in _fn_posted_hashes:
+                        _tag = '📤'
+                    else:
+                        _tag = '📋'
+                    _prov_part = f" · {_prov}" if _prov else ''
+                    return f"{_tag} {_c.get('city','?')}, {_c.get('state','?')} · {_c.get('stops',0)}st{_prov_part}"
+
+                # ── COMPACT BULK-SELECT BAR ─────────────────────────────────
+                # One-line title, no helper subtitle (it was bossy and ate vertical
+                # real estate). The buttons below are self-explanatory.
+                st.markdown(
+                    "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
+                    "padding:4px 10px;margin:6px 0;font-size:10px;font-weight:900;color:#854d0e;"
+                    "text-transform:uppercase;letter-spacing:0.08em;'>📦 Bulk Select & Act</div>",
+                    unsafe_allow_html=True,
+                )
+
+                # Section-scoped "Select all" callbacks (mutate widget state pre-render).
+                def _fn_set_selection(_hashes):
+                    st.session_state[_fn_select_key] = list(_hashes)
+
+                # Compact section toggles. Shorter labels + slimmer Clear column so
+                # nothing wraps. Format: "Label · N" so the count is on the same line.
+                _sel_cols = st.columns([1, 1, 1, 1, 0.7])
+                with _sel_cols[0]:
+                    st.button(
+                        f"All · {len(_fn_all_hashes)}",
+                        key=f"fn_sel_all_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_all_hashes,),
+                        disabled=not _fn_all_hashes,
+                    )
+                with _sel_cols[1]:
+                    st.button(
+                        f"Pending · {len(_fn_pending_hashes)}",
+                        key=f"fn_sel_pending_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_pending_hashes,),
+                        disabled=not _fn_pending_hashes,
+                    )
+                with _sel_cols[2]:
+                    st.button(
+                        f"Posted · {len(_fn_posted_hashes)}",
+                        key=f"fn_sel_posted_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_posted_hashes,),
+                        disabled=not _fn_posted_hashes,
+                    )
+                with _sel_cols[3]:
+                    st.button(
+                        f"Assigned · {len(_fn_assigned_hashes)}",
+                        key=f"fn_sel_assigned_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=(_fn_assigned_hashes,),
+                        disabled=not _fn_assigned_hashes,
+                    )
+                with _sel_cols[4]:
+                    st.button(
+                        "Clear",
+                        key=f"fn_sel_clear_{pod_name}",
+                        use_container_width=True,
+                        on_click=_fn_set_selection,
+                        args=([],),
                     )
 
-                    # 🌐 FN TAB — 3-section model (May 16 2026):
-                    #   Pending  = no fn_posted_ts (not yet posted to FN)
-                    #   Posted   = fn_posted_ts set, but fn_provider not yet filled
-                    #   Assigned = fn_provider filled (ready to move to Accepted)
-                    # Selecting one-by-one was tedious, so we replaced the bare multiselect
-                    # with section-scoped "Select all" buttons that bulk-populate it.
-                    # All four bulk actions (CSV / Mark Posted / Assigned → Accepted /
-                    # Revert to Pending) operate on the same selection but each filters
-                    # to the routes whose state makes the action meaningful.
-                    _fn_exported = st.session_state.setdefault('_fn_exported', {})
-                    _fn_posted_dict = st.session_state.setdefault('_fn_posted', {})
-                    _fn_provider_dict = st.session_state.setdefault('_fn_provider', {})
-                    _fn_assigned_dict = st.session_state.setdefault('_fn_assigned', {})
+                st.multiselect(
+                    "Selected FN routes",
+                    options=_fn_all_hashes,
+                    format_func=_fn_label_for,
+                    key=_fn_select_key,
+                    label_visibility="collapsed",
+                    placeholder="Section buttons above bulk-select. Type here to fine-tune.",
+                )
+                _fn_selected = st.session_state.get(_fn_select_key, []) or []
 
-                    # Partition routes into Pending / Posted / Assigned
-                    _fn_route_lookup = {}    # hash -> cluster
-                    _fn_pending_hashes = []
-                    _fn_posted_hashes = []
-                    _fn_assigned_hashes = []
-                    for _fc in sorted_fn:
-                        _fc_tids = sorted([str(_t['id']).strip() for _t in _fc.get('data', [])])
-                        if not _fc_tids:
-                            continue
-                        _fc_hash = hashlib.md5("".join(_fc_tids).encode()).hexdigest()
-                        _fn_route_lookup[_fc_hash] = _fc
-                        _has_provider = bool((_fn_provider_dict.get(_fc_hash) or '').strip())
-                        _is_posted = _fc_hash in _fn_posted_dict
-                        if _has_provider:
-                            _fn_assigned_hashes.append(_fc_hash)
-                        elif _is_posted:
-                            _fn_posted_hashes.append(_fc_hash)
-                        else:
-                            _fn_pending_hashes.append(_fc_hash)
-                    _fn_all_hashes = _fn_pending_hashes + _fn_posted_hashes + _fn_assigned_hashes
+                # Per-section subsets for context-aware bulk actions.
+                _sel_pending = [h for h in _fn_selected if h in _fn_pending_hashes]
+                _sel_posted = [h for h in _fn_selected if h in _fn_posted_hashes]
+                _sel_assigned = [h for h in _fn_selected if h in _fn_assigned_hashes]
+                _sel_revertable = _sel_posted + _sel_assigned
 
-                    _fn_select_key = f"fn_combined_select_{pod_name}"
-                    if _fn_select_key not in st.session_state:
-                        st.session_state[_fn_select_key] = []
+                st.caption(
+                    f":gray[Selected **{len(_fn_selected)}** — "
+                    f"📋 {len(_sel_pending)} · 📤 {len(_sel_posted)} · 🌐 {len(_sel_assigned)}]"
+                )
 
-                    # Short per-route label for the multiselect chip list.
-                    def _fn_label_for(h):
-                        _c = _fn_route_lookup.get(h, {})
-                        _prov = (_fn_provider_dict.get(h) or '').strip()
-                        if h in _fn_assigned_hashes:
-                            _tag = '🌐'
-                        elif h in _fn_posted_hashes:
-                            _tag = '📤'
-                        else:
-                            _tag = '📋'
-                        _prov_part = f" · {_prov}" if _prov else ''
-                        return f"{_tag} {_c.get('city','?')}, {_c.get('state','?')} · {_c.get('stops',0)}st{_prov_part}"
-
-                    # ── COMPACT BULK-SELECT BAR ─────────────────────────────────
-                    # One-line title, no helper subtitle (it was bossy and ate vertical
-                    # real estate). The buttons below are self-explanatory.
-                    st.markdown(
-                        "<div style='background:#fef9c3;border-left:3px solid #facc15;border-radius:6px;"
-                        "padding:4px 10px;margin:6px 0;font-size:10px;font-weight:900;color:#854d0e;"
-                        "text-transform:uppercase;letter-spacing:0.08em;'>📦 Bulk Select & Act</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    # Section-scoped "Select all" callbacks (mutate widget state pre-render).
-                    def _fn_set_selection(_hashes):
-                        st.session_state[_fn_select_key] = list(_hashes)
-
-                    # Compact section toggles. Shorter labels + slimmer Clear column so
-                    # nothing wraps. Format: "Label · N" so the count is on the same line.
-                    _sel_cols = st.columns([1, 1, 1, 1, 0.7])
-                    with _sel_cols[0]:
-                        st.button(
-                            f"All · {len(_fn_all_hashes)}",
-                            key=f"fn_sel_all_{pod_name}",
-                            use_container_width=True,
-                            on_click=_fn_set_selection,
-                            args=(_fn_all_hashes,),
-                            disabled=not _fn_all_hashes,
-                        )
-                    with _sel_cols[1]:
-                        st.button(
-                            f"Pending · {len(_fn_pending_hashes)}",
-                            key=f"fn_sel_pending_{pod_name}",
-                            use_container_width=True,
-                            on_click=_fn_set_selection,
-                            args=(_fn_pending_hashes,),
-                            disabled=not _fn_pending_hashes,
-                        )
-                    with _sel_cols[2]:
-                        st.button(
-                            f"Posted · {len(_fn_posted_hashes)}",
-                            key=f"fn_sel_posted_{pod_name}",
-                            use_container_width=True,
-                            on_click=_fn_set_selection,
-                            args=(_fn_posted_hashes,),
-                            disabled=not _fn_posted_hashes,
-                        )
-                    with _sel_cols[3]:
-                        st.button(
-                            f"Assigned · {len(_fn_assigned_hashes)}",
-                            key=f"fn_sel_assigned_{pod_name}",
-                            use_container_width=True,
-                            on_click=_fn_set_selection,
-                            args=(_fn_assigned_hashes,),
-                            disabled=not _fn_assigned_hashes,
-                        )
-                    with _sel_cols[4]:
-                        st.button(
-                            "Clear",
-                            key=f"fn_sel_clear_{pod_name}",
-                            use_container_width=True,
-                            on_click=_fn_set_selection,
-                            args=([],),
-                        )
-
-                    st.multiselect(
-                        "Selected FN routes",
-                        options=_fn_all_hashes,
-                        format_func=_fn_label_for,
-                        key=_fn_select_key,
-                        label_visibility="collapsed",
-                        placeholder="Section buttons above bulk-select. Type here to fine-tune.",
-                    )
-                    _fn_selected = st.session_state.get(_fn_select_key, []) or []
-
-                    # Per-section subsets for context-aware bulk actions.
-                    _sel_pending = [h for h in _fn_selected if h in _fn_pending_hashes]
-                    _sel_posted = [h for h in _fn_selected if h in _fn_posted_hashes]
-                    _sel_assigned = [h for h in _fn_selected if h in _fn_assigned_hashes]
-                    _sel_revertable = _sel_posted + _sel_assigned
-
-                    st.caption(
-                        f":gray[Selected **{len(_fn_selected)}** — "
-                        f"📋 {len(_sel_pending)} · 📤 {len(_sel_posted)} · 🌐 {len(_sel_assigned)}]"
-                    )
-
-                    # ── BULK ACTION ROW 1: Combined CSV + Open FN link ──────────
-                    # Disabled buttons just show "Combined CSV" instead of a wordy
-                    # "(none selected)" suffix — the count IS the empty-state signal.
-                    _action_cols = st.columns(2)
-                    with _action_cols[0]:
-                        if _fn_selected:
-                            _fn_to_export = []
-                            for _h in _fn_selected:
-                                _cluster = _fn_route_lookup.get(_h)
-                                if _cluster:
-                                    _ann = dict(_cluster)
-                                    _ann['_cluster_hash'] = _h
-                                    _fn_to_export.append(_ann)
-                            try:
-                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = generate_combined_fn_upload(_fn_to_export)
-                            except Exception as _fe:
-                                _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
-                                _log_err("fn_combined", _fe)
-                            if _fn_combined_buf is None:
-                                st.button(
-                                    "Combined CSV",
-                                    disabled=True,
-                                    use_container_width=True,
-                                    key=f"fn_dl_disabled_{pod_name}",
-                                )
-                            else:
-                                if st.download_button(
-                                    label="Combined CSV",
-                                    data=_fn_combined_buf,
-                                    file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
-                                    mime="text/csv",
-                                    key=f"fn_dl_combined_{pod_name}",
-                                    use_container_width=True,
-                                ):
-                                    _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                                    for _h in _fn_included_hashes:
-                                        _fn_exported[_h] = _ts
-                                    st.session_state['_fn_exported'] = _fn_exported
-                                    st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
-                        else:
+                # ── BULK ACTION ROW 1: Combined CSV + Open FN link ──────────
+                # Disabled buttons just show "Combined CSV" instead of a wordy
+                # "(none selected)" suffix — the count IS the empty-state signal.
+                _action_cols = st.columns(2)
+                with _action_cols[0]:
+                    if _fn_selected:
+                        _fn_to_export = []
+                        for _h in _fn_selected:
+                            _cluster = _fn_route_lookup.get(_h)
+                            if _cluster:
+                                _ann = dict(_cluster)
+                                _ann['_cluster_hash'] = _h
+                                _fn_to_export.append(_ann)
+                        try:
+                            _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = generate_combined_fn_upload(_fn_to_export)
+                        except Exception as _fe:
+                            _fn_combined_buf, _fn_combined_stops, _fn_included_hashes = None, 0, []
+                            _log_err("fn_combined", _fe)
+                        if _fn_combined_buf is None:
                             st.button(
                                 "Combined CSV",
                                 disabled=True,
                                 use_container_width=True,
-                                key=f"fn_dl_empty_{pod_name}",
+                                key=f"fn_dl_disabled_{pod_name}",
                             )
-                    with _action_cols[1]:
-                        st.link_button(
-                            "Field Nation",
-                            url="https://app.fieldnation.com/projects",
-                            use_container_width=True,
-                        )
-
-                    # BULK FN ACTIONS -- Mark Posted + Move to Accepted paired into
-                    # one 2-up row to keep the bulk bar compact. (May 23 2026.)
-                    _fn_act_row = st.columns(2)
-                    with _fn_act_row[0]:
-                        if _sel_pending:
-                            if st.button(
-                                "Posted",
-                                key=f"fn_post_btn_{pod_name}",
+                        else:
+                            if st.download_button(
+                                label="Combined CSV",
+                                data=_fn_combined_buf,
+                                file_name=f"FN_Combined_{datetime.now().strftime('%m%d%Y_%H%M')}_{len(_fn_included_hashes)}routes.csv",
+                                mime="text/csv",
+                                key=f"fn_dl_combined_{pod_name}",
                                 use_container_width=True,
-                                type="secondary",
                             ):
                                 _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                                for _h in _sel_pending:
-                                    _fn_posted_dict[_h] = _ts
-                                st.session_state['_fn_posted'] = _fn_posted_dict
+                                for _h in _fn_included_hashes:
+                                    _fn_exported[_h] = _ts
+                                st.session_state['_fn_exported'] = _fn_exported
+                                st.toast(f"📥 Combined CSV: {len(_fn_included_hashes)} routes · {_fn_combined_stops} stops")
+                    else:
+                        st.button(
+                            "Combined CSV",
+                            disabled=True,
+                            use_container_width=True,
+                            key=f"fn_dl_empty_{pod_name}",
+                        )
+                with _action_cols[1]:
+                    st.link_button(
+                        "Field Nation",
+                        url="https://app.fieldnation.com/projects",
+                        use_container_width=True,
+                    )
+
+                # BULK FN ACTIONS -- Mark Posted + Move to Accepted paired into
+                # one 2-up row to keep the bulk bar compact. (May 23 2026.)
+                _fn_act_row = st.columns(2)
+                with _fn_act_row[0]:
+                    if _sel_pending:
+                        if st.button(
+                            "Posted",
+                            key=f"fn_post_btn_{pod_name}",
+                            use_container_width=True,
+                            type="secondary",
+                        ):
+                            _ts = datetime.now().strftime('%m/%d %I:%M %p')
+                            for _h in _sel_pending:
+                                _fn_posted_dict[_h] = _ts
+                            st.session_state['_fn_posted'] = _fn_posted_dict
+                            try:
+                                _hashes_csv = ",".join(_sel_pending)
+                                threading.Thread(
+                                    target=lambda: requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
+                                        timeout=15,
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            except Exception as _fpe:
+                                _log_err("markFNPosted/pod", _fpe)
+                            st.session_state[_fn_select_key] = []
+                            st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "Posted",
+                            key=f"fn_post_btn_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
+                        )
+                with _fn_act_row[1]:
+                    if _sel_assigned:
+                        if st.button(
+                            "Assigned",
+                            key=f"fn_assigned_bulk_{pod_name}",
+                            use_container_width=True,
+                        ):
+                            _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
+                            def _fire_assigned(_h):
                                 try:
-                                    _hashes_csv = ",".join(_sel_pending)
-                                    threading.Thread(
-                                        target=lambda: requests.post(
-                                            GAS_WEB_APP_URL,
-                                            json={"action": "markFNPosted", "auth_secret": GAS_AUTH, "cluster_hash": _hashes_csv},
-                                            timeout=15,
-                                        ),
-                                        daemon=True,
-                                    ).start()
-                                except Exception as _fpe:
-                                    _log_err("markFNPosted/pod", _fpe)
-                                st.session_state[_fn_select_key] = []
-                                st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
-                                st.rerun()
-                        else:
-                            st.button(
-                                "Posted",
-                                key=f"fn_post_btn_empty_{pod_name}",
-                                use_container_width=True,
-                                disabled=True,
-                            )
-                    with _fn_act_row[1]:
-                        if _sel_assigned:
-                            if st.button(
-                                "Assigned",
-                                key=f"fn_assigned_bulk_{pod_name}",
-                                use_container_width=True,
-                            ):
-                                _ts_now = datetime.now().strftime('%m/%d %I:%M %p')
-                                def _fire_assigned(_h):
-                                    try:
-                                        _r = requests.post(
-                                            GAS_WEB_APP_URL,
-                                            json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
-                                            timeout=90,  # see comment on per-route call above
-                                        ).json()
-                                        return (_h, bool(_r.get("success")), _r.get("error", ""))
-                                    except Exception as _ex:
-                                        return (_h, False, str(_ex))
-                                _ok = 0
-                                _fail = 0
-                                with st.spinner(f"Marking {len(_sel_assigned)} route(s) as Assigned FN Rep..."):
-                                    with ThreadPoolExecutor(max_workers=min(8, max(1, len(_sel_assigned)))) as _ex:
-                                        _results = list(_ex.map(_fire_assigned, _sel_assigned))
-                                    for _h, _success, _err in _results:
-                                        if _success:
-                                            _ok += 1
-                                            _fn_assigned_dict[_h] = _ts_now
-                                            st.session_state[f"contractor_{_h}"] = "Field Nation"
-                                            st.session_state.pop(f"route_state_{_h}", None)
-                                            # NOT reverted — see per-route handler (May 23 2026).
-                                            st.session_state[f"reverted_{_h}"] = False
-                                        else:
-                                            _fail += 1
-                                            _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
-                                st.session_state['_fn_assigned'] = _fn_assigned_dict
-                                fetch_sent_records_from_sheet.clear()
-                                st.session_state[_fn_select_key] = []
-                                if _fail == 0:
-                                    st.toast(f"✅ {_ok} route(s) moved to Accepted.")
-                                elif _ok == 0:
-                                    st.error(f"All {_fail} GAS calls failed. Check logs.")
-                                else:
-                                    st.toast(f"⚠️ {_ok} succeeded, {_fail} failed. Check logs for details.")
-                                st.rerun()
-                        else:
-                            st.button(
-                                "Assigned",
-                                key=f"fn_assigned_bulk_empty_{pod_name}",
-                                use_container_width=True,
-                                disabled=True,
-                            )
-
-                    st.divider()
-
-                    # Render the 3 buckets in order: Pending → Posted → Assigned.
-                    # Each gets its own banner; section transitions reset the state header.
-                    _fn_pending_list  = [_fn_route_lookup[h] for h in _fn_pending_hashes]
-                    _fn_posted_list   = [_fn_route_lookup[h] for h in _fn_posted_hashes]
-                    _fn_assigned_list = [_fn_route_lookup[h] for h in _fn_assigned_hashes]
-                    _fn_ordered = _fn_pending_list + _fn_posted_list + _fn_assigned_list
-
-                    def _fn_section_banner(_label, _count, _bg, _border, _fg, _emoji, _margin_top="6px"):
-                        st.markdown(
-                            f"<div class='dcc-collapse-boundary' style='background:{_bg}; border-left:3px solid {_border}; "
-                            f"padding:6px 12px; margin:{_margin_top} 0 4px 0; border-radius:6px;'>"
-                            f"<span style='font-size:11px; font-weight:900; color:{_fg}; "
-                            f"text-transform:uppercase; letter-spacing:0.08em;'>{_emoji} {_label} · "
-                            f"{_count} route(s)</span></div>",
-                            unsafe_allow_html=True,
+                                    _r = requests.post(
+                                        GAS_WEB_APP_URL,
+                                        json={"action": "markFNAssigned", "auth_secret": GAS_AUTH, "cluster_hash": _h},
+                                        timeout=90,  # see comment on per-route call above
+                                    ).json()
+                                    return (_h, bool(_r.get("success")), _r.get("error", ""))
+                                except Exception as _ex:
+                                    return (_h, False, str(_ex))
+                            _ok = 0
+                            _fail = 0
+                            with st.spinner(f"Marking {len(_sel_assigned)} route(s) as Assigned FN Rep..."):
+                                with ThreadPoolExecutor(max_workers=min(8, max(1, len(_sel_assigned)))) as _ex:
+                                    _results = list(_ex.map(_fire_assigned, _sel_assigned))
+                                for _h, _success, _err in _results:
+                                    if _success:
+                                        _ok += 1
+                                        _fn_assigned_dict[_h] = _ts_now
+                                        st.session_state[f"contractor_{_h}"] = "Field Nation"
+                                        st.session_state.pop(f"route_state_{_h}", None)
+                                        # NOT reverted — see per-route handler (May 23 2026).
+                                        st.session_state[f"reverted_{_h}"] = False
+                                    else:
+                                        _fail += 1
+                                        _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
+                            st.session_state['_fn_assigned'] = _fn_assigned_dict
+                            fetch_sent_records_from_sheet.clear()
+                            st.session_state[_fn_select_key] = []
+                            if _fail == 0:
+                                st.toast(f"✅ {_ok} route(s) moved to Accepted.")
+                            elif _ok == 0:
+                                st.error(f"All {_fail} GAS calls failed. Check logs.")
+                            else:
+                                st.toast(f"⚠️ {_ok} succeeded, {_fail} failed. Check logs for details.")
+                            st.rerun()
+                    else:
+                        st.button(
+                            "Assigned",
+                            key=f"fn_assigned_bulk_empty_{pod_name}",
+                            use_container_width=True,
+                            disabled=True,
                         )
 
-                    if _fn_pending_list:
-                        _fn_section_banner("Pending Post", len(_fn_pending_list), "#fffbeb", "#f59e0b", "#92400e", "📋")
+                st.divider()
 
-                    current_state = None
-                    _last_section = 'pending' if _fn_pending_list else ('posted' if _fn_posted_list else 'assigned')
-                    _seen_posted_banner = False
-                    _seen_assigned_banner = False
-                    for i, c in enumerate(_fn_ordered):
-                        _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
-                        # Determine which section this route lives in.
-                        if _fn_h_for_badge in _fn_assigned_hashes:
-                            _this_section = 'assigned'
-                        elif _fn_h_for_badge in _fn_posted_hashes:
-                            _this_section = 'posted'
-                        else:
-                            _this_section = 'pending'
+                # Render the 3 buckets in order: Pending → Posted → Assigned.
+                # Each gets its own banner; section transitions reset the state header.
+                _fn_pending_list  = [_fn_route_lookup[h] for h in _fn_pending_hashes]
+                _fn_posted_list   = [_fn_route_lookup[h] for h in _fn_posted_hashes]
+                _fn_assigned_list = [_fn_route_lookup[h] for h in _fn_assigned_hashes]
+                _fn_ordered = _fn_pending_list + _fn_posted_list + _fn_assigned_list
 
-                        # Section banner transitions (fired at the first row of each new section).
-                        if _this_section == 'posted' and not _seen_posted_banner:
-                            _fn_section_banner("Posted to FN — awaiting Provider", len(_fn_posted_list), "#ecfdf5", "#10b981", "#065f46", "📤", _margin_top="14px")
-                            _seen_posted_banner = True
-                            current_state = None
-                        elif _this_section == 'assigned' and not _seen_assigned_banner:
-                            _fn_section_banner("Assigned — ready to move to Accepted", len(_fn_assigned_list), "#dbeafe", "#3b82f6", "#1e40af", "🌐", _margin_top="14px")
-                            _seen_assigned_banner = True
-                            current_state = None
-                        _last_section = _this_section
+                def _fn_section_banner(_label, _count, _bg, _border, _fg, _emoji, _margin_top="6px"):
+                    st.markdown(
+                        f"<div class='dcc-collapse-boundary' style='background:{_bg}; border-left:3px solid {_border}; "
+                        f"padding:6px 12px; margin:{_margin_top} 0 4px 0; border-radius:6px;'>"
+                        f"<span style='font-size:11px; font-weight:900; color:{_fg}; "
+                        f"text-transform:uppercase; letter-spacing:0.08em;'>{_emoji} {_label} · "
+                        f"{_count} route(s)</span></div>",
+                        unsafe_allow_html=True,
+                    )
 
-                        if c['state'] != current_state:
-                            current_state = c['state']
-                            st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
+                if _fn_pending_list:
+                    _fn_section_banner("Pending Post", len(_fn_pending_list), "#fffbeb", "#f59e0b", "#92400e", "📋")
 
-                        esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        digi_pill = " 🔌" if c.get('is_digital') else ""
-                        inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
-                        remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if c.get('remov_count', 0) > 0 else ""
-                        _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
-                        boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
+                current_state = None
+                _last_section = 'pending' if _fn_pending_list else ('posted' if _fn_posted_list else 'assigned')
+                _seen_posted_banner = False
+                _seen_assigned_banner = False
+                for i, c in enumerate(_fn_ordered):
+                    _fn_h_for_badge = hashlib.md5("".join(sorted([str(_t['id']).strip() for _t in c.get('data', [])])).encode()).hexdigest()
+                    # Determine which section this route lives in.
+                    if _fn_h_for_badge in _fn_assigned_hashes:
+                        _this_section = 'assigned'
+                    elif _fn_h_for_badge in _fn_posted_hashes:
+                        _this_section = 'posted'
+                    else:
+                        _this_section = 'pending'
 
-                        _fn_exp_check = "✓ " if _fn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
-                        _fn_sel_check = "☑️ " if _fn_h_for_badge in _fn_selected else ""
-                        # 🌐 Inject Assigned Provider into title: "🌐 FN: Jane" or "🌐 FN"
-                        _fn_prov_for_title = st.session_state.get('_fn_provider', {}).get(_fn_h_for_badge, '')
-                        _fn_label = format_fn_card_title(_fn_prov_for_title)
-                        with st.expander(_fn_sel_check + _fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                            # 🌟 Guarantee route_state is set before render so FN card shows
-                            _fn_task_ids = [str(t['id']).strip() for t in c['data']]
-                            _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
-                            if not st.session_state.get(f"route_state_{_fn_hash}"):
-                                st.session_state[f"route_state_{_fn_hash}"] = "field_nation"
+                    # Section banner transitions (fired at the first row of each new section).
+                    if _this_section == 'posted' and not _seen_posted_banner:
+                        _fn_section_banner("Posted to FN — awaiting Provider", len(_fn_posted_list), "#ecfdf5", "#10b981", "#065f46", "📤", _margin_top="14px")
+                        _seen_posted_banner = True
+                        current_state = None
+                    elif _this_section == 'assigned' and not _seen_assigned_banner:
+                        _fn_section_banner("Assigned — ready to move to Accepted", len(_fn_assigned_list), "#dbeafe", "#3b82f6", "#1e40af", "🌐", _margin_top="14px")
+                        _seen_assigned_banner = True
+                        current_state = None
+                    _last_section = _this_section
 
-                            # NOTE (May 17 2026): render_dispatch now renders the
-                            # full Route Stops card (per-stop accordions + campaign
-                            # rows) for FN routes inside its is_fn branch, matching
-                            # Ready/Flagged exactly. The old custom "Route Summary"
-                            # card lived here — it's been removed so the FN card
-                            # uses the same canonical breakdown as Ready.
+                    if c['state'] != current_state:
+                        current_state = c['state']
+                        st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
 
-                            # 🌐 ASSIGNED PROVIDER input — shown for Posted AND Assigned
-                            # routes (Pending hasn't been posted yet so no provider yet).
-                            # Editing here can also promote a Posted route to Assigned or
-                            # clear an Assigned route back to Posted by emptying the field.
-                            # Saves via background thread to GAS setFnProvider; survives
-                            # reload and travels with the route into Accepted when
-                            # markFNAssigned fires.
-                            if _this_section in ('posted', 'assigned'):
-                                _fnprov_curr = st.session_state.get('_fn_provider', {}).get(_fn_hash, '')
-                                _fnprov_key = f"fn_prov_input_{pod_name}_{_fn_hash}"
-                                def _on_fn_prov_change(_h=_fn_hash, _key=_fnprov_key):
-                                    _val = (st.session_state.get(_key, '') or '').strip()
-                                    _dict = st.session_state.setdefault('_fn_provider', {})
-                                    _dict[_h] = _val
-                                    save_fn_provider(GAS_WEB_APP_URL, _h, _val, st.session_state)
-                                st.text_input(
-                                    "🌐 Assigned Provider (Field Nation)",
-                                    value=_fnprov_curr,
-                                    key=_fnprov_key,
-                                    on_change=_on_fn_prov_change,
-                                    placeholder="Type the FN provider's name once they accept",
-                                    help="Saves automatically. Appears as 'FN: <name>' in the card title and travels with the route to Accepted.",
-                                )
+                    esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
+                    digi_pill = " 🔌" if c.get('is_digital') else ""
+                    inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else ""
+                    remov_pill = f" | 🗑️ {c.get('remov_count', 0)} Removal" if c.get('remov_count', 0) > 0 else ""
+                    _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
+                    boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
+
+                    _fn_exp_check = "✓ " if _fn_h_for_badge in st.session_state.get('_fn_exported', {}) else ""
+                    _fn_sel_check = "☑️ " if _fn_h_for_badge in _fn_selected else ""
+                    # 🌐 Inject Assigned Provider into title: "🌐 FN: Jane" or "🌐 FN"
+                    _fn_prov_for_title = st.session_state.get('_fn_provider', {}).get(_fn_h_for_badge, '')
+                    _fn_label = format_fn_card_title(_fn_prov_for_title)
+                    with st.expander(_fn_sel_check + _fn_exp_check + f"🌐 {_fn_label}{digi_pill} | {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        # 🌟 Guarantee route_state is set before render so FN card shows
+                        _fn_task_ids = [str(t['id']).strip() for t in c['data']]
+                        _fn_hash = hashlib.md5("".join(sorted(_fn_task_ids)).encode()).hexdigest()
+                        if not st.session_state.get(f"route_state_{_fn_hash}"):
+                            st.session_state[f"route_state_{_fn_hash}"] = "field_nation"
+
+                        # NOTE (May 17 2026): render_dispatch now renders the
+                        # full Route Stops card (per-stop accordions + campaign
+                        # rows) for FN routes inside its is_fn branch, matching
+                        # Ready/Flagged exactly. The old custom "Route Summary"
+                        # card lived here — it's been removed so the FN card
+                        # uses the same canonical breakdown as Ready.
+
+                        # 🌐 ASSIGNED PROVIDER input — shown for Posted AND Assigned
+                        # routes (Pending hasn't been posted yet so no provider yet).
+                        # Editing here can also promote a Posted route to Assigned or
+                        # clear an Assigned route back to Posted by emptying the field.
+                        # Saves via background thread to GAS setFnProvider; survives
+                        # reload and travels with the route into Accepted when
+                        # markFNAssigned fires.
+                        if _this_section in ('posted', 'assigned'):
+                            _fnprov_curr = st.session_state.get('_fn_provider', {}).get(_fn_hash, '')
+                            _fnprov_key = f"fn_prov_input_{pod_name}_{_fn_hash}"
+                            def _on_fn_prov_change(_h=_fn_hash, _key=_fnprov_key):
+                                _val = (st.session_state.get(_key, '') or '').strip()
+                                _dict = st.session_state.setdefault('_fn_provider', {})
+                                _dict[_h] = _val
+                                save_fn_provider(GAS_WEB_APP_URL, _h, _val, st.session_state)
+                            st.text_input(
+                                "🌐 Assigned Provider (Field Nation)",
+                                value=_fnprov_curr,
+                                key=_fnprov_key,
+                                on_change=_on_fn_prov_change,
+                                placeholder="Type the FN provider's name once they accept",
+                                help="Saves automatically. Appears as 'FN: <name>' in the card title and travels with the route to Accepted.",
+                            )
 
                         render_dispatch(i+5000, c, pod_name)
-            except Exception as _fn_tab_err:
-                st.error(f"🔍 FN tab error: {type(_fn_tab_err).__name__}: {_fn_tab_err}")
-                import traceback as _tb
-                st.code(_tb.format_exc()[-2000:], language="python")
-                _log_err(f"fn_tab_render/{pod_name}", _fn_tab_err)
                     
         with t_digital:
             if _is_dispatch_associate():
@@ -9185,6 +9191,7 @@ def run_pod_tab(pod_name):
                     _dig_type_pill = f" | {' · '.join(_dig_type_parts)}" if _dig_type_parts else ""
                     with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_type_pill}{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i+7000, c, pod_name)
+                    
     with col_right:
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
         t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
@@ -9580,7 +9587,6 @@ def run_pod_tab(pod_name):
             _render_dec_panel()
         with t_fin:
             _render_fin_panel()
-                    
 # --- LOGOUT URL HANDLER ---
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep
 # the logout control as pure HTML and pin it via fixed positioning, instead of

@@ -5168,6 +5168,7 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     invalidates. Cheap to compute vs the full merge + sort.
     """
     ghost_routes = _merge_same_wo_ghosts(ghost_routes or [])
+    _cache_key = None  # 🛡️ prevent NameError if cache-key build below fails before assignment
     unified = []
     live_clusters_with_tids = []
     for c in live_routes:
@@ -8618,401 +8619,6 @@ def run_pod_tab(pod_name):
 
     col_left, col_right = st.columns([5, 5])
 
-    with col_right:
-        st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
-        t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
-        
-        @st.fragment
-        def _render_sent_panel():
-            # 🚀 INSTANT RE-ROUTE — the re-route buttons below fire
-            # st.rerun(scope="fragment"), which re-runs ONLY this fragment, not the
-            # whole pod tab — so the route leaves the Sent list the instant the
-            # button is hit. But `sent` / `sent_ghosts` were built by the
-            # (non-rerunning) outer bucket-sort, so on a fragment-only rerun they
-            # still include anything just re-routed. Re-filter on the reverted_
-            # flag here so the just-re-routed route drops straight out of the list.
-            def _is_reverted_cluster(_c):
-                _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
-                _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
-                return st.session_state.get(f"reverted_{_h}", False)
-            _live_sent = [c for c in sent if not _is_reverted_cluster(c)]
-            _live_ghosts = [g for g in sent_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
-            unified_sent = unify_and_sort_by_date(_live_sent, _live_ghosts, live_hashes)
-            # 🚪 Close the re-route popover after a route moves. Streamlit keeps a
-            # popover open when you click a button inside it; once the route is gone the
-            # popover is orphaned. The re-route handlers set this flag, then this fires
-            # Escape + an outside-click on the parent document to dismiss it.
-            if st.session_state.pop('_close_reroute_popover', False):
-                _components.html(
-                    "<script>try{var d=window.parent.document;"
-                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
-                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
-                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
-                    "}catch(e){}</script>",
-                    height=0,
-                )
-            # 🔄 POST-REVOKE RESYNC — relocated into this fragment (May 23 2026).
-            # The Sent re-route now fires st.rerun(scope="fragment"), so the
-            # main-script resync trigger never runs on a re-route. Emit it here
-            # so the route still gets pulled back into Ready ~12s after the
-            # background OnFleet unassign lands.
-            if st.session_state.pop(f"_post_revoke_resync_pending_{pod_name}", False):
-                _components.html(
-                    f"""
-                    <script>
-                    (function() {{
-                      parent.setTimeout(function() {{
-                        try {{
-                          var LK = '_dccSyncClickLock_{pod_name}';
-                          var now = Date.now();
-                          var last = parseInt(parent.sessionStorage.getItem(LK) || '0', 10);
-                          if (now - last < 15000) return;
-                          var btn = parent.document.querySelector('[class*="st-key-reopt_{pod_name}"] button');
-                          if (btn) {{ parent.sessionStorage.setItem(LK, String(now)); btn.click(); }}
-                        }} catch (_) {{}}
-                      }}, 12000);
-                    }})();
-                    </script>
-                    """,
-                    height=0,
-                )
-            if not unified_sent: st.info("No pending routes sent.")
-            
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_sent, f"{pod_name}_sent")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div class='dcc-state-header' data-state-key='sent-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
-                
-                if not item['is_ghost']:
-                    c = item
-                    ic_name = c.get('contractor_name', 'Unknown')
-                    task_ids = [str(tid['id']).strip() for tid in c['data']]
-                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
-                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
-                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
-                    wo_display = c.get('wo', ic_name)
-                    _pill_sent = get_task_pill(c.get('data', []))
-                    
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                            _venues_html = venue_section(make_venue_details(c['data']))
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
-    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
-        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
-    </div>
-    <div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div>
-        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div>
-    </div>
-    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div>
-        <div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div>
-        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div>
-        <div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div>
-    </div>
-    {_venues_html}
-</div>""", unsafe_allow_html=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
-                else:
-                    g = item
-                    g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_sent_{pod_name}_{i}")  # H14 pod-scoped
-                    wo_display = g.get('wo', g_ic_name)
-                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
-                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
-                    
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
-                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
-                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
-                            else: task_locs = raw_locs
-                            u_locs = list(dict.fromkeys(task_locs))
-                            _gvenues_html = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
-    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
-        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
-    </div>
-    <div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div>
-        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
-        <div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div>
-    </div>
-    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
-        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div>
-        <div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div>
-        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div>
-        <div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div>
-    </div>
-    {_gvenues_html}
-</div>""", unsafe_allow_html=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
-                                    # Jul 2 2026 — Nick: bundled ghost revoke must archive
-                                    # ALL rows in the bundle so the merged tasks return to
-                                    # Dispatch as ONE cluster, not multiple. _replay_bundles
-                                    # will re-merge in Ready via the existing _bundle_map.
-                                    _all_hashes = g.get('_merged_hashes') or [ghost_hash]
-                                    for _mh in _all_hashes:
-                                        move_to_dispatch(**{"cluster_hash": _mh, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
-        with t_sent:
-            _render_sent_panel()
-        # 🚀 Shared re-route helpers for the Accepted/Declined/Finalized panels.
-        # Each panel below is now its own @st.fragment, so a re-route is a
-        # fragment-scoped rerun: the route drops out instantly, with no
-        # full-page flicker and no auto_sync_checker re-trigger.
-        def _is_reverted_cluster(_c):
-            _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
-            _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
-            return st.session_state.get(f"reverted_{_h}", False)
-        def _close_popover_if_flagged():
-            if st.session_state.pop('_close_reroute_popover', False):
-                _components.html(
-                    "<script>try{var d=window.parent.document;"
-                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
-                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
-                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
-                    "}catch(e){}</script>",
-                    height=0,
-                )
-        @st.fragment
-        def _render_acc_panel():
-            _close_popover_if_flagged()
-            _live_acc = [c for c in accepted if not _is_reverted_cluster(c)]
-            _live_acc_ghosts = [g for g in pod_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
-            unified_acc = unify_and_sort_by_date(_live_acc, _live_acc_ghosts, live_hashes)
-            if not unified_acc: st.info("Waiting for portal acceptances...")
-            
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_acc, f"{pod_name}_acc")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div class='dcc-state-header' data-state-key='accepted-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
-                
-                if not item['is_ghost']:
-                    c = item
-                    ic_name = c.get('contractor_name', 'Unknown')
-                    task_ids = [str(tid['id']).strip() for tid in c['data']]
-                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
-                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
-                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
-                    
-                    _k_by_addr = {}
-                    for _tk in c['data']:
-                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
-                            _addr = _tk['full']
-                            _venue = _tk.get('venue_name', '') or _addr
-                            _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
-                    _k_total = sum(_k_by_addr.values())
-                    _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        if ic_name == "Field Nation":
-                            _acc_fn_prov = st.session_state.get('_fn_provider', {}).get(cluster_hash, '')
-                            _acc_fn_badge = f"🌐 {format_fn_card_title(_acc_fn_prov)} | "
-                        else:
-                            _acc_fn_badge = ""
-                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                            u_locs = []
-                            for tk in c['data']:
-                                if tk['full'] not in u_locs: u_locs.append(tk['full'])
-                            loc_rows = []
-                            for l in u_locs:
-                                _venue_key = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
-                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
-                                _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
-                                _v_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_venue_key} — </span>" if _venue_key else ""
-                                loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
-                            _acc_venues_html = venue_section(make_venue_details(c['data']))
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
-                            if _k_total > 0:
-                                st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
-                else:
-                    g = item
-                    g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_{pod_name}_{i}")  # H14 pod-scoped
-                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
-                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
-                    
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        _gk_total = g.get('kCnt', 0) or 0
-                        _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
-                        _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
-                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}  ·  :gray[{tasks_cnt} tasks]"):
-                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
-                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
-                            else: task_locs = raw_locs
-                            u_locs = list(dict.fromkeys(task_locs))
-                            _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
-                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
-                            if _gk_total > 0:
-                                st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
-        @st.fragment
-        def _render_dec_panel():
-            _close_popover_if_flagged()
-            _live_dec = [c for c in declined if not _is_reverted_cluster(c)]
-            unified_dec = unify_and_sort_by_date(_live_dec, [], live_hashes)
-            if not unified_dec: st.info("No declined routes.")
-            
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_dec, f"{pod_name}_dec")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div class='dcc-state-header' data-state-key='declined-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
-                
-                c = item
-                ic_name = c.get('contractor_name', 'Unknown')
-                task_ids = [str(tid['id']).strip() for tid in c['data']]
-                cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
-                exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                with exp_col:
-                    comp_dec = c.get('comp', 0)
-                    due_dec = c.get('due', 'N/A')
-                    stops_dec, tasks_dec = c['stops'], len(c['data'])
-                    _pill_dec = get_task_pill(c.get('data', []))
-                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                        u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
-                        _dec_venues = venue_section(make_venue_details(c['data']))
-                        st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
-                with btn_col:
-                    if not _is_dispatch_associate():
-                        with st.popover("↩️"):
-                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
-                            if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
-                                move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
-                                st.session_state['_close_reroute_popover'] = True
-                                st.rerun(scope="app")
-        @st.fragment
-        def _render_fin_panel():
-            _close_popover_if_flagged()
-            _live_fin = [c for c in finalized if not _is_reverted_cluster(c)]
-            _live_fin_ghosts = [g for g in finalized_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
-            unified_fin = unify_and_sort_by_date(_live_fin, _live_fin_ghosts, live_hashes)
-            if not unified_fin: st.info("No finalized routes.") 
-            
-            current_date = None
-            _pg_items, _pg_start = _paginate_panel(unified_fin, f"{pod_name}_fin")
-            for i, item in enumerate(_pg_items, start=_pg_start):
-                date_str = item['sort_date']
-                if date_str != current_date:
-                    current_date = date_str
-                    st.markdown(f"<div class='dcc-state-header' data-state-key='finalized-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
-                
-                if not item['is_ghost']:
-                    c = item
-                    ic_name = c.get('contractor_name', 'Unknown')
-                    task_ids = [str(tid['id']).strip() for tid in c['data']]
-                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
-                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
-                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
-                    
-                    _fk_by_addr = {}
-                    for _tk in c['data']:
-                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
-                            _addr = _tk['full']
-                            _venue = _tk.get('venue_name', '') or _addr
-                            _fk_by_addr[_venue] = _fk_by_addr.get(_venue, 0) + 1
-                    _fk_total = sum(_fk_by_addr.values())
-                    _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
-                            u_locs = []
-                            for tk in c['data']:
-                                if tk['full'] not in u_locs: u_locs.append(tk['full'])
-                            loc_rows = []
-                            for l in u_locs:
-                                _fvk = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
-                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
-                                _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
-                                _fv_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_fvk} — </span>" if _fvk else ""
-                                loc_rows.append(f"<li>{_fv_prefix}{l}{_k_tag}</li>")
-                            _fin_venues = venue_section(make_venue_details(c['data']))
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_fin_venues}</div>""", unsafe_allow_html=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
-                else:
-                    g = item
-                    g_ic_name = g.get('contractor_name', 'Unknown')
-                    ghost_hash = g.get('hash', f"ghost_fin_{pod_name}_{i}")  # H14 pod-scoped
-                    wo_display = g.get('wo', g_ic_name)
-                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
-                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
-                    
-                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
-                    with exp_col:
-                        _gfk_total = g.get('kCnt', 0) or 0
-                        _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
-                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
-                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
-                            else: task_locs = raw_locs
-                            u_locs = list(dict.fromkeys(task_locs))
-                            _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
-                            g_ic_name_fin = g.get('contractor_name', 'Unknown')
-                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
-                    with btn_col:
-                        if not _is_dispatch_associate():
-                            with st.popover("↩️"):
-                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
-                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
-                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
-                                    st.session_state['_close_reroute_popover'] = True
-                                    st.rerun(scope="app")
-        with t_acc:
-            _render_acc_panel()
-        with t_dec:
-            _render_dec_panel()
-        with t_fin:
-            _render_fin_panel()
     with col_left:
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_PURPLE}; text-align: center;'>🚀 Dispatch</div>", unsafe_allow_html=True)
         # Slim the per-route Generate Link button (May 23 2026) -- scoped to
@@ -9579,6 +9185,401 @@ def run_pod_tab(pod_name):
                     _dig_type_pill = f" | {' · '.join(_dig_type_parts)}" if _dig_type_parts else ""
                     with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_type_pill}{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                         render_dispatch(i+7000, c, pod_name)
+    with col_right:
+        st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
+        t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
+        
+        @st.fragment
+        def _render_sent_panel():
+            # 🚀 INSTANT RE-ROUTE — the re-route buttons below fire
+            # st.rerun(scope="fragment"), which re-runs ONLY this fragment, not the
+            # whole pod tab — so the route leaves the Sent list the instant the
+            # button is hit. But `sent` / `sent_ghosts` were built by the
+            # (non-rerunning) outer bucket-sort, so on a fragment-only rerun they
+            # still include anything just re-routed. Re-filter on the reverted_
+            # flag here so the just-re-routed route drops straight out of the list.
+            def _is_reverted_cluster(_c):
+                _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
+                _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
+                return st.session_state.get(f"reverted_{_h}", False)
+            _live_sent = [c for c in sent if not _is_reverted_cluster(c)]
+            _live_ghosts = [g for g in sent_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_sent = unify_and_sort_by_date(_live_sent, _live_ghosts, live_hashes)
+            # 🚪 Close the re-route popover after a route moves. Streamlit keeps a
+            # popover open when you click a button inside it; once the route is gone the
+            # popover is orphaned. The re-route handlers set this flag, then this fires
+            # Escape + an outside-click on the parent document to dismiss it.
+            if st.session_state.pop('_close_reroute_popover', False):
+                _components.html(
+                    "<script>try{var d=window.parent.document;"
+                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
+                    "}catch(e){}</script>",
+                    height=0,
+                )
+            # 🔄 POST-REVOKE RESYNC — relocated into this fragment (May 23 2026).
+            # The Sent re-route now fires st.rerun(scope="fragment"), so the
+            # main-script resync trigger never runs on a re-route. Emit it here
+            # so the route still gets pulled back into Ready ~12s after the
+            # background OnFleet unassign lands.
+            if st.session_state.pop(f"_post_revoke_resync_pending_{pod_name}", False):
+                _components.html(
+                    f"""
+                    <script>
+                    (function() {{
+                      parent.setTimeout(function() {{
+                        try {{
+                          var LK = '_dccSyncClickLock_{pod_name}';
+                          var now = Date.now();
+                          var last = parseInt(parent.sessionStorage.getItem(LK) || '0', 10);
+                          if (now - last < 15000) return;
+                          var btn = parent.document.querySelector('[class*="st-key-reopt_{pod_name}"] button');
+                          if (btn) {{ parent.sessionStorage.setItem(LK, String(now)); btn.click(); }}
+                        }} catch (_) {{}}
+                      }}, 12000);
+                    }})();
+                    </script>
+                    """,
+                    height=0,
+                )
+            if not unified_sent: st.info("No pending routes sent.")
+            
+            current_date = None
+            _pg_items, _pg_start = _paginate_panel(unified_sent, f"{pod_name}_sent")
+            for i, item in enumerate(_pg_items, start=_pg_start):
+                date_str = item['sort_date']
+                if date_str != current_date:
+                    current_date = date_str
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='sent-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 SENT: {current_date}</div>", unsafe_allow_html=True)
+                
+                if not item['is_ghost']:
+                    c = item
+                    ic_name = c.get('contractor_name', 'Unknown')
+                    task_ids = [str(tid['id']).strip() for tid in c['data']]
+                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                    wo_display = c.get('wo', ic_name)
+                    _pill_sent = get_task_pill(c.get('data', []))
+                    
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            _venues_html = venue_section(make_venue_details(c['data']))
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
+    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
+        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
+    </div>
+    <div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
+        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div>
+        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div>
+    </div>
+    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
+        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div>
+        <div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div>
+        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div>
+        <div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div>
+    </div>
+    {_venues_html}
+</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_sent_live_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": c})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
+                else:
+                    g = item
+                    g_ic_name = g.get('contractor_name', 'Unknown')
+                    ghost_hash = g.get('hash', f"ghost_sent_{pod_name}_{i}")  # H14 pod-scoped
+                    wo_display = g.get('wo', g_ic_name)
+                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                    
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
+                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                            else: task_locs = raw_locs
+                            u_locs = list(dict.fromkeys(task_locs))
+                            _gvenues_html = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
+    <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
+        <span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span>
+    </div>
+    <div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
+        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div>
+        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div>
+        <div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div>
+    </div>
+    <div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;">
+        <div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div>
+        <div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div>
+        <div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div>
+        <div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div>
+    </div>
+    {_gvenues_html}
+</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:13px; text-align:center;'>Re-route from <b>{g_ic_name}</b>?</p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Re-Route", key=f"rev_ghost_sent_{ghost_hash}", type="primary", use_container_width=True):
+                                    # Jul 2 2026 — Nick: bundled ghost revoke must archive
+                                    # ALL rows in the bundle so the merged tasks return to
+                                    # Dispatch as ONE cluster, not multiple. _replay_bundles
+                                    # will re-merge in Ready via the existing _bundle_map.
+                                    _all_hashes = g.get('_merged_hashes') or [ghost_hash]
+                                    for _mh in _all_hashes:
+                                        move_to_dispatch(**{"cluster_hash": _mh, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Re-Routed", "check_onfleet": True, "cluster_data": g})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="fragment")  # snap out of Sent (May 23 2026)
+        with t_sent:
+            _render_sent_panel()
+        # 🚀 Shared re-route helpers for the Accepted/Declined/Finalized panels.
+        # Each panel below is now its own @st.fragment, so a re-route is a
+        # fragment-scoped rerun: the route drops out instantly, with no
+        # full-page flicker and no auto_sync_checker re-trigger.
+        def _is_reverted_cluster(_c):
+            _tids = [str(_t['id']).strip() for _t in _c.get('data', [])]
+            _h = hashlib.md5("".join(sorted(_tids)).encode()).hexdigest()
+            return st.session_state.get(f"reverted_{_h}", False)
+        def _close_popover_if_flagged():
+            if st.session_state.pop('_close_reroute_popover', False):
+                _components.html(
+                    "<script>try{var d=window.parent.document;"
+                    "d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));"
+                    "d.body.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));"
+                    "}catch(e){}</script>",
+                    height=0,
+                )
+        @st.fragment
+        def _render_acc_panel():
+            _close_popover_if_flagged()
+            _live_acc = [c for c in accepted if not _is_reverted_cluster(c)]
+            _live_acc_ghosts = [g for g in pod_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_acc = unify_and_sort_by_date(_live_acc, _live_acc_ghosts, live_hashes)
+            if not unified_acc: st.info("Waiting for portal acceptances...")
+            
+            current_date = None
+            _pg_items, _pg_start = _paginate_panel(unified_acc, f"{pod_name}_acc")
+            for i, item in enumerate(_pg_items, start=_pg_start):
+                date_str = item['sort_date']
+                if date_str != current_date:
+                    current_date = date_str
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='accepted-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 ACCEPTED: {current_date}</div>", unsafe_allow_html=True)
+                
+                if not item['is_ghost']:
+                    c = item
+                    ic_name = c.get('contractor_name', 'Unknown')
+                    task_ids = [str(tid['id']).strip() for tid in c['data']]
+                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                    
+                    _k_by_addr = {}
+                    for _tk in c['data']:
+                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
+                            _addr = _tk['full']
+                            _venue = _tk.get('venue_name', '') or _addr
+                            _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
+                    _k_total = sum(_k_by_addr.values())
+                    _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        if ic_name == "Field Nation":
+                            _acc_fn_prov = st.session_state.get('_fn_provider', {}).get(cluster_hash, '')
+                            _acc_fn_badge = f"🌐 {format_fn_card_title(_acc_fn_prov)} | "
+                        else:
+                            _acc_fn_badge = ""
+                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            u_locs = []
+                            for tk in c['data']:
+                                if tk['full'] not in u_locs: u_locs.append(tk['full'])
+                            loc_rows = []
+                            for l in u_locs:
+                                _venue_key = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
+                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
+                                _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
+                                _v_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_venue_key} — </span>" if _venue_key else ""
+                                loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
+                            _acc_venues_html = venue_section(make_venue_details(c['data']))
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_acc_venues_html}</div>""", unsafe_allow_html=True)
+                            render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
+                            if _k_total > 0:
+                                st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Remove", key=f"rev_acc_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="app")
+                else:
+                    g = item
+                    g_ic_name = g.get('contractor_name', 'Unknown')
+                    ghost_hash = g.get('hash', f"ghost_{pod_name}_{i}")  # H14 pod-scoped
+                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                    
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        _gk_total = g.get('kCnt', 0) or 0
+                        _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
+                        _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
+                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                            else: task_locs = raw_locs
+                            u_locs = list(dict.fromkeys(task_locs))
+                            _gacc_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gacc_venues}</div>""", unsafe_allow_html=True)
+                            render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
+                            if _gk_total > 0:
+                                st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="app")
+        @st.fragment
+        def _render_dec_panel():
+            _close_popover_if_flagged()
+            _live_dec = [c for c in declined if not _is_reverted_cluster(c)]
+            unified_dec = unify_and_sort_by_date(_live_dec, [], live_hashes)
+            if not unified_dec: st.info("No declined routes.")
+            
+            current_date = None
+            _pg_items, _pg_start = _paginate_panel(unified_dec, f"{pod_name}_dec")
+            for i, item in enumerate(_pg_items, start=_pg_start):
+                date_str = item['sort_date']
+                if date_str != current_date:
+                    current_date = date_str
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='declined-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 DECLINED: {current_date}</div>", unsafe_allow_html=True)
+                
+                c = item
+                ic_name = c.get('contractor_name', 'Unknown')
+                task_ids = [str(tid['id']).strip() for tid in c['data']]
+                cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                with exp_col:
+                    comp_dec = c.get('comp', 0)
+                    due_dec = c.get('due', 'N/A')
+                    stops_dec, tasks_dec = c['stops'], len(c['data'])
+                    _pill_dec = get_task_pill(c.get('data', []))
+                    with st.expander(f"❌ {c.get('wo', ic_name)} | ${comp_dec} | Due: {due_dec}{_pill_dec}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        u_locs_dec = list(dict.fromkeys(t['full'] for t in c['data']))
+                        _dec_venues = venue_section(make_venue_details(c['data']))
+                        st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_dec} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_dec} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due_dec}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp_dec}</div></div></div>{_dec_venues}</div>""", unsafe_allow_html=True)
+                with btn_col:
+                    if not _is_dispatch_associate():
+                        with st.popover("↩️"):
+                            st.markdown(f"<p style='font-size:13px; text-align:center;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</p>", unsafe_allow_html=True)
+                            if st.button("🚨 Yes, Remove", key=f"rev_dec_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c})
+                                st.session_state['_close_reroute_popover'] = True
+                                st.rerun(scope="app")
+        @st.fragment
+        def _render_fin_panel():
+            _close_popover_if_flagged()
+            _live_fin = [c for c in finalized if not _is_reverted_cluster(c)]
+            _live_fin_ghosts = [g for g in finalized_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
+            unified_fin = unify_and_sort_by_date(_live_fin, _live_fin_ghosts, live_hashes)
+            if not unified_fin: st.info("No finalized routes.") 
+            
+            current_date = None
+            _pg_items, _pg_start = _paginate_panel(unified_fin, f"{pod_name}_fin")
+            for i, item in enumerate(_pg_items, start=_pg_start):
+                date_str = item['sort_date']
+                if date_str != current_date:
+                    current_date = date_str
+                    st.markdown(f"<div class='dcc-state-header' data-state-key='finalized-{current_date}'><span class='dcc-state-chevron'>▸</span>📅 FINALIZED: {current_date}</div>", unsafe_allow_html=True)
+                
+                if not item['is_ghost']:
+                    c = item
+                    ic_name = c.get('contractor_name', 'Unknown')
+                    task_ids = [str(tid['id']).strip() for tid in c['data']]
+                    cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                    comp, due = c.get('comp', 0), c.get('due', 'N/A')
+                    tasks_cnt, stops_cnt = len(c['data']), c['stops']
+                    
+                    _fk_by_addr = {}
+                    for _tk in c['data']:
+                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
+                            _addr = _tk['full']
+                            _venue = _tk.get('venue_name', '') or _addr
+                            _fk_by_addr[_venue] = _fk_by_addr.get(_venue, 0) + 1
+                    _fk_total = sum(_fk_by_addr.values())
+                    _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                            u_locs = []
+                            for tk in c['data']:
+                                if tk['full'] not in u_locs: u_locs.append(tk['full'])
+                            loc_rows = []
+                            for l in u_locs:
+                                _fvk = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
+                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
+                                _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
+                                _fv_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_fvk} — </span>" if _fvk else ""
+                                loc_rows.append(f"<li>{_fv_prefix}{l}{_k_tag}</li>")
+                            _fin_venues = venue_section(make_venue_details(c['data']))
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_fin_venues}</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{c.get('wo', ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Remove", key=f"rev_fin_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": cluster_hash, "ic_name": ic_name, "pod_name": pod_name, "cluster_data": c, "check_completed": True})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="app")
+                else:
+                    g = item
+                    g_ic_name = g.get('contractor_name', 'Unknown')
+                    ghost_hash = g.get('hash', f"ghost_fin_{pod_name}_{i}")  # H14 pod-scoped
+                    wo_display = g.get('wo', g_ic_name)
+                    comp, due = g.get('pay', 0), g.get('due', 'N/A')
+                    stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
+                    
+                    exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
+                    with exp_col:
+                        _gfk_total = g.get('kCnt', 0) or 0
+                        _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                            raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
+                            if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
+                            else: task_locs = raw_locs
+                            u_locs = list(dict.fromkeys(task_locs))
+                            _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
+                            g_ic_name_fin = g.get('contractor_name', 'Unknown')
+                            st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
+                    with btn_col:
+                        if not _is_dispatch_associate():
+                            with st.popover("↩️"):
+                                st.markdown(f"<p style='font-size:11px; text-align:center; margin:0 0 4px 0; line-height:1.3;'><span style='color:#475569; font-weight:700;'>Are you sure you want to remove this route from <b>{g_ic_name}</b>?</span><br><span style='color:#dc2626; font-size:10px; font-weight:500;'>All remaining tasks in <b>{g.get('wo', g_ic_name)}</b> will be removed from OnFleet.</span></p>", unsafe_allow_html=True)
+                                if st.button("🚨 Yes, Remove", key=f"rev_ghost_fin_{ghost_hash}_{i}", type="primary", use_container_width=True):
+                                    move_to_dispatch(**{"cluster_hash": ghost_hash, "ic_name": g_ic_name, "pod_name": pod_name, "action_label": "Ghost Archived", "check_onfleet": True, "cluster_data": g, "check_completed": True})
+                                    st.session_state['_close_reroute_popover'] = True
+                                    st.rerun(scope="app")
+        with t_acc:
+            _render_acc_panel()
+        with t_dec:
+            _render_dec_panel()
+        with t_fin:
+            _render_fin_panel()
                     
 # --- LOGOUT URL HANDLER ---
 # The pinned-top-right Sign-out link sets ?logout=1 on the URL (so we can keep

@@ -6310,7 +6310,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
-                    try:
+                try:
                     _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
                     try:
                         _dispatch_result = _resp.json()

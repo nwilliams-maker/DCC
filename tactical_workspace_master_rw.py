@@ -3090,7 +3090,7 @@ def _csv_with_retry(url, attempts=3):
     \'<tab>\' route tab" banner until the user manually refreshed. Three
     attempts with 0.6s / 1.2s / 1.8s gaps clears nearly all of those without
     visibly slowing the cache miss. (Jun 3 2026 -- Nick.)"""
-        _last = None
+    _last = None
     for _i in range(attempts):
         try:
             return pd.read_csv(url)
@@ -3143,8 +3143,8 @@ def _cached_fetch_sent_records_from_sheet():
             raise ValueError("IC_SHEET_URL must be a string. Check for trailing commas!")
             
         base_url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid="
-        
-                sheets_to_fetch = [
+            
+        sheets_to_fetch = [
             (SAVED_ROUTES_GID, "sent"),
             (FIELD_NATION_GID, "field_nation"),
             (DECLINED_ROUTES_GID, "declined"),
@@ -3179,7 +3179,7 @@ def _cached_fetch_sent_records_from_sheet():
         # route's prior journey instead of a blank slate.
         history_db = {}  # tid -> list of {status, name, time, wo, raw_ts}
         
-                for gid, status_label in sheets_to_fetch:
+        for gid, status_label in sheets_to_fetch:
             try:
                 # Already fetched concurrently above — re-raise here so the
                 # existing per-sheet except block below still handles a
@@ -3407,7 +3407,7 @@ def _cached_fetch_sent_records_from_sheet():
         # harvest revoke/re-route HISTORY events so the Ready-card history banner survives
         # session resets — was previously session-only via _actions_*. Tasks/status are
         # still NEVER read into clustering — only into history_db.
-                _archived_wos = set()
+        _archived_wos = set()
         try:
             # Already fetched concurrently above alongside the other 5 tabs.
             _archive_df = _prefetched.get(ARCHIVE_GID)

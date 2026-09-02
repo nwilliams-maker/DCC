@@ -3143,7 +3143,7 @@ def _cached_fetch_sent_records_from_sheet():
             raise ValueError("IC_SHEET_URL must be a string. Check for trailing commas!")
             
         base_url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid="
-            
+        
         sheets_to_fetch = [
             (SAVED_ROUTES_GID, "sent"),
             (FIELD_NATION_GID, "field_nation"),
@@ -3160,7 +3160,7 @@ def _cached_fetch_sent_records_from_sheet():
         _all_gids = [g for g, _ in sheets_to_fetch] + [ARCHIVE_GID]
         _prefetched = _fetch_gids_parallel(base_url, _all_gids)
 
-        
+
         sent_dict = {}
         # 🌟 THE FIX: Add Global_Digital to the dictionary!
         ghost_routes = {"Blue": [], "Green": [], "Orange": [], "Purple": [], "Red": [], "Global_Digital": [], "UNKNOWN": []}

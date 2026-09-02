@@ -7587,22 +7587,6 @@ def run_pod_tab(pod_name):
     if not st.session_state.get('_asc_ran_this_render'):
         st.session_state['_asc_ran_this_render'] = True
         auto_sync_checker(pod_name)  # patches sent_db in-memory on each rerun.
-        # 🗑️ CVS KIOSK REMOVAL TOGGLE (Sep 2026 — Nick). Personal, session-only
-        # filter: unchecking hides CVS Kiosk Removal routes from THIS
-        # dispatcher's Ready/Flagged queue. Nobody else's view changes, and
-        # routes already in Sent/Accepted/Field Nation/Finalized still show —
-        # this only declutters the undecided queue. Resets to "on" (showing
-        # them) on redeploy/restart since it's plain session_state, not
-        # persisted to a sheet. Gated inside this once-per-render block so
-        # the widget key isn't recreated on every one of the 5 pod tabs.
-        st.sidebar.checkbox(
-            "🗑️ Show CVS Kiosk Removal routes",
-            value=st.session_state.get('show_cvs_kiosk_removal', True),
-            key='show_cvs_kiosk_removal',
-            help="Uncheck to hide CVS Kiosk Removal routes from your Ready/Flagged queue. "
-                 "This only affects your own view — other dispatchers still see them, and "
-                 "any you've already Sent/Accepted/Finalized/assigned to Field Nation stay visible.",
-        )
 
     # 🔗 Hydrate persisted bundle map for this pod (once per session per pod)
     # so dispatcher bundles survive page reloads / redeploy reloads. Gated by
@@ -8335,11 +8319,12 @@ def run_pod_tab(pod_name):
             # continuity batches at already-dispatched kiosks. Reverted.
             if not is_reverted and any(tid in _awaiting_tids for tid in task_ids):
                 continue
-            # 🗑️ CVS Kiosk Removal personal toggle — see the sidebar checkbox
-            # set up above. Only filters the undecided Ready/Flagged queue;
-            # already-dispatched CVS routes are handled by the branches above
-            # this fallback and are never touched here.
-            if c.get('is_removal') and not st.session_state.get('show_cvs_kiosk_removal', True):
+            # 🗑️ CVS Kiosk Removal personal toggle — see the checkbox rendered
+            # above the Dispatch/Awaiting columns further down this function.
+            # Only filters the undecided Ready/Flagged queue; already-
+            # dispatched CVS routes are handled by the branches above this
+            # fallback and are never touched here.
+            if c.get('is_removal') and not st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", True):
                 continue
             # Fallback to calculated status
             if c.get('status') == 'Ready': ready.append(c) #
@@ -8731,6 +8716,25 @@ def run_pod_tab(pod_name):
 """, unsafe_allow_html=True)
 
     st.markdown("---")
+
+    # 🗑️ CVS KIOSK REMOVAL TOGGLE (Sep 2026 — Nick). Personal, per-pod-tab
+    # filter: unchecking hides CVS Kiosk Removal routes from THIS
+    # dispatcher's Dispatch/Ready+Flagged queue in THIS pod only. Nobody
+    # else's view changes, and routes already in Sent/Accepted/Field
+    # Nation/Finalized still show — this only declutters the undecided
+    # queue. Keyed per pod_name (not a single global key) because
+    # run_pod_tab renders once per pod (up to 5x for admin/manager), so a
+    # shared key here would raise a duplicate-widget-id error. Resets to
+    # "on" (showing them) on redeploy/restart — plain session_state, not
+    # persisted to a sheet.
+    st.checkbox(
+        "🗑️ Show CVS Kiosk Removal routes",
+        value=st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", True),
+        key=f"show_cvs_kiosk_removal_{pod_name}",
+        help="Uncheck to hide CVS Kiosk Removal routes from this pod's Dispatch queue. "
+             "This only affects your own view — other dispatchers still see them, and "
+             "any you've already Sent/Accepted/Finalized/assigned to Field Nation stay visible.",
+    )
 
     col_left, col_right = st.columns([5, 5])
 

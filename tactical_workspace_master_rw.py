@@ -3090,7 +3090,7 @@ def _csv_with_retry(url, attempts=3):
     \'<tab>\' route tab" banner until the user manually refreshed. Three
     attempts with 0.6s / 1.2s / 1.8s gaps clears nearly all of those without
     visibly slowing the cache miss. (Jun 3 2026 -- Nick.)"""
-    _last = None
+        _last = None
     for _i in range(attempts):
         try:
             return pd.read_csv(url)
@@ -3098,6 +3098,34 @@ def _csv_with_retry(url, attempts=3):
             _last = _e
             time.sleep(0.6 * (_i + 1))
     raise _last
+
+
+def _fetch_gids_parallel(base_url, gids):
+    """Fetch multiple Google Sheets tabs (by gid) concurrently instead of one
+    at a time. _cached_fetch_sent_records_from_sheet used to pull 6 tabs
+    (sent/field_nation/declined/accepted/finalized/archive) in strict
+    sequence — 6 full network round trips (each with its own up-to-3-attempt
+    retry) before any row processing could even start. That was the
+    dominant cost behind the "Ready loads, everything else takes 2-3
+    minutes" symptom, and behind the 1-minute pause on any interaction
+    (e.g. FN Assigned) that calls .clear() to force a resync.
+
+    Returns {gid: DataFrame} on success or {gid: Exception} on per-tab
+    failure, exactly the outcomes each caller already unwraps individually
+    below — this just makes the network waiting happen in parallel instead
+    of back-to-back. Same ThreadPoolExecutor pattern already used elsewhere
+    in this file (e.g. the bulk markFNAssigned GAS calls).
+    """
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(gids)))) as _ex:
+        _futures = {_ex.submit(_csv_with_retry, base_url + str(_gid)): _gid for _gid in gids}
+        for _fut in _futures:
+            _gid = _futures[_fut]
+            try:
+                results[_gid] = _fut.result()
+            except Exception as _e:
+                results[_gid] = _e
+    return results
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_fetch_sent_records_from_sheet():
@@ -3116,13 +3144,21 @@ def _cached_fetch_sent_records_from_sheet():
             
         base_url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid="
         
-        sheets_to_fetch = [
+                sheets_to_fetch = [
             (SAVED_ROUTES_GID, "sent"),
             (FIELD_NATION_GID, "field_nation"),
             (DECLINED_ROUTES_GID, "declined"),
             (ACCEPTED_ROUTES_GID, "accepted"),
             (FINALIZED_ROUTES_GID, "finalized"),
         ]
+
+        # 🚀 PERF: fetch all 6 tabs (the 5 above + the archive tab pulled
+        # later in this function) concurrently instead of one-by-one. This
+        # was 6 sequential network round trips before any row processing
+        # could start — the dominant cost of a cache miss. See
+        # _fetch_gids_parallel for the full story.
+        _all_gids = [g for g, _ in sheets_to_fetch] + [ARCHIVE_GID]
+        _prefetched = _fetch_gids_parallel(base_url, _all_gids)
 
         
         sent_dict = {}
@@ -3143,13 +3179,34 @@ def _cached_fetch_sent_records_from_sheet():
         # route's prior journey instead of a blank slate.
         history_db = {}  # tid -> list of {status, name, time, wo, raw_ts}
         
-        for gid, status_label in sheets_to_fetch:
+                for gid, status_label in sheets_to_fetch:
             try:
-                # Ensure gid is cast to string just in case it's an integer
-                df = _csv_with_retry(base_url + str(gid))
+                # Already fetched concurrently above — re-raise here so the
+                # existing per-sheet except block below still handles a
+                # failed tab exactly as before (log + warn + skip that tab).
+                df = _prefetched.get(gid)
+                if isinstance(df, Exception):
+                    raise df
                 df.columns = [str(c).strip().lower() for c in df.columns]
-                
+
                 if 'json payload' in df.columns:
+                    # 🚀 PERF: drop rows the per-row loop below would just
+                    # `continue` past anyway — empty/blank dates, and dates
+                    # older than MIGRATION_CUTOFF_DATE — BEFORE the expensive
+                    # iterrows()+json.loads() pass. These sheets only grow
+                    # over time, so this is the difference between parsing
+                    # every historical row on every cache miss and parsing
+                    # only the recent ones. Rows with a non-empty but
+                    # UNPARSEABLE date are deliberately kept (matches the
+                    # original try/except fallback below, which still wants
+                    # to process them with dt_obj=None).
+                    if 'date created' in df.columns:
+                        _raw_dates = df['date created']
+                        _has_raw = _raw_dates.notna() & (_raw_dates.astype(str).str.strip() != '')
+                        _parsed_dates = pd.to_datetime(_raw_dates, errors='coerce')
+                        _cutoff = pd.to_datetime(MIGRATION_CUTOFF_DATE)
+                        _too_old = _has_raw & _parsed_dates.notna() & (_parsed_dates < _cutoff)
+                        df = df[_has_raw & ~_too_old]
                     for _, row in df.iterrows():
                         try:
                             p = json.loads(row['json payload'])
@@ -3350,9 +3407,12 @@ def _cached_fetch_sent_records_from_sheet():
         # harvest revoke/re-route HISTORY events so the Ready-card history banner survives
         # session resets — was previously session-only via _actions_*. Tasks/status are
         # still NEVER read into clustering — only into history_db.
-        _archived_wos = set()
+                _archived_wos = set()
         try:
-            _archive_df = _csv_with_retry(base_url + str(ARCHIVE_GID))
+            # Already fetched concurrently above alongside the other 5 tabs.
+            _archive_df = _prefetched.get(ARCHIVE_GID)
+            if isinstance(_archive_df, Exception):
+                raise _archive_df
             _archive_df.columns = [str(c).strip().lower() for c in _archive_df.columns]
             if 'json payload' in _archive_df.columns:
                 for _, _arow in _archive_df.iterrows():

@@ -6310,8 +6310,23 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
                     } for addr, metrics in stop_metrics.items()])
                 }
-                try:
-                    _dispatch_result = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25).json()
+                                try:
+                    _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
+                    try:
+                        _dispatch_result = _resp.json()
+                    except ValueError:
+                        # GAS returned 200/non-200 but the body wasn't JSON —
+                        # surface WHICH failure mode instead of the raw
+                        # "Expecting value" decoder message, so it's
+                        # diagnosable from the UI without digging through logs.
+                        _raw = (_resp.text or "").strip()
+                        if "accounts.google.com" in _raw or "ServiceLogin" in _raw:
+                            _msg = "GAS web app is asking for Google sign-in — deployment access/permissions changed. Redeploy the Apps Script (Deploy > Manage deployments) with 'Who has access: Anyone', then update GAS_WEB_APP_URL if the URL changed."
+                        elif not _raw:
+                            _msg = f"GAS returned an empty response (HTTP {_resp.status_code}) — the script likely errored or timed out server-side. Check Apps Script > Executions for the saveRoute call."
+                        else:
+                            _msg = f"GAS returned non-JSON (HTTP {_resp.status_code}): {_raw[:200]}"
+                        _dispatch_result = {"_error": _msg}
                 except requests.exceptions.Timeout:
                     _dispatch_result = {"_timeout": True}
                 except Exception as e:

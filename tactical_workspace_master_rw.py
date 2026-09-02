@@ -533,10 +533,28 @@ _components.html(
           if (willExpand) s[key] = 1; else delete s[key];
           setStored(s);
         });
+        // Apply the persisted choice only ONCE, at wire time (Sep 2026 --
+        // fixes "flash open then snap shut" reported live on CA/WA group
+        // headers). The old code re-ran this getStored()-derived apply for
+        // EVERY header on EVERY MutationObserver tick -- and this observer
+        // fires on ANY childList change anywhere on the page (Streamlit
+        // reflows constantly: sync-age captions, fragment reruns, etc), not
+        // just on this header's own click. If any such unrelated tick fired
+        // between a click's applyState() and its setStored() -- or just read
+        // a slower/partial sessionStorage state -- it forced the header back
+        // to whatever storage said a moment earlier, undoing the click that
+        // had just opened it. Storage is now only consulted here, at wire
+        // time, to restore what the dispatcher chose earlier in the tab's
+        // life; every later re-tick trusts the DOM below instead.
+        applyState(hdr, !!stored[key]);
+      } else {
+        // Already wired. Don't re-derive from storage -- that's what raced.
+        // Just cascade THIS header's own current (already-correct) expand
+        // state onto any sibling cards that appeared after it was wired
+        // (lazy pagination, a fresh sync adding routes), so they inherit
+        // visibility instead of defaulting to shown.
+        applyState(hdr, hdr.classList.contains('dcc-expanded'));
       }
-      // Re-apply state on every observer tick so cards that render AFTER the
-      // header wires up (typical for the first state header) still get hidden.
-      applyState(hdr, !!stored[key]);
     });
   }
   var obs = new MutationObserver(setup);

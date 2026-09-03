@@ -186,7 +186,8 @@ TB_STATIC_TEXT = "#475569"
 TB_DIGITAL_TEXT = "#0f766e"
 
 POD_CONFIGS = {
-    "Blue": {"states": {"AL", "AR", "FL", "IL", "IA", "LA", "MI", "MN", "MS", "MO", "NC", "SC", "WI", "NV", "OR", "WA"}},
+    # Sep 2026 (Nick) — OR/WA/NV moved from Orange to Blue.
+    "Blue": {"states": {"AL", "AR", "FL", "IL", "IA", "LA", "MI", "MN", "MS", "MO", "NC", "SC", "WI", "OR", "WA", "NV"}},
     "Green": {"states": {"CO", "DC", "GA", "IN", "KY", "MD", "NJ", "OH", "UT"}},
     "Orange": {"states": {"AK", "AZ", "CA", "HI", "ID"}},
     "Purple": {"states": {"KS", "MT", "NE", "NM", "ND", "OK", "SD", "TN", "TX", "WY"}},
@@ -3023,7 +3024,22 @@ def _fn_ghost_to_cluster(g):
 
 # --- UTILITIES ---
 def haversine(lat1, lon1, lat2, lon2):
+    # Sep 2026 — Nick: "Error initializing Orange: unsupported operand
+    # type(s) for -: 'str' and 'float'". Root cause: one of the 12+ call
+    # sites feeds this a lat/lon pulled straight from a Google Sheet column
+    # (pandas can hand back text for a cell with stray whitespace/formatting)
+    # or an Onfleet field that wasn't the plain float we expect, and the bare
+    # subtraction below threw — which, uncaught, aborted the ENTIRE pod
+    # init (no clusters saved, dispatcher stuck on "Initialize Data" forever).
+    # Coerce defensively and fail soft: on bad input, return "infinitely far"
+    # instead of crashing, so nearest-neighbor/radius logic just never
+    # matches that one pair — a chance-mispriced route, never a dead pod.
     R = 3958.8
+    try:
+        lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
+    except (TypeError, ValueError) as _hv_e:
+        _log_err("haversine", f"non-numeric coordinate(s): lat1={lat1!r} lon1={lon1!r} lat2={lat2!r} lon2={lon2!r} ({_hv_e})")
+        return float('inf')
     dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
@@ -6300,6 +6316,28 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             else:
                 fn_checked = is_fn
         if _gen_clicked:
+            # 🛡️ STEP 0: POST-TIMEOUT RETRY SAFETY (Sep 2026 — Nick: "clicking
+            # Generate Link again to retry makes it worse"). A saveRoute POST
+            # that times out CLIENT-SIDE (25s) can still be running — or have
+            # already finished — SERVER-SIDE in Apps Script; the row may well
+            # have saved. The plain collision check below only looks at
+            # session_state['sent_db'], a snapshot from before that timed-out
+            # attempt, so it never saw the row the first click may have just
+            # written, and a second click fired a second saveRoute — two rows
+            # / two WO suffixes / two emails for the same route.
+            # Fix: only when the LAST attempt for this exact cluster timed
+            # out, force a fresh sheet read before doing anything else, so
+            # the collision check below is checking reality, not a stale
+            # snapshot. Gated on that flag (not every click) so a normal
+            # first-time dispatch pays no extra round-trip.
+            _timed_out_key = f"_dispatch_timed_out_{cluster_hash}"
+            if st.session_state.pop(_timed_out_key, False):
+                try:
+                    fetch_sent_records_from_sheet.clear()
+                    fetch_sent_records_from_sheet()
+                except Exception as _refresh_e:
+                    _log_err("gen_link/post_timeout_refresh", _refresh_e)
+
             # 🛡️ STEP 1: FAST COLLISION CHECK — only block active sent routes (not revoked/declined)
             local_sent_db = st.session_state.get('sent_db', {})
             _active_statuses = ('sent',)
@@ -6310,6 +6348,21 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                  and not st.session_state.get(f"reverted_{cluster_hash}", False)),
                 None
             )
+
+            # A collision against OUR OWN prior attempt (same dispatcher, same
+            # route) means the "timed out" saveRoute actually landed. Adopt
+            # it as a success instead of firing a duplicate saveRoute.
+            if collision and not is_already_sent and local_sent_db[collision].get('name') == ic.get('name', 'Unknown'):
+                st.session_state[f"sent_ts_{cluster_hash}"] = local_sent_db[collision].get('time') or datetime.now().strftime('%m/%d %I:%M %p')
+                st.session_state[f"contractor_{cluster_hash}"] = ic.get('name', 'Unknown')
+                st.session_state[f"wo_{cluster_hash}"] = wo_val
+                st.session_state[f"comp_{cluster_hash}"] = final_pay
+                st.session_state[f"due_{cluster_hash}"] = str(due)
+                st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
+                st.session_state[f"reverted_{cluster_hash}"] = False
+                st.success("✅ Good news — the earlier attempt actually saved before it timed out. Marked as sent; use **Resend Link & Open Gmail** if you still need to email it.")
+                st.rerun()
+                return
 
             if collision and not is_already_sent:
                 st.error(f"🚫 COLLISION: Dispatched by someone else ({local_sent_db[collision]['name']}).")
@@ -6433,7 +6486,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
             # Spinner now closed — handle result
             if _dispatch_result.get("_timeout"):
-                st.warning("⏱️ Google Sheets is taking too long. The route may still have saved — click **Generate Link** again to retry.")
+                # 🌟 Sep 2026 — flag this cluster as "last attempt timed out" so
+                # the NEXT click (Step 0 above) forces a fresh sheet read
+                # before doing anything else, instead of retrying blind
+                # against a stale snapshot and risking a duplicate route.
+                st.session_state[_timed_out_key] = True
+                st.warning("⏱️ Google Sheets is taking too long. The earlier attempt may have actually saved — click **Generate Link** again and it'll check for that before creating a new one.")
             elif _dispatch_result.get("_error"):
                 st.error(f"Connection Error: {_dispatch_result['_error']} — Please try again.")
             elif _dispatch_result.get("success"):

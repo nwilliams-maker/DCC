@@ -2250,6 +2250,24 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         def _do_sheet_archive():
             try:
                 background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name)
+                # 🌟 Sep 2026 (Nick: "reroute isn't pulling back into dispatch") —
+                # bust the 5-minute sheet cache right after the archive write
+                # lands. Without this, the post-revoke 12s auto-resync (or even
+                # a manual Check New Tasks click) could still read a STALE
+                # fresh_sent_db that shows this route's tasks as sent/accepted/
+                # finalized. The is_reverted flag lets a stale read skip the
+                # dedup guard, but it does NOT override the cluster's own
+                # `status` field — that's set from fresh_sent_db at
+                # process_pod's classification step, so a stale read still
+                # rebuilds the cluster with status='Sent'/'Accepted'/etc.
+                # instead of 'Ready', landing it in Flagged (or nowhere the
+                # dispatcher was looking) instead of Ready. The Field Nation
+                # revoke handler already did this (see revoke_field_nation's
+                # caller); every other re-route path was missing it.
+                try:
+                    fetch_sent_records_from_sheet.clear()
+                except Exception as _clr_e:
+                    _log_err("move_to_dispatch/sheet_cache_clear", _clr_e)
             except Exception as _bsm_e:
                 _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 

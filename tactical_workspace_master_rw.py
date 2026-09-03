@@ -8342,7 +8342,7 @@ def run_pod_tab(pod_name):
             # Only filters the undecided Ready/Flagged queue; already-
             # dispatched CVS routes are handled by the branches above this
             # fallback and are never touched here.
-            if c.get('is_removal') and not st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", True):
+            if c.get('is_removal') and not st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", False):
                 continue
             # Fallback to calculated status
             if c.get('status') == 'Ready': ready.append(c) #
@@ -8742,12 +8742,12 @@ def run_pod_tab(pod_name):
     # Nation/Finalized still show — this only declutters the undecided
     # queue. Keyed per pod_name (not a single global key) because
     # run_pod_tab renders once per pod (up to 5x for admin/manager), so a
-    # shared key here would raise a duplicate-widget-id error. Resets to
-    # "on" (showing them) on redeploy/restart — plain session_state, not
-    # persisted to a sheet.
+    # shared key here would raise a duplicate-widget-id error. Defaults to
+    # OFF (unchecked / hidden) on first load and resets to that default on
+    # redeploy/restart — plain session_state, not persisted to a sheet.
     st.checkbox(
         "🗑️ Show CVS Kiosk Removal routes",
-        value=st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", True),
+        value=st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", False),
         key=f"show_cvs_kiosk_removal_{pod_name}",
         help="Uncheck to hide CVS Kiosk Removal routes from this pod's Dispatch queue. "
              "This only affects your own view — other dispatchers still see them, and "

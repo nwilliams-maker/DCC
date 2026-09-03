@@ -8952,7 +8952,22 @@ def run_pod_tab(pod_name):
                 _fn_all_hashes = _fn_pending_hashes + _fn_posted_hashes + _fn_assigned_hashes
 
                 _fn_select_key = f"fn_combined_select_{pod_name}"
-                if _fn_select_key not in st.session_state:
+                # 🐛 FIX (Sep 2026 — StreamlitAPIException: "cannot be modified
+                # after the widget ... is instantiated"). The bulk "Posted" /
+                # "Assigned" buttons below used to clear the selection with
+                # `st.session_state[_fn_select_key] = []` directly in their
+                # click handler -- but that runs AFTER the st.multiselect(key=
+                # _fn_select_key) call further down has already instantiated
+                # the widget for this script run, which Streamlit disallows.
+                # Fix: those handlers now only set this "pending clear" flag
+                # (an ordinary, non-widget key -- safe to set any time) and
+                # call st.rerun(); the actual reset happens HERE, before the
+                # multiselect widget is instantiated, on the fresh run that
+                # follows.
+                _fn_select_reset_key = f"_fn_select_reset_pending_{pod_name}"
+                if st.session_state.pop(_fn_select_reset_key, False):
+                    st.session_state[_fn_select_key] = []
+                elif _fn_select_key not in st.session_state:
                     st.session_state[_fn_select_key] = []
 
                 # Short per-route label for the multiselect chip list.
@@ -9131,7 +9146,7 @@ def run_pod_tab(pod_name):
                                 ).start()
                             except Exception as _fpe:
                                 _log_err("markFNPosted/pod", _fpe)
-                            st.session_state[_fn_select_key] = []
+                            st.session_state[_fn_select_reset_key] = True
                             st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
                             st.rerun()
                     else:
@@ -9177,7 +9192,7 @@ def run_pod_tab(pod_name):
                                         _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
                             st.session_state['_fn_assigned'] = _fn_assigned_dict
                             fetch_sent_records_from_sheet.clear()
-                            st.session_state[_fn_select_key] = []
+                            st.session_state[_fn_select_reset_key] = True
                             if _fail == 0:
                                 st.toast(f"✅ {_ok} route(s) moved to Accepted.")
                             elif _ok == 0:

@@ -149,6 +149,37 @@ def _norm_addr_key(addr):
 
 
 # ---------------------------------------------------------------------------
+# Per-kiosk stop identity — shared by _fn_stop_rows and
+# generate_combined_fn_upload (Sep 2026 -- Nick: "isn't pulling the data for
+# each kiosk correctly within the same location")
+# ---------------------------------------------------------------------------
+def _stop_identity_key(t):
+    """Return a dedup key that identifies ONE physical kiosk stop.
+
+    Keyed on the task's own Onfleet id when present -- that can never merge
+    two DIFFERENT kiosks (each has its own id), it only collapses a genuine
+    duplicate (the exact same task appearing twice, e.g. included in two
+    routes for the combined upload). Falls back to the old composite key
+    (client + task type + location_in_venue + kiosk_id) only for the rare
+    record with no id.
+
+    The composite fallback previously omitted kiosk_id entirely, so two
+    different kiosks at the same venue needing the same task type with a
+    blank location_in_venue collapsed into a single CSV row/slot -- the
+    second kiosk's data silently never made it onto the Field Nation upload.
+    """
+    _task_id = str(t.get('id', '') or '').strip()
+    if _task_id:
+        return ('id', _task_id)
+    return (
+        str(t.get('client_company', '') or '').strip().lower(),
+        str(t.get('task_type', '') or '').strip().lower(),
+        str(t.get('location_in_venue', '') or '').strip().lower(),
+        str(t.get('kiosk_id', '') or '').strip().lower(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Background sheet save — never blocks the UI
 # ---------------------------------------------------------------------------
 def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
@@ -214,15 +245,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
         if addr not in stop_task_map:
             stop_task_map[addr] = []
             _seen_keys[addr] = set()
-        # Dedupe by full customer identity (client + task type + location),
-        # not location alone -- multiple customers at one address commonly
-        # share a blank location_in_venue, which the old key collapsed into
-        # a single Customer Name slot. (May 30 2026 -- Nick.)
-        _ckey = (
-            str(t.get('client_company', '') or '').strip().lower(),
-            str(t.get('task_type', '') or '').strip().lower(),
-            str(t.get('location_in_venue', '') or '').strip().lower(),
-        )
+        _ckey = _stop_identity_key(t)
         if _ckey not in _seen_keys[addr]:
             _seen_keys[addr].add(_ckey)
             stop_task_map[addr].append(t)
@@ -404,20 +427,11 @@ def generate_combined_fn_upload(clusters: list):
             addr_original.setdefault(key, addr)
             addr_city_state.setdefault(key, (c_city, c_state))
             addr_bundle.setdefault(key, _bundle_idx)
-            # Dedupe by full customer identity (client + task type + location),
-            # not location alone. (May 30 2026 -- Nick -- see _fn_stop_rows.)
-            _ckey = (
-                str(t.get('client_company', '') or '').strip().lower(),
-                str(t.get('task_type', '') or '').strip().lower(),
-                str(t.get('location_in_venue', '') or '').strip().lower(),
-            )
-            _existing_keys = {
-                (
-                    str(x.get('client_company', '') or '').strip().lower(),
-                    str(x.get('task_type', '') or '').strip().lower(),
-                    str(x.get('location_in_venue', '') or '').strip().lower(),
-                ) for x in bucket
-            }
+            # Per-kiosk identity key -- see _stop_identity_key(). (Sep 2026 --
+            # Nick -- see _fn_stop_rows for why this replaced the old
+            # client+type+location-only key.)
+            _ckey = _stop_identity_key(t)
+            _existing_keys = {_stop_identity_key(x) for x in bucket}
             if _ckey not in _existing_keys:
                 bucket.append(t)
 

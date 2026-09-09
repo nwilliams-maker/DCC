@@ -6507,8 +6507,23 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"due_{cluster_hash}"] = str(due)
                 st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
                 st.session_state[f"reverted_{cluster_hash}"] = False
-                # Force the next render to re-pull the sheet so the new row is visible immediately.
-                fetch_sent_records_from_sheet.clear()
+                # Sep 2026 — Nick: "after the email is sent the refresh to
+                # reflect the new change takes at least 2 minutes." Root
+                # cause: this card doesn't need fresh sheet data to show up
+                # in Sent — the bucket router (`elif route_state ==
+                # "email_sent"` in the Ready/Sent routing loop) reads the
+                # session-state overrides set just above and moves this
+                # route into Sent immediately, with no sheet round-trip.
+                # The `.clear()` that used to sit here bought nothing for
+                # THIS route's visibility; all it did was force the very
+                # next render's fetch_sent_records_from_sheet() call into a
+                # cache miss, which pays for a full live resync of 6 Google
+                # Sheets tabs synchronously — THAT was the 2-minute stall,
+                # not the send. Left uncleared, sent_db serves its cached
+                # value for up to its normal 5-minute TTL (or gets busted
+                # sooner by any other dispatcher's own action), so
+                # cross-dispatcher visibility of this row still catches up
+                # on its own without blocking this render.
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)

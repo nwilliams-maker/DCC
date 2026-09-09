@@ -6459,7 +6459,39 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
-                    _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
+                    # Sep 2026 — Nick: hit "GAS returned non-JSON (HTTP 404)"
+                    # on Generate Link; confirmed live that same second that
+                    # the deployment itself was healthy and answering
+                    # correctly — it cleared on his own retry a moment
+                    # later. That's Apps Script's web app front-end
+                    # occasionally blipping for a couple of seconds, not a
+                    # code or config problem, but it shouldn't take a human
+                    # noticing and clicking again to recover from. One quiet
+                    # retry here does that automatically. Safe to resend the
+                    # identical payload: the GAS-side saveRoute dedupe
+                    # (CacheService, 10-min window — see the Sep 2026 perf
+                    # fix) guarantees a retry of the same cluster_hash can
+                    # never create a duplicate route, it just hands back the
+                    # original routeId. Timeouts are deliberately NOT retried
+                    # here — that path already has its own safe-retry flow
+                    # (the _timed_out_key / "Step 0" fresh-fetch-before-retry
+                    # logic above), which forces a live collision check
+                    # first instead of blindly resending.
+                    _resp = None
+                    for _sr_attempt in range(2):
+                        try:
+                            _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
+                        except requests.exceptions.Timeout:
+                            raise
+                        except requests.exceptions.RequestException:
+                            if _sr_attempt == 0:
+                                time.sleep(2)
+                                continue
+                            raise
+                        if _resp.status_code >= 400 and _sr_attempt == 0:
+                            time.sleep(2)
+                            continue
+                        break
                     try:
                         _dispatch_result = _resp.json()
                     except ValueError:

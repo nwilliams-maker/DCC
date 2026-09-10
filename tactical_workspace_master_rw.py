@@ -1993,12 +1993,31 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
     Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
     so the Ready-card history banner can recover Revoked/Re-Routed events after a
     session reset (was previously session-only via st.session_state['_actions_*'])."""
-    # Security audit H17 / M7 - the archive POST is now retried (3 attempts,
-    # exponential backoff) so a transient GAS hiccup or a process recycle
-    # mid-flight does not silently lose the archive write (which would
-    # recycle the WO-suffix counter and produce duplicate WOs). On final
-    # failure the route hash is recorded in a module-level set the main
-    # thread surfaces to the dispatcher.
+    # Security audit H17 / M7 - the archive POST is retried on a genuine
+    # transient failure (connection error / non-200) so a network hiccup or a
+    # process recycle mid-flight does not silently lose the archive write
+    # (which would recycle the WO-suffix counter and produce duplicate WOs).
+    # On final failure the route hash is recorded in a module-level set the
+    # main thread surfaces to the dispatcher.
+    #
+    # Sep 2026 (Nick: "removing routes takes way too long... 2 minutes") —
+    # root cause: archiveRoute on the GAS side does the same expensive
+    # full-sheet-scan-plus-JSON.parse-per-row search (across up to 4 sheets)
+    # that saveRoute used to do before its Sep perf fix, and every doPost
+    # action is serialized behind ONE global script lock. The per-attempt
+    # timeout here was 8s with 3 attempts — as the sheets have grown, a
+    # single archiveRoute call can legitimately run past 8s, so the client
+    # gave up and fired attempt 2 while attempt 1 was STILL RUNNING server-
+    # side (Apps Script keeps executing after the HTTP client disconnects).
+    # Attempt 2 then queues behind attempt 1's still-held lock, times out
+    # at 8s waiting on the queue, and attempt 3 repeats the pattern — three
+    # overlapping server-side executions all fighting over one lock instead
+    # of one execution finishing cleanly. That pileup, not any single slow
+    # call, is what stretched a several-second operation into ~2 minutes.
+    # Fix: give each attempt enough time to actually finish (25s, matching
+    # saveRoute's client timeout) so it doesn't abandon a call that's still
+    # working, and drop to 2 attempts so a genuine failure can't stack more
+    # than one extra overlapping execution behind the lock.
     _archive_payload = {
         "action": "archiveRoute",
         "auth_secret": GAS_AUTH,
@@ -2009,9 +2028,9 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         "ic_name": ic_name,
     }
     _archive_ok = False
-    for _attempt in range(3):
+    for _attempt in range(2):
         try:
-            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=8)
+            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=25)
             if _ar.status_code == 200:
                 # GAS always returns HTTP 200 even on rejections — parse the body
                 # to confirm it actually archived. The auth gate returns
@@ -2034,8 +2053,8 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         except Exception as e:
             _log_err("background_sheet_move/archive",
                      f"attempt {_attempt + 1}: {type(e).__name__}: {e}")
-        if _attempt < 2:
-            time.sleep(0.4 * (_attempt + 1))  # 0.4s, 0.8s — was 1s, 2s
+        if _attempt < 1:
+            time.sleep(1)
     if not _archive_ok:
         try:
             _RECONCILE_FAILURES.add(str(cluster_hash))
@@ -2272,11 +2291,19 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             except Exception as _bsm_e:
                 _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 
+        # Sep 2026 — this .result(timeout=...) does NOT cap how long the button
+        # click blocks: ThreadPoolExecutor.__exit__ below calls shutdown(wait=True),
+        # so the `with` block doesn't return until both submitted futures truly
+        # finish no matter what timeout is passed here — a short timeout just makes
+        # this log a spurious "timed out" error while the thread keeps running
+        # underneath it. Set to 55s (worst case: 2 attempts x 25s archiveRoute +
+        # 1s backoff) so a normal-but-slow archive doesn't get misreported as a
+        # failure while it's actually still in flight.
         with ThreadPoolExecutor(max_workers=2) as _rec_ex:
             _f1 = _rec_ex.submit(_do_onfleet_unassigns)
             _f2 = _rec_ex.submit(_do_sheet_archive)
             for _f in (_f1, _f2):
-                try: _f.result(timeout=20)
+                try: _f.result(timeout=55)
                 except Exception as _fe: _log_err("_bg_reconcile/future", _fe)
 
     # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):

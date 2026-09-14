@@ -3088,12 +3088,51 @@ def _ic_home_loc(ic, fallback=None):
     Always prefer lat/lng. _mapbox_geocode now short-circuits "lat,lng" strings
     to the same (lng, lat) tuple it would produce for an address — so passing
     the coord pair here gives correct routing without touching the API.
+
+    Sep 2026 — Nick: a contractor (Jillane Barbee / Sellinja LLC) whose real
+    address, 687 South Airport Way, Manteca, CA, sits right inside the
+    route's own cluster somehow produced an 84-hour / 5525-mile round trip
+    for an 8-stop LOCAL loop (Tracy/Manteca/Stockton/Livermore/Brentwood —
+    all within ~40mi of each other). Root cause: this function only ever
+    checked that the IC sheet's lat/lng was a numerically VALID coordinate
+    (anywhere in -90..90 / -180..180) — never that it was actually anywhere
+    NEAR the contractor. A stale/mistyped lat/lng for this one contractor
+    silently anchored her round trip somewhere far away while her own
+    address text was correct the whole time.
+    Every caller already passes the cluster's own center as `fallback` —
+    use it as a sanity check: if the "trusted" lat/lng is wildly far
+    (>150mi — generous headroom above the 100-mile contractor-filter radius
+    used elsewhere in the dispatcher) from where the route actually is,
+    don't trust it. Fall through to the free-text address instead (still
+    geocoded downstream by get_gmaps) rather than silently anchoring a real
+    dispatcher's route on bad data.
     """
     try:
         _lat = float(ic.get('lat'))
         _lng = float(ic.get('lng'))
         if -90.0 <= _lat <= 90.0 and -180.0 <= _lng <= 180.0:
-            return f"{_lat},{_lng}"
+            _trusted = f"{_lat},{_lng}"
+            if fallback:
+                try:
+                    _fb_lat_s, _fb_lng_s = str(fallback).split(',', 1)
+                    _dist = haversine(_lat, _lng, float(_fb_lat_s), float(_fb_lng_s))
+                    if _dist > 150:
+                        _log_err(
+                            "_ic_home_loc",
+                            f"rejected implausible IC coords {_trusted} for "
+                            f"{ic.get('name','?') if hasattr(ic, 'get') else '?'} — "
+                            f"{round(_dist)}mi from cluster center {fallback}; "
+                            f"falling back to text address instead."
+                        )
+                    else:
+                        return _trusted
+                except (TypeError, ValueError):
+                    # fallback isn't a parseable "lat,lng" — can't sanity-check
+                    # it, so trust the coordinate as before rather than change
+                    # behavior for a shape of input this function never saw.
+                    return _trusted
+            else:
+                return _trusted
     except (TypeError, ValueError):
         pass
     _loc = ic.get('location') if hasattr(ic, 'get') else None

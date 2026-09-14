@@ -1993,12 +1993,31 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
     Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
     so the Ready-card history banner can recover Revoked/Re-Routed events after a
     session reset (was previously session-only via st.session_state['_actions_*'])."""
-    # Security audit H17 / M7 - the archive POST is now retried (3 attempts,
-    # exponential backoff) so a transient GAS hiccup or a process recycle
-    # mid-flight does not silently lose the archive write (which would
-    # recycle the WO-suffix counter and produce duplicate WOs). On final
-    # failure the route hash is recorded in a module-level set the main
-    # thread surfaces to the dispatcher.
+    # Security audit H17 / M7 - the archive POST is retried on a genuine
+    # transient failure (connection error / non-200) so a network hiccup or a
+    # process recycle mid-flight does not silently lose the archive write
+    # (which would recycle the WO-suffix counter and produce duplicate WOs).
+    # On final failure the route hash is recorded in a module-level set the
+    # main thread surfaces to the dispatcher.
+    #
+    # Sep 2026 (Nick: "removing routes takes way too long... 2 minutes") —
+    # root cause: archiveRoute on the GAS side does the same expensive
+    # full-sheet-scan-plus-JSON.parse-per-row search (across up to 4 sheets)
+    # that saveRoute used to do before its Sep perf fix, and every doPost
+    # action is serialized behind ONE global script lock. The per-attempt
+    # timeout here was 8s with 3 attempts — as the sheets have grown, a
+    # single archiveRoute call can legitimately run past 8s, so the client
+    # gave up and fired attempt 2 while attempt 1 was STILL RUNNING server-
+    # side (Apps Script keeps executing after the HTTP client disconnects).
+    # Attempt 2 then queues behind attempt 1's still-held lock, times out
+    # at 8s waiting on the queue, and attempt 3 repeats the pattern — three
+    # overlapping server-side executions all fighting over one lock instead
+    # of one execution finishing cleanly. That pileup, not any single slow
+    # call, is what stretched a several-second operation into ~2 minutes.
+    # Fix: give each attempt enough time to actually finish (25s, matching
+    # saveRoute's client timeout) so it doesn't abandon a call that's still
+    # working, and drop to 2 attempts so a genuine failure can't stack more
+    # than one extra overlapping execution behind the lock.
     _archive_payload = {
         "action": "archiveRoute",
         "auth_secret": GAS_AUTH,
@@ -2009,9 +2028,9 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         "ic_name": ic_name,
     }
     _archive_ok = False
-    for _attempt in range(3):
+    for _attempt in range(2):
         try:
-            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=8)
+            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=25)
             if _ar.status_code == 200:
                 # GAS always returns HTTP 200 even on rejections — parse the body
                 # to confirm it actually archived. The auth gate returns
@@ -2034,8 +2053,8 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         except Exception as e:
             _log_err("background_sheet_move/archive",
                      f"attempt {_attempt + 1}: {type(e).__name__}: {e}")
-        if _attempt < 2:
-            time.sleep(0.4 * (_attempt + 1))  # 0.4s, 0.8s — was 1s, 2s
+        if _attempt < 1:
+            time.sleep(1)
     if not _archive_ok:
         try:
             _RECONCILE_FAILURES.add(str(cluster_hash))
@@ -2272,11 +2291,19 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
             except Exception as _bsm_e:
                 _log_err("move_to_dispatch/sheet_move_bg", _bsm_e)
 
+        # Sep 2026 — this .result(timeout=...) does NOT cap how long the button
+        # click blocks: ThreadPoolExecutor.__exit__ below calls shutdown(wait=True),
+        # so the `with` block doesn't return until both submitted futures truly
+        # finish no matter what timeout is passed here — a short timeout just makes
+        # this log a spurious "timed out" error while the thread keeps running
+        # underneath it. Set to 55s (worst case: 2 attempts x 25s archiveRoute +
+        # 1s backoff) so a normal-but-slow archive doesn't get misreported as a
+        # failure while it's actually still in flight.
         with ThreadPoolExecutor(max_workers=2) as _rec_ex:
             _f1 = _rec_ex.submit(_do_onfleet_unassigns)
             _f2 = _rec_ex.submit(_do_sheet_archive)
             for _f in (_f1, _f2):
-                try: _f.result(timeout=20)
+                try: _f.result(timeout=55)
                 except Exception as _fe: _log_err("_bg_reconcile/future", _fe)
 
     # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):
@@ -6459,7 +6486,52 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
-                    _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
+                    # Sep 2026 — Nick: hit "GAS returned non-JSON (HTTP 404)"
+                    # on Generate Link; confirmed live that same second that
+                    # the deployment itself was healthy and answering
+                    # correctly — it cleared on his own retry a moment
+                    # later. That's Apps Script's web app front-end
+                    # occasionally blipping for a couple of seconds, not a
+                    # code or config problem, but it shouldn't take a human
+                    # noticing and clicking again to recover from. One quiet
+                    # retry here does that automatically. Safe to resend the
+                    # identical payload: the GAS-side saveRoute dedupe
+                    # (CacheService, 10-min window — see the Sep 2026 perf
+                    # fix) guarantees a retry of the same cluster_hash can
+                    # never create a duplicate route, it just hands back the
+                    # original routeId. Timeouts are deliberately NOT retried
+                    # here — that path already has its own safe-retry flow
+                    # (the _timed_out_key / "Step 0" fresh-fetch-before-retry
+                    # logic above), which forces a live collision check
+                    # first instead of blindly resending.
+                    #
+                    # Sep 14 2026 — Nick hit the exact same 404 again. Checked
+                    # Apps Script Executions at the time: no failed runs, no
+                    # gap — the request never reached doPost at all, so the
+                    # single retry with a flat 2s gap wasn't enough cushion
+                    # for this particular blip (it outlasted 2s). Widened to
+                    # 3 total attempts with escalating backoff (2s, then 4s —
+                    # ~6s of total cushion instead of 2s) rather than adding
+                    # more retries at the same fixed gap, since a longer-than-
+                    # usual blip is exactly the case a flat short gap can't
+                    # cover.
+                    _resp = None
+                    _SR_MAX_ATTEMPTS = 3
+                    for _sr_attempt in range(_SR_MAX_ATTEMPTS):
+                        _sr_backoff = 2 * (2 ** _sr_attempt)  # 2s, 4s (2nd/3rd attempt only)
+                        try:
+                            _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
+                        except requests.exceptions.Timeout:
+                            raise
+                        except requests.exceptions.RequestException:
+                            if _sr_attempt < _SR_MAX_ATTEMPTS - 1:
+                                time.sleep(_sr_backoff)
+                                continue
+                            raise
+                        if _resp.status_code >= 400 and _sr_attempt < _SR_MAX_ATTEMPTS - 1:
+                            time.sleep(_sr_backoff)
+                            continue
+                        break
                     try:
                         _dispatch_result = _resp.json()
                     except ValueError:

@@ -272,7 +272,11 @@ def _fetch_onfleet_open_tasks_cached():
     # _EXCLUDED_TEAM_WORD_REGEX: word-boundary match on "test" (Jun 18 2026,
     # Nick) — catches any team with "test" as its own word ("QA Test Team",
     # "Test Pod") without false-positive on "Greatest", "Tested", etc.
-    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team']
+    # 'sandbox' (Sep 15 2026, Nick: "do not include any team with SANDBOX in
+    # it") — plain substring match is correct here since Nick asked for any
+    # team with "SANDBOX" anywhere in its name (e.g. "Sandbox", "QA Sandbox",
+    # "Sandbox - Pod Blue"), not just a whole-word match.
+    _EXCLUDED_TEAM_SUBSTRINGS = ['zzz test team', 'sandbox']
     _EXCLUDED_TEAM_WORD_REGEX = re.compile(r'(?:^|[^a-z])test(?:[^a-z]|$)', re.IGNORECASE)
     def _is_excluded_team_name(_name):
         _n = str(_name or '')

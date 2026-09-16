@@ -291,7 +291,7 @@ def _fetch_onfleet_open_tasks_cached():
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
     # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out
     # of the unassigned pool. Created in Onfleet by Nick on 2026-04-30.
-    FN_WORKER_PHONE = "6302869764"
+    FN_WORKER_PHONE = "8723268598"
     fn_worker_id = None
     _fn_worker_lookup_failed = False  # security audit M9
     _w_lastid = None

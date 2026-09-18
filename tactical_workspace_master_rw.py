@@ -2523,7 +2523,7 @@ def auto_sync_checker(pod_name):
                     # saveRoute = the dispatcher's own dispatch action; the
                     # session already reflects it via route_state, so it must
                     # NOT trigger a rerun (was yanking the page on return from
-                    # the Gmail tab). Patch sent_db silently below regardless.
+                    # the Outlook tab). Patch sent_db silently below regardless.
                     if action != 'saveRoute' and tid in pod_tid_set:
                         affected_this_pod = True
                     rec = dict(sent_db_local.get(tid, {}))
@@ -6416,7 +6416,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     
        # 🌟 UNIQUE KEY & PERFECT INDENTATION
         # Email Preview shows only for admin/manager. Pod accounts (Dispatchers
-        # + Associates) see the email when Gmail opens on Generate Link, so the
+        # + Associates) see the email when Outlook opens on Generate Link, so the
         # in-app preview just eats vertical space for them. (May 23 2026.)
         if _is_admin_or_manager():
             email_body_content = st.text_area("Email Content Preview", value=sig_preview, height=120, key=f"txt_area_{pod_name}_{current_data_fingerprint}_{cluster_hash}", disabled=not is_unlocked)
@@ -6424,7 +6424,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             email_body_content = sig_preview
 
         # --- HIGH-SPEED DISPATCH BUTTON ---
-        btn_label = "RESEND LINK & OPEN GMAIL" if is_already_sent else "GENERATE LINK & OPEN GMAIL"
+        btn_label = "RESEND LINK & OPEN OUTLOOK" if is_already_sent else "GENERATE LINK & OPEN OUTLOOK"
         if is_fn:
             st.caption("📋 Email dispatch disabled — route is assigned to Field Nation.")
 
@@ -6482,7 +6482,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"due_{cluster_hash}"] = str(due)
                 st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
                 st.session_state[f"reverted_{cluster_hash}"] = False
-                st.success("✅ Good news — the earlier attempt actually saved before it timed out. Marked as sent; use **Resend Link & Open Gmail** if you still need to email it.")
+                st.success("✅ Good news — the earlier attempt actually saved before it timed out. Marked as sent; use **Resend Link & Open Outlook** if you still need to email it.")
                 st.rerun()
                 return
 
@@ -6699,13 +6699,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # placed into the injected <script> so a poisoned email cell
                 # cannot break out of the JS string literal.
                 _to_enc = requests.utils.quote(str(ic.get('email', '') or ''))
-                gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={_to_enc}&su={subject_line}&body={body_content}"
+                outlook_url = f"https://outlook.office.com/mail/deeplink/compose?to={_to_enc}&subject={subject_line}&body={body_content}"
                 _link_ph = st.empty()
-                _link_ph.success("✅ Link Live! Gmail opening...")
+                _link_ph.success("✅ Link Live! Outlook opening...")
                 # Desktop: fire popup via height=0 script (not blocked by browser).
-                # This IS the "Generate Link & Open Gmail" behavior — the click both
-                # generates the link AND opens Gmail in a new tab on desktop.
-                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open({json.dumps(gmail_url)},'_blank');}}</script>", height=0)
+                # This IS the "Generate Link & Open Outlook" behavior — the click both
+                # generates the link AND opens Outlook in a new tab on desktop.
+                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open({json.dumps(outlook_url)},'_blank');}}</script>", height=0)
                 # Stash the mailto: URL so the "Default Mail" button persists across
                 # reruns (was previously rendered inline inside this click block and
                 # vanished as soon as st.rerun() fired — second-generate bug).

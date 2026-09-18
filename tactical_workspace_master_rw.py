@@ -291,7 +291,7 @@ def _fetch_onfleet_open_tasks_cached():
     # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
     # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out
     # of the unassigned pool. Created in Onfleet by Nick on 2026-04-30.
-    FN_WORKER_PHONE = "8723268598"
+    FN_WORKER_PHONE = "6302869764"
     fn_worker_id = None
     _fn_worker_lookup_failed = False  # security audit M9
     _w_lastid = None
@@ -5675,7 +5675,23 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             v_ics = v_ics.dropna(subset=[lat_col, lng_col])
             if not v_ics.empty:
                 v_ics['d'] = v_ics.apply(lambda x: haversine(cluster['center'][0], cluster['center'][1], x[lat_col], x[lng_col]), axis=1)
-                v_ics = v_ics[v_ics['d'] <= 100].sort_values('d')
+                # 🌟 UNRESTRICTED ICS — Sep 18 2026 (Nick: "I need to be able to
+                # put Biscardi on any work order"). These contractors stay
+                # selectable for every route regardless of how far their home
+                # location is from the cluster — the 100-mile cutoff below is
+                # simply skipped for them. Match is case-insensitive substring
+                # against the IC sheet's 'name' column, same convention used
+                # for name/team matching elsewhere in this file. They're still
+                # sorted by distance like everyone else afterward, so a
+                # genuinely-close match (if one exists) still sorts above them.
+                _UNRESTRICTED_ICS = ['biscardi']
+                if 'name' in v_ics.columns:
+                    _is_unrestricted = v_ics['name'].astype(str).str.lower().apply(
+                        lambda _n: any(_u in _n for _u in _UNRESTRICTED_ICS)
+                    )
+                else:
+                    _is_unrestricted = pd.Series(False, index=v_ics.index)
+                v_ics = v_ics[(v_ics['d'] <= 100) | _is_unrestricted].sort_values('d')
                 for _, r in v_ics.iterrows():
                     cert_val = str(r.get('digital certified', '')).strip().upper()
                     cert_icon = " 🔌" if cert_val in ['YES', 'Y', 'TRUE', '1', '1.0'] else ""

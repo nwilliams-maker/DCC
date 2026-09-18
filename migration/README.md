@@ -13,7 +13,7 @@ both.
 ## Files
 
 - `schema.sql` — the six tables that replace the seven Sheet tabs.
-- `import_from_sheets.py` — one-time import from the live Sheet into the new database. Safe to re-run (every insert is an upsert).
+- `import_from_sheets.py` — one-time import from the live Sheet into the new database. Safe to re-run (every insert is an upsert). Does **not** import the Archive tab's history — `route_events` starts empty and fills in going forward as the app runs (decision on file: don't carry over old archive history).
 - `data_access.py` — the new data-access layer: one function per Sheet-read / GAS-write the app does today. Meant to be dropped into `tactical_workspace_master_rw.py` in place of the CSV-fetch and `requests.post(GAS_WEB_APP_URL, ...)` call sites.
 - `requirements.txt` — `sqlalchemy` + `psycopg2-binary`, on top of the app's existing `requirements.txt`.
 
@@ -36,6 +36,11 @@ both.
 6. **Repoint the portal and the Field Nation browser extension** at the new endpoint(s), and confirm with whoever owns the extension that its three bulk-provider actions are updated too.
 7. **Decide on the `markFNAssigned` orchestration** (OnFleet route-plan rename, worker updates, Monday.com mutations) — it lives in Apps Script today and isn't replicated by `data_access.mark_fn_assigned()`, which only updates the row. Port it into Python or keep it as a small separate service; see `data_access.py`'s module docstring.
 8. **Cut over.** Since this is a hard cutover: do the final verification pass against staging (row counts, spot-checked records, a live test session pointed at the new database) as the last gate, then switch the app's env vars and redeploy. Retire `GAS_WEB_APP_URL`, `IC_SHEET_URL`, and `DCC_SHARED_SECRET` once everything is confirmed live on the new backend.
+
+## Known data fixes applied during import
+
+- `robert@niekotech.com` has two rows in the Sheet with different phone numbers; `import_from_sheets.py` forces the confirmed-correct one (`18186324368`) via `CONTRACTOR_FIELD_OVERRIDES` regardless of which row the Sheet lists last.
+- Duplicate emails/work-order numbers caused by stray whitespace or genuine double-entry (e.g. `robert@niekotech.com` / `holmj777@yahoo.com` having a tab-prefixed twin, or `FN-Ruben Delgado-9/14` appearing twice in Accepted routes) are handled by the existing upsert-on-natural-key behavior — the later row in the Sheet wins and the duplicate is silently absorbed. Confirmed acceptable; no separate cleanup needed.
 
 ## Not covered here
 

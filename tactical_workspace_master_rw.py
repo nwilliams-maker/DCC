@@ -5671,26 +5671,54 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                                if any(tok in str(c) for tok in ('phone', 'cell', 'mobile'))),
                               None)
         if lat_col in ic_df.columns and lng_col in ic_df.columns:
-            v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].copy()
-            v_ics = v_ics.dropna(subset=[lat_col, lng_col])
+            # 🌟 UNRESTRICTED CONTRACTORS — contractors who must be selectable
+            # on ANY route, period. This bypasses every filter below in
+            # order: the "Field Agent" blanket text exclusion, the
+            # missing-coordinates drop, AND the 100-mile distance cap.
+            # Match is case-insensitive substring against the IC sheet's
+            # 'name' column.
+            #   - 'biscardi' — Sep 18 2026 (Nick: "I need to be able to put
+            #     Biscardi on any work order").
+            #   - 'ledbetter' / 'erlandson' / "o'connor" & 'oconnor' — Sep
+            #     2026 (Nick: "lets add the Field Agents as well to be added
+            #     in any route: FA Freddy Ledbetter, Michael Erlandson,
+            #     Kevin O'Connor"). Matched on last name only (distinctive
+            #     enough here) so sheet formatting differences like
+            #     "Ledbetter, Freddy" still match, and both apostrophe forms
+            #     of O'Connor are listed. These three ARE Field Agents,
+            #     which is exactly what the old "Field Agent" text exclusion
+            #     just below would otherwise drop before the distance filter
+            #     even ran — the exemption has to happen first, not just at
+            #     the 100-mile step.
+            _UNRESTRICTED_ICS = ['biscardi', 'ledbetter', 'erlandson', "o'connor", 'oconnor']
+            def _is_unrestricted_name(_name):
+                _nl = str(_name or '').lower()
+                return any(_u in _nl for _u in _UNRESTRICTED_ICS)
+            _name_col = 'name' if 'name' in ic_df.columns else None
+
+            _fa_mask = ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)
+            _unrestricted_all = (ic_df[_name_col].astype(str).apply(_is_unrestricted_name)
+                                 if _name_col else pd.Series(False, index=ic_df.index))
+            v_ics = ic_df[(~_fa_mask) | _unrestricted_all].copy()
+
+            # Missing lat/lng normally drops a row outright — skip that for
+            # unrestricted contractors too (a Field Agent may have no home
+            # coordinates on file at all, since FAs aren't normally routed
+            # by distance). _ic_home_loc()/get_gmaps() already fall back to
+            # the cluster center when coordinates are missing, so this is
+            # safe downstream.
+            _unrestricted_v = (v_ics[_name_col].astype(str).apply(_is_unrestricted_name)
+                                if _name_col else pd.Series(False, index=v_ics.index))
+            v_ics = v_ics[v_ics[[lat_col, lng_col]].notna().all(axis=1) | _unrestricted_v]
+
             if not v_ics.empty:
+                # haversine() fails soft — it returns float('inf') on
+                # missing/non-numeric coordinates rather than raising — so
+                # this is safe to call even for a coordinate-less
+                # unrestricted row; it just won't ever satisfy `d <= 100`.
                 v_ics['d'] = v_ics.apply(lambda x: haversine(cluster['center'][0], cluster['center'][1], x[lat_col], x[lng_col]), axis=1)
-                # 🌟 UNRESTRICTED ICS — Sep 18 2026 (Nick: "I need to be able to
-                # put Biscardi on any work order"). These contractors stay
-                # selectable for every route regardless of how far their home
-                # location is from the cluster — the 100-mile cutoff below is
-                # simply skipped for them. Match is case-insensitive substring
-                # against the IC sheet's 'name' column, same convention used
-                # for name/team matching elsewhere in this file. They're still
-                # sorted by distance like everyone else afterward, so a
-                # genuinely-close match (if one exists) still sorts above them.
-                _UNRESTRICTED_ICS = ['biscardi']
-                if 'name' in v_ics.columns:
-                    _is_unrestricted = v_ics['name'].astype(str).str.lower().apply(
-                        lambda _n: any(_u in _n for _u in _UNRESTRICTED_ICS)
-                    )
-                else:
-                    _is_unrestricted = pd.Series(False, index=v_ics.index)
+                _is_unrestricted = (v_ics[_name_col].astype(str).apply(_is_unrestricted_name)
+                                    if _name_col else pd.Series(False, index=v_ics.index))
                 v_ics = v_ics[(v_ics['d'] <= 100) | _is_unrestricted].sort_values('d')
                 for _, r in v_ics.iterrows():
                     cert_val = str(r.get('digital certified', '')).strip().upper()
@@ -5721,7 +5749,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     else:
                         _task_cnt = _worker_counts.get(_ic_phone, 0)
                         _cnt_tag = f" 🔵{_task_cnt}"
-                    label = f"{ic_name}{cert_icon}{_cnt_tag} ({round(r['d'], 1)} mi)"
+                    # An unrestricted contractor with no coordinates on file
+                    # gets either haversine()'s fail-soft float('inf') (bad
+                    # non-numeric input) or NaN (a genuinely empty lat/lng
+                    # cell — float(nan) doesn't raise, so haversine's own
+                    # try/except never fires and NaN just propagates through
+                    # the arithmetic). Catch both rather than showing
+                    # "(inf mi)" or "(nan mi)".
+                    _dist_label = "distance unknown" if (pd.isna(r['d']) or r['d'] == float('inf')) else f"{round(r['d'], 1)} mi"
+                    label = f"{ic_name}{cert_icon}{_cnt_tag} ({_dist_label})"
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---

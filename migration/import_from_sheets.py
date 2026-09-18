@@ -50,6 +50,14 @@ ARCHIVE_GID = "1841508981"
 # name. Confirm this list against the current app before running for real.
 UNRESTRICTED_NAME_FRAGMENTS = ["biscardi", "ledbetter", "erlandson", "o'connor", "oconnor"]
 
+# Known-bad fields on specific contractor rows in the Sheet (confirmed by
+# hand). Applied after the normal row build so the correct value always wins,
+# regardless of which of that email's duplicate rows the Sheet happens to
+# list last. Keyed by normalized (lowercased, stripped) email.
+CONTRACTOR_FIELD_OVERRIDES: dict[str, dict[str, str]] = {
+    "robert@niekotech.com": {"phone": "18186324368"},
+}
+
 
 def fetch_csv(gid: str) -> pd.DataFrame:
     df = pd.read_csv(BASE_EXPORT_URL + gid)
@@ -82,20 +90,20 @@ def import_contractors(engine: sa.Engine) -> None:
             continue
         name = _clean_str(r.get("name")) or ""
         is_unrestricted = any(frag in name.lower() for frag in UNRESTRICTED_NAME_FRAGMENTS)
-        rows.append(
-            {
-                "email": email,
-                "name": name,
-                "location": _clean_str(r.get("location")),
-                "phone": _clean_str(r.get("phone")),
-                "ic_list": _clean_str(r.get("ic list")),
-                "lat": _to_float(r.get("lat")),
-                "lng": _to_float(r.get("lng")),
-                "pod_color": _clean_str(r.get("pod color")),
-                "digital_certified": (_clean_str(r.get("digital certified")) or "").upper() == "YES",
-                "unrestricted": is_unrestricted,
-            }
-        )
+        row = {
+            "email": email,
+            "name": name,
+            "location": _clean_str(r.get("location")),
+            "phone": _clean_str(r.get("phone")),
+            "ic_list": _clean_str(r.get("ic list")),
+            "lat": _to_float(r.get("lat")),
+            "lng": _to_float(r.get("lng")),
+            "pod_color": _clean_str(r.get("pod color")),
+            "digital_certified": (_clean_str(r.get("digital certified")) or "").upper() == "YES",
+            "unrestricted": is_unrestricted,
+        }
+        row.update(CONTRACTOR_FIELD_OVERRIDES.get(email, {}))
+        rows.append(row)
     with engine.begin() as conn:
         for row in rows:
             conn.execute(
@@ -189,7 +197,16 @@ def import_field_nation(engine: sa.Engine) -> None:
 
 
 def import_archive_events(engine: sa.Engine) -> None:
-    """Archive rows become route_events, not a separate table -- see schema.sql."""
+    """Archive rows become route_events, not a separate table -- see schema.sql.
+
+    NOT called from main() by design: per decision, the old Sheet's Archive
+    tab history is not carried over into Postgres. route_events starts empty
+    and fills in going forward as the app writes archiveRoute / finalizeRoute
+    / etc. events through data_access.py. Left here in case someone wants to
+    backfill history later -- call it manually if so, but note the inserts
+    below are plain INSERTs (no ON CONFLICT), so re-running it would duplicate
+    rows.
+    """
     df = fetch_csv(ARCHIVE_GID)
     inserted = 0
     with engine.begin() as conn:
@@ -229,7 +246,9 @@ def main() -> None:
     for gid, status in ROUTE_TABS:
         import_route_tab(engine, gid, status)
     import_field_nation(engine)
-    import_archive_events(engine)
+    # Archive tab history is intentionally NOT imported -- route_events starts
+    # fresh and fills in from here going forward. See import_archive_events()
+    # docstring if that decision ever changes.
     print("Done. Spot-check row counts and a sample of records against the live Sheet before cutover.")
 
 

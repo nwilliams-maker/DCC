@@ -13,12 +13,20 @@ surrounding UI code. Wrap the app's existing @st.cache_data decorators
 around these functions exactly as they wrap the CSV fetchers today.
 
 NOT included here, and worth a deliberate decision before cutover (see the
-migration doc's "Risks and open questions"): the OnFleet route-plan rename,
-worker updates, and Monday.com mutations that GAS currently performs
-server-side inside markFNAssigned. Those need their own home -- either
-ported into Python functions called from mark_fn_assigned() below, or kept
-as a separate small service -- they are NOT a side effect of the database
-write itself.
+migration doc's "Risks and open questions" and migration/README.md's "Step
+4/5, in practice"): three GAS actions have side effects beyond the sheet row
+that their data_access.py counterpart below does NOT replicate --
+  - markFNAssigned: OnFleet route-plan rename + worker updates + Monday.com
+    mutations.
+  - processDecision: an OnFleet auto-assign (docs/portal-dcc-rw.html expects
+    result.onfleetSuccess/onfleetMsg back from it).
+  - saveToFieldNation: an inline Monday.com placeholder push (find-by-address
+    + mutations), per fn_utils.save_fn_to_sheet()'s docstring.
+All three need their own home -- ported into Python functions called from
+the matching function below, or kept as a small separate service -- before
+process_decision(), save_to_field_nation(), or mark_fn_assigned() are safe to
+treat as full replacements for their GAS actions. None of this is a side
+effect of the database write itself.
 """
 from __future__ import annotations
 

@@ -63,6 +63,16 @@ DEFAULT_DUE_DAYS = 14   # default deadline offset from today when dispatcher has
 RATE_CRITICAL = 24.00   # $/stop — red status
 RATE_WARNING = 21.00    # $/stop — orange status
 
+# Security audit M29 caps. Total Comp and Rate/Stop are two views of the same
+# number (rate = comp / stops), so any write to one master key must keep BOTH
+# within their widget's [0, cap] range — otherwise a legitimately-capped Total
+# Comp on a low-stop-count route (e.g. $2,225.94 on a 1-stop route) produces an
+# out-of-range Rate/Stop that Streamlit refuses to render, crashing that route's
+# card with StreamlitValueAboveMaxError. Every site that sets _pay_master_key /
+# _rate_master_key must clamp through PAY_CAP / RATE_CAP.
+PAY_CAP = 10000.00      # $ — matches the Total Comp widget's max_value
+RATE_CAP = 2000.00      # $/stop — matches the Rate/Stop widget's max_value
+
 # Lightweight stderr logger — replaces silent `except: pass` so failures are visible in Railway logs.
 def _log_err(context, exc):
     try:
@@ -5835,15 +5845,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     def sync_on_total():
         v = st.session_state.get(pay_key)
         if v is not None:
-            st.session_state[_pay_master_key] = float(v)
-            st.session_state[_rate_master_key] = round(float(v) / _stops_for_sync, 2)
+            st.session_state[_pay_master_key] = min(float(v), PAY_CAP)
+            st.session_state[_rate_master_key] = min(round(float(v) / _stops_for_sync, 2), RATE_CAP)
             st.session_state[_pay_ver_key] = _pay_ver + 1
 
     def sync_on_rate():
         v = st.session_state.get(rate_key)
         if v is not None:
-            st.session_state[_rate_master_key] = float(v)
-            st.session_state[_pay_master_key] = round(float(v) * _stops_for_sync, 2)
+            st.session_state[_rate_master_key] = min(float(v), RATE_CAP)
+            st.session_state[_pay_master_key] = min(round(float(v) * _stops_for_sync, 2), PAY_CAP)
             st.session_state[_pay_ver_key] = _pay_ver + 1
 
     def update_for_new_contractor():
@@ -5857,8 +5867,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # and the dispatcher loses the displayed data even though the route is real.
             if new_pay == 0:
                 new_pay = round(20.0 * cluster.get('stops', 1), 2)
-            st.session_state[_pay_master_key] = new_pay
-            st.session_state[_rate_master_key] = round(new_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+            st.session_state[_pay_master_key] = min(new_pay, PAY_CAP)
+            st.session_state[_rate_master_key] = min(round(new_pay / cluster['stops'], 2), RATE_CAP) if cluster['stops'] > 0 else 20.0
             st.session_state[_pay_ver_key] = _pay_ver + 1
             st.session_state[last_sel_key] = selected_label
 
@@ -5897,8 +5907,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # 🌟 Floor: if Maps returned 0 (fail/no IC), seed from $20/stop default
         if initial_pay == 0:
             initial_pay = round(20.0 * cluster.get('stops', 1), 2)
-        st.session_state[_pay_master_key] = initial_pay
-        st.session_state[_rate_master_key] = round(initial_pay / cluster['stops'], 2) if cluster['stops'] > 0 else 20.0
+        # Security audit M29: saved_comp comes straight from the Sheet and can predate
+        # these caps (or be a legacy/mistyped value) — clamp both derived fields so a
+        # stale record can't crash this route's card (see PAY_CAP/RATE_CAP above).
+        st.session_state[_pay_master_key] = min(initial_pay, PAY_CAP)
+        st.session_state[_rate_master_key] = min(round(initial_pay / cluster['stops'], 2), RATE_CAP) if cluster['stops'] > 0 else 20.0
     
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
@@ -5945,10 +5958,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         with _inp_a:
             # Security audit M29 - cap comp so a fat-fingered value cannot
             # flow verbatim into the saveRoute payload and contractor email.
-            st.number_input("Total Comp ($)", min_value=0.0, max_value=10000.0, step=5.0, format="%.2f", value=float(st.session_state.get(_pay_master_key, 0.0)), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            # min(...) here is a last-resort guard: every write site above already
+            # clamps to PAY_CAP, but this keeps the widget itself un-crashable even
+            # if a value slips in from an older session or an unclamped write site.
+            st.number_input("Total Comp ($)", min_value=0.0, max_value=PAY_CAP, step=5.0, format="%.2f", value=min(float(st.session_state.get(_pay_master_key, 0.0)), PAY_CAP), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
         with _inp_b:
-            # Security audit M29 - cap rate/stop for the same reason.
-            st.number_input("Rate/Stop ($)", min_value=0.0, max_value=2000.0, step=1.0, format="%.2f", value=float(st.session_state.get(_rate_master_key, 0.0)), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            # Security audit M29 - cap rate/stop for the same reason (see PAY_CAP/RATE_CAP note above).
+            st.number_input("Rate/Stop ($)", min_value=0.0, max_value=RATE_CAP, step=1.0, format="%.2f", value=min(float(st.session_state.get(_rate_master_key, 0.0)), RATE_CAP), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
         with _inp_c:
             st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 

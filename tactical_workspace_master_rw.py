@@ -73,6 +73,27 @@ RATE_WARNING = 21.00    # $/stop — orange status
 PAY_CAP = 10000.00      # $ — matches the Total Comp widget's max_value
 RATE_CAP = 2000.00      # $/stop — matches the Rate/Stop widget's max_value
 
+# 🌟 FA (Field Agent) employees — Nick, Sep 19 2026: "For FAs they don't need
+# any pay rate, they are employees" (Biscardi is an IC and keeps normal
+# per-route pay — confirmed separately: "Biscardi is fine"). These are the
+# same three Field Agents named in the _UNRESTRICTED_ICS note below ("FA
+# Freddy Ledbetter, Michael Erlandson, Kevin O'Connor"). Matched on last name
+# only, same convention as _UNRESTRICTED_ICS, so sheet formatting differences
+# still match. Defined at module scope (not inside render_dispatch's ic_df
+# branch) so it's always available at the point `ic` gets checked, even on a
+# call where that branch didn't run.
+FA_EMPLOYEE_NAMES = ['ledbetter', 'erlandson', "o'connor", 'oconnor']
+
+def _is_fa_employee(ic_row):
+    """True if `ic_row` (a pandas Series or dict-like with a 'name' field) is
+    one of the salaried FA employees, who get no per-route pay rate."""
+    try:
+        _name = str(ic_row.get('name', '') or '')
+    except Exception:
+        _name = ''
+    _nl = _name.lower()
+    return any(_fa in _nl for _fa in FA_EMPLOYEE_NAMES)
+
 # Lightweight stderr logger — replaces silent `except: pass` so failures are visible in Railway logs.
 def _log_err(context, exc):
     try:
@@ -5937,10 +5958,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             ic = {"name": "Manual/FN", "location": ic_location_tmp, "d": 0}
             st.info("No ICs within 100mi.")
 
+        # 🌟 FA employees (see FA_EMPLOYEE_NAMES above) are salaried, not paid
+        # per route — Nick, Sep 19 2026. Skip the pay-rate inputs and never
+        # let a rate/comp figure reach the financials card, the contractor
+        # email, or the saveRoute payload for them.
+        is_fa = _is_fa_employee(ic)
+
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
 
-        curr_rate = st.session_state.get(_rate_master_key, 0.0)
+        curr_rate = 0.0 if is_fa else st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= 25.0) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
         is_unlocked = True
@@ -5954,23 +5981,37 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             is_unlocked = st.checkbox("Authorize Premium Rate / Distance", key=f"lock_{pod_name}_{cluster_hash}")
 
         # ── INPUTS ──────────────────────────────────────────────────────
-        _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
-        with _inp_a:
-            # Security audit M29 - cap comp so a fat-fingered value cannot
-            # flow verbatim into the saveRoute payload and contractor email.
-            # min(...) here is a last-resort guard: every write site above already
-            # clamps to PAY_CAP, but this keeps the widget itself un-crashable even
-            # if a value slips in from an older session or an unclamped write site.
-            st.number_input("Total Comp ($)", min_value=0.0, max_value=PAY_CAP, step=5.0, format="%.2f", value=min(float(st.session_state.get(_pay_master_key, 0.0)), PAY_CAP), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
-        with _inp_b:
-            # Security audit M29 - cap rate/stop for the same reason (see PAY_CAP/RATE_CAP note above).
-            st.number_input("Rate/Stop ($)", min_value=0.0, max_value=RATE_CAP, step=1.0, format="%.2f", value=min(float(st.session_state.get(_rate_master_key, 0.0)), RATE_CAP), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
-        with _inp_c:
-            st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
+        if is_fa:
+            st.markdown(
+                "<div style='background:#f0fdf4; border:1px solid #86efac; padding:6px 10px; "
+                "border-radius:8px; margin:6px 0; font-size:11px; color:#166534;'>"
+                "👤 <b>Field Agent (employee)</b> — no per-route pay rate needed."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            _inp_c = st.container()
+            with _inp_c:
+                st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
+        else:
+            _inp_a, _inp_b, _inp_c = st.columns([1.5, 1.5, 1.5])
+            with _inp_a:
+                # Security audit M29 - cap comp so a fat-fingered value cannot
+                # flow verbatim into the saveRoute payload and contractor email.
+                # min(...) here is a last-resort guard: every write site above already
+                # clamps to PAY_CAP, but this keeps the widget itself un-crashable even
+                # if a value slips in from an older session or an unclamped write site.
+                st.number_input("Total Comp ($)", min_value=0.0, max_value=PAY_CAP, step=5.0, format="%.2f", value=min(float(st.session_state.get(_pay_master_key, 0.0)), PAY_CAP), key=pay_key, on_change=sync_on_total, disabled=not is_unlocked)
+            with _inp_b:
+                # Security audit M29 - cap rate/stop for the same reason (see PAY_CAP/RATE_CAP note above).
+                st.number_input("Rate/Stop ($)", min_value=0.0, max_value=RATE_CAP, step=1.0, format="%.2f", value=min(float(st.session_state.get(_rate_master_key, 0.0)), RATE_CAP), key=rate_key, on_change=sync_on_rate, disabled=not is_unlocked)
+            with _inp_c:
+                st.date_input("Deadline", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS), key=f"dd_{pod_name}_{cluster_hash}", disabled=not is_unlocked)
 
         # ── FINANCIALS CARD ──────────────────────────────────────────────
-        final_pay = st.session_state.get(_pay_master_key, 0.0)
-        final_rate = st.session_state.get(_rate_master_key, 0.0)
+        # FA employees never carry a comp/rate figure, regardless of whatever
+        # stale value sits in the master keys from a previous non-FA selection.
+        final_pay = 0.0 if is_fa else st.session_state.get(_pay_master_key, 0.0)
+        final_rate = 0.0 if is_fa else st.session_state.get(_rate_master_key, 0.0)
 
         if final_rate >= RATE_CRITICAL: status_color = "#ef4444"
         elif final_rate >= RATE_WARNING: status_color = "#f97316"
@@ -5983,10 +6024,17 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         _t_display = t_str if t_str and t_str not in ("0h 0m", "N/A") else "—"
         _mi_display = f"{mi} mi" if mi and mi > 0 else "—"
 
-        st.markdown(
-            f"<div style='font-size:11px; color:#64748b; margin:4px 0 8px 0;'>"
+        # FA employees: drop the comp/rate figures entirely rather than show a
+        # misleading "$0.00 total | $0.0/stop" for someone who isn't paid per route.
+        _comp_segment = (
+            "<b style='color:#166534; font-size:13px;'>Employee</b> — no per-route pay"
+            if is_fa else
             f"<b style='color:{status_color}; font-size:13px;'>${final_pay:,.2f}</b> total"
             f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;${final_rate}/stop"
+        )
+        st.markdown(
+            f"<div style='font-size:11px; color:#64748b; margin:4px 0 8px 0;'>"
+            f"{_comp_segment}"
             f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_t_display} drive"
             f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_mi_display} round trip"
             f"</div>",
@@ -6439,13 +6487,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f"   {len(_quest_addrs)} stop(s) on this route are Quest Diagnostics — please arrive within the open window.\n"
         ) if _quest_addrs else ""
 
+        # FA employees are salaried — don't quote them a per-route dollar
+        # figure that doesn't apply to them (see is_fa above).
+        _comp_line = "\n" if is_fa else f" Estimated Compensation: ${final_pay:.2f} \n\n"
         sig_preview = (
             f"Hello {ic.get('name', 'Contractor')},\n\n"
             f"We have a new route available for you to review.\n\n"
             f" Work Order: {wo_val}\n"
             f"📅 Due Date: {due.strftime('%A, %b %d, %Y')}\n"
             f" Total Stops: {cluster['stops']}\n"
-            f" Estimated Compensation: ${final_pay:.2f} \n\n"
+            f"{_comp_line}"
             f" Task Breakdown:\n"
             f"{task_breakdown_str}"
             f"{install_warning}"

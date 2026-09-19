@@ -114,6 +114,71 @@ are lower-risk to wire first, but `_cached_fetch_sent_records_from_sheet`
 specifically still needs the careful port described above, ideally done
 against a running staging instance rather than statically.
 
+## Decision (2026-09-18): defer saveRoute/archiveRoute/finalizeRoute/FN writes to a Phase 2
+
+Looked at the actual `saveRoute` call site in `tactical_workspace_master_rw.py`
+(the one GAS write with no OnFleet/Monday.com angle) to see if it, at least,
+was safe to wire today. It isn't, for a different reason: it carries
+production-tuned reliability logic that has no equivalent anywhere in
+`data_access.py` yet —
+
+- GAS-side dedupe via `CacheService` on a 10-minute window keyed on
+  `cluster_hash`, so a retried `saveRoute` with the same cluster can never
+  create a duplicate route; it just hands back the original route ID.
+- A 3-attempt escalating-backoff retry (2s, then 4s) around the POST itself,
+  added after two real incidents (Sep 2026) where GAS's web-app front end
+  blipped for a few seconds and returned a non-JSON 404 even though the
+  deployment was healthy.
+
+Neither is replicated in `data_access.save_route()`, which is a plain
+upsert. Swapping this call site over without first building and testing the
+Postgres-side equivalent of that dedupe/retry behavior against a real
+staging environment risks either duplicate routes or silently losing a
+safety net that has already caught production issues.
+
+Combined with the three OnFleet/Monday.com side effects documented above
+(`processDecision`, `saveToFieldNation`, `markFNAssigned`), the decision is
+to treat `saveRoute`, `archiveRoute`, `finalizeRoute`, `processDecision`,
+`markFNAssigned`, and `saveToFieldNation` — everything keyed on
+`cluster_hash` plus the three OnFleet/Monday.com actions — as a **Phase 2**,
+deliberately not attempted yet. This doesn't reopen the "no dual-write"
+decision at the top of this doc: Phase 1 (`contractors`, `bundle_maps`) is a
+complete, real cutover for those two tables the moment `DATABASE_URL` is
+set; Phase 2's tables (`routes`, `field_nation_orders`) simply haven't
+started their cutover and keep running on Sheets/GAS exactly as today until
+someone can test the replacement against a staging OnFleet/Monday.com
+environment, not just read the code.
+
+**What's actually live today:** the app now reads the IC/contractor list and
+saves/loads pod bundle maps from Postgres whenever `DATABASE_URL` is set —
+see `_ic_df_from_db()` and the `DB_ENGINE` branches in
+`tactical_workspace_master_rw.py`. Everything else (routes, Field Nation
+orders, the portal, the browser extension) is still 100% Sheets/GAS,
+unaffected by setting `DATABASE_URL`.
+
+## What's needed next (requires Railway/account access this repo doesn't have)
+
+The remaining steps need your Railway dashboard and aren't something that
+can be done from this environment:
+
+1. Add a Postgres service to the DCC Railway project (Railway → New →
+   Database → Postgres). This is the real, billable resource — nothing here
+   provisions it for you.
+2. Copy the generated `DATABASE_URL` from that Postgres service's Variables
+   tab. Run the staging import against a **throwaway/local** Postgres first
+   (see step 3 above), not the new Railway one directly, so a bad import
+   never touches the database the app will actually read from.
+3. Once the staging import checks out, run `import_from_sheets.py` again
+   against the real Railway `DATABASE_URL`.
+4. Only then, set `DATABASE_URL` in the **app's** Railway service variables
+   (not just the Postgres service's) and redeploy. That's the switch that
+   turns on `DB_ENGINE` and moves contractors + bundle maps to Postgres —
+   watch the deploy logs and confirm the dispatcher tab loads the IC list
+   and that a pod's bundle map still saves/loads correctly, since this is
+   the first time that code path runs against anything but a local sandbox.
+5. `routes` and `field_nation_orders` keep running on Sheets/GAS until
+   Phase 2 above is unblocked — no action needed for those yet.
+
 ## Known data fixes applied during import
 
 - `robert@niekotech.com` has two rows in the Sheet with different phone numbers; `import_from_sheets.py` forces the confirmed-correct one (`18186324368`) via `CONTRACTOR_FIELD_OVERRIDES` regardless of which row the Sheet lists last.

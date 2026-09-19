@@ -70,6 +70,41 @@ def _log_err(context, exc):
     except Exception:
         pass
 
+# --- OPTIONAL POSTGRES BACKEND (see migration/README.md) ---
+# Dormant by default: DATABASE_URL is not set in Railway yet, so DB_ENGINE
+# stays None and every call site wired to it below falls through to its
+# existing Sheet/GAS code path, completely unchanged. Setting DATABASE_URL
+# (only after the staging verification pass in migration/README.md step 8)
+# is what turns this on -- nothing here changes today's behavior on its own.
+DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+DB_ENGINE = None
+if DATABASE_URL:
+    try:
+        import sqlalchemy as _sa
+        from migration import data_access as _da
+        DB_ENGINE = _sa.create_engine(DATABASE_URL, pool_pre_ping=True)
+    except Exception as _db_init_e:
+        _log_err("db_engine_init", _db_init_e)
+        DB_ENGINE = None
+
+
+def _ic_df_from_db(engine):
+    """Adapts data_access.get_contractors()'s SQL-shaped DataFrame to the
+    exact legacy column names/casing the rest of this app expects from the
+    Sheet CSV (space-separated multi-word headers -- 'ic list', 'pod color',
+    'digital certified' -- everything else already matches). Values need no
+    further conversion: 'digital certified' stays a Python bool and
+    str(True/False).upper() already satisfies the existing
+    `cert_val in ['YES','Y','TRUE','1','1.0']` check downstream, and `phone`
+    comes through as text (no pandas ".0" float artifact to strip, unlike the
+    CSV path)."""
+    df = _da.get_contractors(engine)
+    return df.rename(columns={
+        "ic_list": "ic list",
+        "pod_color": "pod color",
+        "digital_certified": "digital certified",
+    })
+
 # Security audit H3 - HTML-escape semi-trusted (Onfleet / Google Sheet) text
 # before interpolating into any unsafe_allow_html block. Stops stored XSS via
 # poisoned venue/campaign/client/contractor/WO values and stray markup chars.
@@ -4013,6 +4048,8 @@ def _warm_load_ic_df():
     warm path used to build a differently-cased ic_df and poison the shared
     cluster cache. Returns an empty DataFrame (never None) on failure."""
     try:
+        if DB_ENGINE is not None:
+            return _ic_df_from_db(DB_ENGINE)
         _url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid=0"
         _df = pd.read_csv(_url)
         _df.columns = [str(_c).strip().lower() for _c in _df.columns]
@@ -5045,12 +5082,24 @@ def _bundle_clusters_store(pod_name):
 # Properties keyed by pod, and pull it back on first visit each session so
 # bundles survive reloads. Requires GAS handlers `saveBundleMap` and
 # `loadBundleMap` — see companion diff in the GAS file.
+# Bundle map is pod-wide shared state today (every dispatcher in a pod sees
+# the same bundles), not per-dispatcher, even though bundle_maps' schema has
+# room for a real dispatcher_id. Using this fixed sentinel for every caller
+# reproduces that exact pod-wide sharing under the DB backend -- switching to
+# a real per-user dispatcher_id would be a behavior change, not a pure
+# backend swap, so it's deliberately not done here.
+_BUNDLE_MAP_SHARED_DISPATCHER_ID = "_shared"
+
+
 def _save_bundle_map_to_gas(pod_name):
-    """Fire-and-forget POST of the current session's bundle map for pod_name."""
+    """Fire-and-forget persist of the current session's bundle map for pod_name."""
     try:
         _bm = st.session_state.get('_bundle_map', {}) or {}
         _entries = _bm.get(pod_name, []) or []
         _payload = [",".join(sorted(list(_e))) for _e in _entries if _e]
+        if DB_ENGINE is not None:
+            _da.save_bundle_map(DB_ENGINE, pod_name, _BUNDLE_MAP_SHARED_DISPATCHER_ID, _payload)
+            return
         requests.post(GAS_WEB_APP_URL, json={
             "action": "saveBundleMap",
             "auth_secret": GAS_AUTH,
@@ -5062,17 +5111,20 @@ def _save_bundle_map_to_gas(pod_name):
 
 
 def _load_bundle_map_from_gas(pod_name):
-    """Fetch persisted bundle map for pod_name from GAS. Returns list of sets
+    """Fetch persisted bundle map for pod_name. Returns list of sets
     of task IDs (same shape as st.session_state['_bundle_map'][pod_name]).
     Returns [] on any error so the caller falls back cleanly."""
     try:
-        _r = requests.post(GAS_WEB_APP_URL, json={
-            "action": "loadBundleMap",
-            "auth_secret": GAS_AUTH,
-            "pod": pod_name,
-        }, timeout=8)
-        _data = _r.json() if _r.status_code == 200 else {}
-        _raw = _data.get('bundles', []) or []
+        if DB_ENGINE is not None:
+            _raw = _da.load_bundle_map(DB_ENGINE, pod_name, _BUNDLE_MAP_SHARED_DISPATCHER_ID) or []
+        else:
+            _r = requests.post(GAS_WEB_APP_URL, json={
+                "action": "loadBundleMap",
+                "auth_secret": GAS_AUTH,
+                "pod": pod_name,
+            }, timeout=8)
+            _data = _r.json() if _r.status_code == 200 else {}
+            _raw = _data.get('bundles', []) or []
         _out = []
         for _b in _raw:
             _ids = set(str(_s).strip() for _s in str(_b).split(',') if str(_s).strip())
@@ -5082,6 +5134,7 @@ def _load_bundle_map_from_gas(pod_name):
     except Exception as _e:
         _log_err(f"_load_bundle_map_from_gas/{pod_name}", _e)
         return []
+
 
 
 def _hydrate_bundle_map_once(pod_name):
@@ -10062,10 +10115,13 @@ if not st.session_state.get('_stay_prompt_dismissed'):
 # --- START ---
 if "ic_df" not in st.session_state:
     try:
-        url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid=0"
-        df = pd.read_csv(url)
-        # 🌟 BULLETPROOF: Lowercase all headers the second the data is downloaded
-        df.columns = [str(c).strip().lower() for c in df.columns]
+        if DB_ENGINE is not None:
+            df = _ic_df_from_db(DB_ENGINE)
+        else:
+            url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid=0"
+            df = pd.read_csv(url)
+            # 🌟 BULLETPROOF: Lowercase all headers the second the data is downloaded
+            df.columns = [str(c).strip().lower() for c in df.columns]
         st.session_state.ic_df = df
     except: st.error("Database connection failed.")
 

@@ -8,3 +8,8 @@ requests==2.32.3
 pandas==2.2.3
 folium==0.18.0
 streamlit-folium==0.23.1
+# Optional Postgres backend (see migration/README.md). Only exercised when
+# DATABASE_URL is set in Railway; otherwise data_access.py is imported but
+# never called, and the app behaves exactly as it does today.
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9

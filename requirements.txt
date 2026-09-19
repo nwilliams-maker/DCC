@@ -12,4 +12,4 @@ streamlit-folium==0.23.1
 # DATABASE_URL is set in Railway; otherwise data_access.py is imported but
 # never called, and the app behaves exactly as it does today.
 sqlalchemy==2.0.35
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.13

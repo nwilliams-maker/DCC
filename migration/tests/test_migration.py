@@ -89,7 +89,17 @@ with engine.connect() as conn:
     print(fn)
     assert len(fn) == 1 and fn[0]["status"] == "posted"
 
+    # Archive tab history is intentionally NOT imported (see import_from_sheets.py
+    # main()) -- route_events starts empty from the import itself, even though
+    # ARCHIVE_CSV above has a row. import_archive_events() still exists and is
+    # exercised directly below, just not wired into main().
     events = conn.execute(sa.text("SELECT action, route_id FROM route_events")).mappings().all()
+    print(events)
+    assert len(events) == 0, "archive import should be skipped by main() -- see import_from_sheets.py"
+
+    imp.import_archive_events(engine)
+    with engine.connect() as backfill_conn:
+        events = backfill_conn.execute(sa.text("SELECT action, route_id FROM route_events")).mappings().all()
     print(events)
     assert len(events) == 1 and events[0]["action"] == "finalizeRoute" and events[0]["route_id"] is not None
 

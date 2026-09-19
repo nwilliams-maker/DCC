@@ -2,4 +2,4 @@
 # Install alongside the app's existing requirements.txt:
 #   pip install -r requirements.txt -r migration/requirements.txt
 sqlalchemy==2.0.35
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.13

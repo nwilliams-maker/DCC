@@ -21,14 +21,11 @@ both.
 
 1. **Provision Postgres.** Add a Postgres instance in the same Railway project as the app (private networking to it is automatic). Set `DATABASE_URL` in both your local shell (for the steps below) and the app's Railway environment variables.
 2. **Create the schema.**
-```
 
 psql "$DATABASE_URL" -f migration/schema.sql
 
 
-```
 3. **Import from the Sheet, against staging first.** Point `DATABASE_URL` at a throwaway/staging database, then:
-```
 
 pip install -r requirements.txt -r migration/requirements.txt
 
@@ -37,7 +34,6 @@ export IC_SHEET_URL="<the Sheet's edit URL>"
 python migration/import_from_sheets.py
 
 
-```
    Compare row counts (`SELECT COUNT(*) FROM contractors`, etc.) against the live Sheet, and spot-check a handful of records by hand, especially route `payload` JSON. Re-run against the real `DATABASE_URL` once you're satisfied.
 4. **Wire `data_access.py` into the app.** Swap each read/write call site in `tactical_workspace_master_rw.py` for the matching function here — see the migration doc's "Code changes required" section for the full action-to-function mapping. Keep the existing `@st.cache_data` decorators wrapping the new read functions so caching behavior doesn't change. **Read this alongside "Step 4/5, in practice" below first** — it's a bigger job than a mechanical find-and-replace, and three of the write actions have hidden OnFleet/Monday.com side effects that need a decision before they're safe to swap. Do this against a running staging instance, not statically.
 5. **Build the portal endpoint.** `docs/portal-dcc-rw.html` posts `processDecision` straight to GAS today and can't hold a database credential (it's public static HTML). It needs a small API endpoint in front of `data_access.process_decision()` — this is the one new piece of infrastructure in this migration, not a straight port. **Also see "Step 4/5, in practice"**: the live `processDecision` triggers an OnFleet auto-assign that `data_access.process_decision()` doesn't replicate — don't build this endpoint as a bare wrapper around it until that's resolved.
@@ -300,9 +296,88 @@ In addition to `DATABASE_URL` (Phase 1), the app's Railway service needs:
 
 ### Still not done
 
-- The portal endpoint itself (Step 5) — `process_decision()` is ready to be
-  called from one, but nothing in this repo serves it yet.
 - The GAS call sites in `tactical_workspace_master_rw.py` still POST to
   `GAS_WEB_APP_URL` for all of this today — this port doesn't switch
   anything live. That switch is the actual cutover and should wait for the
   staging test above.
+
+## Step 5, built (2026-09-20): the portal endpoint (`migration/portal_api.py`)
+
+The portal endpoint step 5 asked for is done: **`migration/portal_api.py`**,
+a small FastAPI service with exactly two routes, deliberately narrow rather
+than a general REST API:
+
+- `GET /?action=getRoute&routeId=<wo>` — mirrors GAS's `getRoute` action.
+  Looks up `routes.payload` by `wo` and returns `{"payload": {...}}`, or
+  `{"error": "..."}` if the WO isn't found. `routes.payload` already has
+  every field `docs/portal-dcc-rw.html`'s `window.onload` reads off `d`
+  (`icn`, `wo`, `due`, `lCnt`, `tCnt`, `kCnt`, `rCnt`, `dCnt`, `time`, `mi`,
+  `comp`, `phone`, `taskIds`, `stopOrder`, `stopData`) — it's the exact same
+  dict `tactical_workspace_master_rw.py` already builds and currently POSTs
+  to GAS's `saveRoute`, so nothing needed adding there.
+- `POST /` with `{"action": "processDecision", "routeId": <wo>, ...}` —
+  mirrors GAS's `processDecision` action. Calls `data_access.process_decision()`
+  (already built and tested — see the section above) and returns its result
+  as-is, since that function already returns the exact
+  `onfleetSuccess`/`onfleetMsg`/`routeSuccess`/`routeMsg`/`error` shape
+  `submitFinalResponse()` in the portal already branches on.
+
+Both routes match the GAS web app's request/response shapes byte-for-byte on
+purpose, so Step 6 ("repoint the portal") is a **one-line change** to
+`docs/portal-dcc-rw.html` — swap the `webAppUrl` constant — not a portal
+rewrite.
+
+**routeId is `wo`, not a new opaque token.** The routes table's natural key
+is `wo`, so that's what's used in the link (`?route=<wo>`) and as the lookup
+key here. This is the *same* security posture `docs/portal-dcc-rw.html`'s own
+`[M24]` comment already documents as a known, deliberately-not-fixed-here
+limitation: the only thing standing between "anyone with this link" and "a
+valid accept/decline" is how guessable the ID in the URL is, and a
+work-order-shaped ID is no more (and no less) guessable than whatever opaque
+ID GAS's `routeId` scheme uses today. A real fix (an unguessable per-link
+HMAC token, checked here) is the same `[M24]` finding and is intentionally
+**not** addressed by this port — deploying this endpoint does not resolve
+`[M24]`.
+
+**Verified:** `migration/tests/test_portal_api.py` runs the FastAPI app
+through Starlette's `TestClient` (the actual HTTP/ASGI layer, not just
+calling the Python functions directly) against a real throwaway Postgres,
+with Onfleet/Monday mocked the same way the other tests do it — checks the
+`getRoute` 404-vs-hit shapes, the `processDecision` accept/decline paths, the
+"unknown WO" error shape, and that the CORS preflight actually allows the
+configured portal origin. Also manually run as a live `uvicorn` server in
+this sandbox and hit with real HTTP requests (not just the test client) to
+confirm the exact Railway start command works. Like the rest of Phase 2,
+**none of this has touched a real Onfleet/Monday sandbox** — same caveat as
+the "What's verified, and what isn't" section above.
+
+### Deploying `portal_api.py`
+
+This is its own process, not part of the Streamlit app — it needs its own
+Railway **service** (same repo, different service):
+
+1. In the Railway project, **New → GitHub Repo**, pick the same `DCC` repo
+   again. This creates a second service alongside the existing Streamlit one.
+2. In that new service's Settings, confirm it picked up the `api:` process
+   type from the `Procfile` (Railway lets you pick which `Procfile` line a
+   service runs when there's more than one — pick `api`, not `web`). If it
+   defaults to `web` instead, set a custom start command:
+   `uvicorn migration.portal_api:app --host 0.0.0.0 --port $PORT`.
+3. Set that service's `DATABASE_URL` to the **same** value as the Streamlit
+   app's — both read/write the same `routes` table, so this must be the
+   real Railway Postgres, not a separate database.
+4. Set `PORTAL_ALLOWED_ORIGINS` if the portal is ever served from somewhere
+   other than `https://nwilliams-maker.github.io` (comma-separated for more
+   than one origin). Defaults to that GitHub Pages origin if unset.
+5. Set `ONFLEET_KEY` (and `MONDAY_API_TOKEN` etc. if using Monday) on this
+   service too — `process_decision()` needs them exactly like the Streamlit
+   app does; they don't carry over between services automatically.
+6. Deploy, then hit `https://<this-service>.up.railway.app/?action=getRoute&routeId=anything`
+   in a browser — a `{"error": "This route link has expired or the route
+   was not found."}` response (not a 502/timeout) confirms it's up and can
+   reach the database.
+7. Update `docs/portal-dcc-rw.html`'s `webAppUrl` constant to that service's
+   URL, commit, and it's live for whoever opens a route link next — but see
+   the "Still not done" list above: this only matters once `routes` rows
+   actually exist in Postgres, which they don't until the write call sites
+   are cut over.

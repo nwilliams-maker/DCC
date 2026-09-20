@@ -377,7 +377,36 @@ Railway **service** (same repo, different service):
    was not found."}` response (not a 502/timeout) confirms it's up and can
    reach the database.
 7. Update `docs/portal-dcc-rw.html`'s `webAppUrl` constant to that service's
-   URL, commit, and it's live for whoever opens a route link next — but see
-   the "Still not done" list above: this only matters once `routes` rows
-   actually exist in Postgres, which they don't until the write call sites
-   are cut over.
+   URL, commit, and it's live for whoever opens a route link next.
+
+### Step 6, done (2026-09-20): deployed and repointed
+
+`portal_api.py` is live on its own Railway service (`portal-api`, domain
+`portal-api-production-226b.up.railway.app`), and `docs/portal-dcc-rw.html`'s
+`webAppUrl` now points at it instead of the old GAS URL. Two deploy issues
+came up along the way, both diagnosed from Railway's own deploy logs:
+
+- **`uvicorn: command not found`** — Railway's Nixpacks build only
+  auto-installs the repo-root `requirements.txt`, not
+  `migration/requirements.txt` (where `fastapi`/`uvicorn` live). Fixed with a
+  custom **Build Command** on the `portal-api` service:
+  `pip install -r requirements.txt -r migration/requirements.txt`. Worth
+  calling out for anyone repeating this: a fresh Railway service built from
+  this repo needs that Build Command set explicitly, it won't infer it.
+- **Crash loop on startup** — `DATABASE_URL` was set to
+  `${{Postgres.DATABASE_PRIVATE_URL}}`, but the Postgres service doesn't
+  expose a variable by that name (only `DATABASE_URL`, `PGHOST`, `PGPORT`,
+  etc. — checked its Variables tab directly). Fixed by pointing at
+  `${{Postgres.DATABASE_URL}}` instead, which does exist.
+
+**Verified live:** `GET /?action=getRoute&routeId=anything` on the deployed
+service returns the correct JSON error shape, confirming it's reachable and
+talking to the real Postgres database (which, per Nick, already has the
+Sheets import run against it — Phase 1 data is live, not just provisioned).
+
+**Still not verified:** an end-to-end test with a real route ID — `getRoute`
+returning an actual payload, and a real accept/decline through
+`processDecision` actually calling Onfleet (`ONFLEET_KEY` is set on
+`portal-api`, but this hasn't been exercised against a live Onfleet route
+yet). See "What's verified, and what isn't" above — same caveat carries
+through to this deployed instance.

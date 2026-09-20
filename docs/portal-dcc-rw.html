@@ -105,18 +105,24 @@
     </div>
 
     <script>
-        // [H15] HARD COUPLING: this URL must stay byte-identical to the
-        // migration/portal_api.py service's public domain (Railway "portal-api"
-        // service -- a separate service from the Streamlit "DCC" app). The portal
-        // deploys separately (GitHub Pages), so the two can silently drift. If
-        // portal-api's Railway domain ever changes, update this constant. A stale
-        // URL here sends contractor accepts to a dead endpoint with no visible error.
+        // [H15] HARD COUPLING: this URL must stay byte-identical to the Streamlit
+        // app's GAS_WEB_APP_URL env var (Railway). The portal deploys separately
+        // (GitHub Pages), so the two can silently drift. If the GAS deployment is
+        // ever re-published, update BOTH this constant and Railway's GAS_WEB_APP_URL
+        // in the same change. A stale URL here sends contractor accepts to a dead
+        // GAS deployment with no visible error.
         //
-        // Migrated 2026-09-20 (Step 6, migration/README.md) from Google Apps
-        // Script to migration/portal_api.py. Old GAS URL, kept here for
-        // reference in case of rollback:
-        //   https://script.google.com/macros/s/AKfycbz1g7Kr7C8m40Vyc8omJbJCu9I9YRcmi7KB6Vf2dzQLyL8J8M27cvDJysuUXLbR07iE/exec
-        const webAppUrl = "https://portal-api-production-226b.up.railway.app";
+        // ROLLED BACK 2026-09-20: briefly pointed at migration/portal_api.py
+        // (Railway "portal-api" service) but reverted the same day -- the live
+        // dispatch flow in tactical_workspace_master_rw.py still only writes
+        // routes to this GAS/Sheets backend (data_access.save_route(), the
+        // Postgres write path, is not called anywhere in the app yet, only in
+        // tests). Pointing the portal at Postgres before that write-side cutover
+        // meant every newly-dispatched route was invisible to it ("route not
+        // found" for real contractors). Do not repoint this until Step 8
+        // (the write cutover) in migration/README.md is actually done and
+        // verified -- see that file's "Step 6 rollback" note.
+        const webAppUrl = "https://script.google.com/macros/s/AKfycbz1g7Kr7C8m40Vyc8omJbJCu9I9YRcmi7KB6Vf2dzQLyL8J8M27cvDJysuUXLbR07iE/exec";
 
         // [L10] Single source of truth for the route stop limit (was inconsistently
         // 9 / 11 / 25 across UI copy and code).

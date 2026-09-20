@@ -379,34 +379,37 @@ Railway **service** (same repo, different service):
 7. Update `docs/portal-dcc-rw.html`'s `webAppUrl` constant to that service's
    URL, commit, and it's live for whoever opens a route link next.
 
-### Step 6, done (2026-09-20): deployed and repointed
 
-`portal_api.py` is live on its own Railway service (`portal-api`, domain
-`portal-api-production-226b.up.railway.app`), and `docs/portal-dcc-rw.html`'s
-`webAppUrl` now points at it instead of the old GAS URL. Two deploy issues
-came up along the way, both diagnosed from Railway's own deploy logs:
+### Step 6 rollback (2026-09-20, same day): sequencing mistake
 
-- **`uvicorn: command not found`** — Railway's Nixpacks build only
-  auto-installs the repo-root `requirements.txt`, not
-  `migration/requirements.txt` (where `fastapi`/`uvicorn` live). Fixed with a
-  custom **Build Command** on the `portal-api` service:
-  `pip install -r requirements.txt -r migration/requirements.txt`. Worth
-  calling out for anyone repeating this: a fresh Railway service built from
-  this repo needs that Build Command set explicitly, it won't infer it.
-- **Crash loop on startup** — `DATABASE_URL` was set to
-  `${{Postgres.DATABASE_PRIVATE_URL}}`, but the Postgres service doesn't
-  expose a variable by that name (only `DATABASE_URL`, `PGHOST`, `PGPORT`,
-  etc. — checked its Variables tab directly). Fixed by pointing at
-  `${{Postgres.DATABASE_URL}}` instead, which does exist.
+The real end-to-end test caught it immediately: Nick dispatched a route
+(`R-94029-9BB7G`) through the live app and opened the actual portal link a
+contractor would get. It showed **"This route link has expired or the route
+was not found."**
 
-**Verified live:** `GET /?action=getRoute&routeId=anything` on the deployed
-service returns the correct JSON error shape, confirming it's reachable and
-talking to the real Postgres database (which, per Nick, already has the
-Sheets import run against it — Phase 1 data is live, not just provisioned).
+Root cause: `data_access.save_route()` — the function that writes a route
+into Postgres — **is never called anywhere in `tactical_workspace_master_rw.py`**,
+only in this migration's own test files (confirmed by grep). The live
+dispatch flow ("Generate Link") still exclusively `requests.post`s to
+`GAS_WEB_APP_URL`, writing the route to the Google Sheet and nowhere else.
+So Postgres's `routes` table only ever had the one-time historical snapshot
+from `import_from_sheets.py` — nothing dispatched after that import exists
+there, including every route dispatched today.
 
-**Still not verified:** an end-to-end test with a real route ID — `getRoute`
-returning an actual payload, and a real accept/decline through
-`processDecision` actually calling Onfleet (`ONFLEET_KEY` is set on
-`portal-api`, but this hasn't been exercised against a live Onfleet route
-yet). See "What's verified, and what isn't" above — same caveat carries
-through to this deployed instance.
+Step 6 (repointing the portal at `portal_api.py`) was done **before** Step 8
+("Cut over" — switching the write side to Postgres too). That ordering
+mistake meant every contractor who opened a route link after the repoint hit
+a false "not found," even though their route was perfectly valid in the
+Sheet — a live break for real people, not a test artifact.
+
+**Fix applied immediately:** `docs/portal-dcc-rw.html`'s `webAppUrl` reverted
+to the GAS URL. Contractor accept/decline is back on the original GAS/Sheets
+path exactly as before Step 6.
+
+**Do not repoint the portal again until:** `tactical_workspace_master_rw.py`'s
+dispatch flow actually calls `data_access.save_route()` (dual-write
+alongside the existing GAS POST, or a full cutover — see Step 8 above) and
+that's been verified with a live dispatch → live portal-link round trip, the
+same way this mistake was caught. Re-run this exact test (dispatch a real
+route, open its real portal link, confirm it renders and accept/decline
+works) before flipping `webAppUrl` back to `portal-api` a second time.

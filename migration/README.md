@@ -21,15 +21,23 @@ both.
 
 1. **Provision Postgres.** Add a Postgres instance in the same Railway project as the app (private networking to it is automatic). Set `DATABASE_URL` in both your local shell (for the steps below) and the app's Railway environment variables.
 2. **Create the schema.**
-   ```
-   psql "$DATABASE_URL" -f migration/schema.sql
-   ```
+```
+
+psql "$DATABASE_URL" -f migration/schema.sql
+
+
+```
 3. **Import from the Sheet, against staging first.** Point `DATABASE_URL` at a throwaway/staging database, then:
-   ```
-   pip install -r requirements.txt -r migration/requirements.txt
-   export IC_SHEET_URL="<the Sheet's edit URL>"
-   python migration/import_from_sheets.py
-   ```
+```
+
+pip install -r requirements.txt -r migration/requirements.txt
+
+export IC_SHEET_URL="<the Sheet's edit URL>"
+
+python migration/import_from_sheets.py
+
+
+```
    Compare row counts (`SELECT COUNT(*) FROM contractors`, etc.) against the live Sheet, and spot-check a handful of records by hand, especially route `payload` JSON. Re-run against the real `DATABASE_URL` once you're satisfied.
 4. **Wire `data_access.py` into the app.** Swap each read/write call site in `tactical_workspace_master_rw.py` for the matching function here — see the migration doc's "Code changes required" section for the full action-to-function mapping. Keep the existing `@st.cache_data` decorators wrapping the new read functions so caching behavior doesn't change. **Read this alongside "Step 4/5, in practice" below first** — it's a bigger job than a mechanical find-and-replace, and three of the write actions have hidden OnFleet/Monday.com side effects that need a decision before they're safe to swap. Do this against a running staging instance, not statically.
 5. **Build the portal endpoint.** `docs/portal-dcc-rw.html` posts `processDecision` straight to GAS today and can't hold a database credential (it's public static HTML). It needs a small API endpoint in front of `data_access.process_decision()` — this is the one new piece of infrastructure in this migration, not a straight port. **Also see "Step 4/5, in practice"**: the live `processDecision` triggers an OnFleet auto-assign that `data_access.process_decision()` doesn't replicate — don't build this endpoint as a bare wrapper around it until that's resolved.
@@ -188,3 +196,113 @@ can be done from this environment:
 
 - Normalizing `routes.locs` / `routes.stop_data` out of JSONB into their own tables — a reasonable later cleanup, not required for the migration itself.
 - The unrestricted-IC allowlist: `import_from_sheets.py` ports the current hardcoded name list into `contractors.unrestricted` as a one-time seed, but the app's dispatch-filter code still needs updating to read that column instead of checking names in Python.
+
+## Decision + port (2026-09-19): OnFleet/Monday.com side effects
+
+Step 7 above asked for a decision on where `processDecision`, `markFNAssigned`,
+and `saveToFieldNation`'s OnFleet/Monday.com side effects should live —
+**ported into Python**, not a separate service. Reasoning: the app already
+makes raw OnFleet API calls directly from `tactical_workspace_master_rw.py`
+(worker/task/team lookups, route-plan creation) for its existing dispatch
+flow — a separate service would be a second deployable with its own auth and
+failure modes for logic that's a natural extension of code already living
+here.
+
+That port is done: **`migration/fn_side_effects.py`**, function-by-function
+from the actual Apps Script source (pulled from the live "DCC" Apps Script
+project on 2026-09-19 — this wasn't available in the repo before, which is
+why Step 7 originally could only say to use it "as reference" rather than
+actually doing so). It carries over every retry/backoff constant, the
+Onfleet team allow-list, the Monday column defaults, and — importantly —
+the **"board-corruption guard"**: `MONDAY_GROUP_FILTER` restricts Monday
+writes to 3 specific board groups (Field Nation / Escalations / Primary
+Route) by default, and a `MONDAY_GROUP_FILTER='*'` override requires a
+*second* confirmation env var (`MONDAY_GROUP_FILTER_ALLOW_WILDCARD=yes`) to
+take effect, exactly like GAS enforces it. Do not relax this without reading
+the comments in that module — it exists because an earlier run without it
+corrupted unrelated Monday board groups.
+
+`data_access.py`'s `process_decision()`, `mark_fn_assigned()`, and
+`save_to_field_nation()` now call into it:
+
+- **`process_decision`** runs the OnFleet auto-assign + ordered route
+  creation on accept (same as GAS), plus the idempotency guards GAS has —
+  a duplicate accept is a no-op, and an already-accepted route can't flip
+  back to declined through this path (use the app's revoke flow instead).
+  Returns the same `onfleetSuccess`/`onfleetMsg`/`routeSuccess`/`routeMsg`/
+  `partial`/`route_incomplete` shape `docs/portal-dcc-rw.html` already
+  expects from GAS, for whenever the portal endpoint (Step 5, still not
+  built) is wired up.
+- **`mark_fn_assigned`** runs the OnFleet routePlan-rename + per-task
+  metadata/worker re-PUT, and the Monday.com address-matched sync.
+- **`save_to_field_nation`** runs the Monday.com placeholder push
+  (installer = "Field Nation" until a real provider is confirmed).
+
+**A real functional gap found (and fixed) while porting, not just a missing
+side effect:** GAS's `markFNAssigned` doesn't just flip a status — it
+*moves* the Field Nation sheet row into "Accepted routes", renaming the WO
+to `FN-<Provider>-<MMDD>` along the way, so the order becomes a full
+accepted route (shows in the Accepted bucket, goes through the finalization
+checklist — everything else in the app that reads from `routes` expects
+this). The original `mark_fn_assigned()` (written before the actual GAS
+source was available) only updated `field_nation_orders` in place and never
+created the corresponding `routes` row — so nothing would have ever
+promoted an FN order into the app's normal accepted-route lifecycle. Fixed:
+`mark_fn_assigned()` now inserts/updates that `routes` row too.
+`set_fn_provider()` had the same shape of gap (GAS stamps `fn_provider` into
+the JSON payload, not a separate column, and `mark_fn_assigned` reads it
+from there) — also fixed, keeping both the payload field and the existing
+`provider` column in sync.
+
+`saveRoute`/`archiveRoute`/`finalizeRoute` (the other half of Step 7's
+"decision on file") are intentionally NOT touched by this port — their
+existing `save_route()`/`archive_route()`/`finalize_route()` upsert-on-`wo`
+behavior already gives equivalent dedupe to GAS's 10-minute cluster_hash
+cache (see that module's comments), so there's nothing to port there beyond
+what's already written.
+
+### What's verified, and what isn't
+
+Every function in `fn_side_effects.py` is unit-tested against **mocked**
+`requests` calls — `migration/tests/test_fn_side_effects.py` proves the
+shape of every Onfleet/Monday request (endpoints, payloads, the retry
+classifier, the board-corruption guard) matches the ported GAS source.
+`migration/tests/test_process_decision_and_fn_flow.py` exercises the full
+`data_access.py` call paths (`process_decision`, `mark_fn_assigned`,
+`save_to_field_nation`) against a real (throwaway) Postgres with the same
+HTTP mocking, and passes end to end, including the new `routes` row created
+by `mark_fn_assigned`.
+
+**None of this has been run against a real Onfleet or Monday.com sandbox.**
+This sandbox has no such environment, and pointing this code at the *real*
+production Onfleet/Monday accounts to "test" it would itself create the
+exact side effects (real task assignments, real board writes) a test run
+shouldn't cause. Before removing the GAS call sites in
+`tactical_workspace_master_rw.py` — the actual cutover, per this doc's "hard
+cutover, no dual-write" decision at the top — do one supervised manual
+accept and one manual FN-assign against a staging `DATABASE_URL`, watched
+live in both Onfleet and Monday, the same way Step 8's "final verification
+pass" already calls for.
+
+### New env vars needed before flipping this on
+
+In addition to `DATABASE_URL` (Phase 1), the app's Railway service needs:
+- `MONDAY_API_TOKEN` — a Monday.com personal API token. Without it, the
+  Monday sync is skipped (logged, not raised) exactly like GAS does when its
+  equivalent Script Property is unset.
+- Optional, all have the same defaults GAS used: `MONDAY_BOARD_ID`
+  (`7374880245`), `MONDAY_INSTALLER_COL` (`text1__1`), `MONDAY_WO_COL`
+  (`text14`), `MONDAY_ADDR_COL` (`text63`), `MONDAY_GROUP_FILTER`,
+  `MONDAY_GROUP_FILTER_ALLOW_WILDCARD`.
+- `ONFLEET_KEY` is already set (the app's existing OnFleet integration uses
+  it) and is reused here — GAS used a separate `ONFLEET_API_KEY` Script
+  Property, but it's the same Onfleet account/key either way.
+
+### Still not done
+
+- The portal endpoint itself (Step 5) — `process_decision()` is ready to be
+  called from one, but nothing in this repo serves it yet.
+- The GAS call sites in `tactical_workspace_master_rw.py` still POST to
+  `GAS_WEB_APP_URL` for all of this today — this port doesn't switch
+  anything live. That switch is the actual cutover and should wait for the
+  staging test above.

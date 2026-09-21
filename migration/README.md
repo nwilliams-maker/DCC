@@ -596,13 +596,86 @@ isn't set in Railway yet) still fires the real GAS POST with zero behavior
 change, confirming this is exactly as dormant-by-default as every other
 piece of this migration until `DATABASE_URL` is actually set.
 
-**Still not wired, and deliberately so:** `saveToFieldNation`'s Monday push
+**Still not wired at the time of writing:** `saveToFieldNation`'s Monday push
 and `markFNAssigned`'s Onfleet/Monday side effects are *never* mirrored —
 only their DB writes are. `processDecision` is still untouched (see Step 4
-above — it's not called from this file at all). `setFnProvider`,
-`removeFieldNation`, `markFNPosted`, `bulkSetFnProvidersByAddress`, and
-`setFnRoutePlanId` are technically safe to dual-write now (they never called
-`fn_side_effects` even in their non-mirror form, and the "rows wouldn't
-exist yet" blocker from Step 4 is gone now that `saveToFieldNation` is
-mirrored) — but wiring them wasn't done in this pass and is worth a
-follow-up, not an assumption that it's already covered.
+above — it's not called from this file at all).
+
+### Step 7 continued (2026-09-21, same day): the rest of the Field Nation family wired
+
+`setFnProvider`, `removeFieldNation`, `markFNPosted`, and `setFnRoutePlanId`
+are now also dual-written. None of these four ever called into
+`fn_side_effects.py` even in their live/non-mirror form — GAS's own
+`removeFieldNation`/`markFNPosted`/`setFnProvider`/`setFnRoutePlanId`
+actions have no Onfleet/Monday side effect — so there's no `mirror_only`
+flag to add here, unlike `saveToFieldNation`/`markFNAssigned` above. The
+only piece that was missing was the same `cluster_hash → work_order`
+resolution `mirror_mark_fn_assigned_by_cluster_hash()` already does, since
+every live call site for these four only has `cluster_hash` in scope, not
+the Postgres `work_order`.
+
+**What changed in `migration/data_access.py`:** four new
+`mirror_*_by_cluster_hash()` wrapper functions
+(`mirror_remove_field_nation_by_cluster_hash`,
+`mirror_mark_fn_posted_by_cluster_hash`,
+`mirror_set_fn_provider_by_cluster_hash`,
+`mirror_set_fn_route_plan_id_by_cluster_hash`), each resolving `work_order`
+via the same `field_nation_orders.payload ->> 'cluster_hash'` lookup and
+delegating to the existing plain `remove_field_nation()` / `mark_fn_posted()`
+/ `set_fn_provider()` / `set_fn_route_plan_id()`. Same no-op-never-raise
+contract as the rest of the family — returns `{"success": False, "skipped":
+...}` if no matching row exists yet.
+
+**What changed in `fn_utils.py` and `tactical_workspace_master_rw.py` (the
+actual wiring):**
+
+- `fn_utils.save_fn_provider()` (the `setFnProvider` call site) gained an
+  optional `db_engine` parameter, same pattern as `save_fn_to_sheet()`. Its
+  one call site (the FN tab's "Assigned Provider" text input handler) now
+  passes `db_engine=DB_ENGINE`.
+- `background_fn_revoke()` (the `removeFieldNation` call site, called from
+  `revoke_field_nation()`) now also calls
+  `_da.mirror_remove_field_nation_by_cluster_hash()` best-effort, guarded by
+  `if DB_ENGINE is not None`.
+- All three `markFNPosted` call sites (per-route, bulk-pod, bulk-digital)
+  now call `_da.mirror_mark_fn_posted_by_cluster_hash()` once per
+  `cluster_hash` — GAS's `markFNPosted` accepts a comma-separated list for
+  the two bulk sites, but the mirror function takes one hash at a time, so
+  the bulk call sites loop over the same set of hashes they already send GAS
+  (`_sel_pending` for bulk-pod, `_fn_selected` for bulk-digital).
+- The `setFnRoutePlanId` call site (inside `assign_tasks_to_fn_team()`, right
+  after a new OnFleet route plan is created) now also calls
+  `_da.mirror_set_fn_route_plan_id_by_cluster_hash()` best-effort.
+
+All four covered by a new test file,
+`migration/tests/test_fn_remaining_mirrors.py`, against a real local
+Postgres: proves the `cluster_hash → work_order` resolution is correct for
+each, that every mirror no-ops cleanly (never raises) on an unknown
+`cluster_hash`, and that the three per-field mirrors (`provider`,
+`route_plan_id`, `status`) can all land on the same row without clobbering
+each other. Also smoke-tested `fn_utils.save_fn_provider(..., db_engine=...)`
+end-to-end (background thread, GAS POST mocked) — confirms the provider
+lands in Postgres when `db_engine` is set, and that Postgres is left
+untouched with the real GAS POST still firing when it's `None` (today's
+Railway default).
+
+**`bulkSetFnProvidersByAddress` is the one FN action still not wired, and
+that's a scope boundary rather than an oversight:** `fn_utils.bulk_save_fn_providers_by_address()`
+exists and `data_access.bulk_set_fn_providers_by_address()` already has a
+matching mirror-ready implementation (it matches on `address` inside every
+`posted` order's payload, no `cluster_hash` needed) — but `bulk_save_fn_providers_by_address()`
+is never called anywhere in this repo today (confirmed by grep). Its
+docstring says it's "designed for the browser-extension path" — the
+Chrome extension that scrapes FN.com posts straight to GAS, bypassing this
+Python app entirely, the same way `processDecision` bypasses it via the
+portal. There is no call site in `tactical_workspace_master_rw.py` to hook
+a dual-write onto, so none was added — same treatment `processDecision` got
+in Step 4.
+
+**Net effect:** the entire Field Nation family that this app's own UI
+drives (`saveToFieldNation`, `markFNAssigned`, `setFnProvider`,
+`removeFieldNation`, `markFNPosted`, `setFnRoutePlanId`) now dual-writes to
+Postgres best-effort, alongside the still-authoritative GAS/Sheets path.
+Only `bulkSetFnProvidersByAddress` (driven externally, not from this app)
+and the Onfleet/Monday side effects inside `saveToFieldNation`/
+`markFNAssigned` remain unmirrored.

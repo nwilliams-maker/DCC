@@ -10513,6 +10513,103 @@ if st.query_params.get("debug") == "1":
                 st.error(f"{type(_e).__name__}: {_e}")
         st.caption("Click to see what fields OnFleet actually returns on tasks. Tells us where the art file lives and whether National-vs-Local detection has anything to match against.")
 
+# 🔬 DEBUG: Postgres read-side reconstruction preview (Step 8, 2026-09-22) —
+# only renders when ?debug=readside is in the URL AND the viewer is
+# ADMIN/MANAGER (this one touches real route data, unlike the Onfleet-only
+# panel above, so it gets the stricter gate the FN/bucket debug panels use).
+# Read-only and button-triggered: runs migration.data_access.get_sent_records_from_db()
+# against Postgres and compares it with fetch_sent_records_from_sheet() (the
+# live path) side-by-side. Never assigns into st.session_state beyond what
+# fetch_sent_records_from_sheet() already does on every normal render, and
+# never changes anything a dispatcher sees elsewhere on the page — purely a
+# diagnostic, ahead of any real cutover decision. See migration/README.md
+# "Step 8" for what this is checking and why it isn't wired to the live view.
+if st.query_params.get("debug") == "readside" and _is_admin_or_manager():
+    with st.expander("🔬 Read-side reconstruction preview — Postgres vs Sheets (Step 8)", expanded=True):
+        if DB_ENGINE is None:
+            st.info(
+                "DATABASE_URL isn't set for this deploy, so there's no Postgres "
+                "data to compare yet. This panel has nothing to show until "
+                "DB_ENGINE is live."
+            )
+        else:
+            st.caption(
+                "Read-only comparison. Runs get_sent_records_from_db() against Postgres and "
+                "fetch_sent_records_from_sheet() against the live Sheets, then diffs them. "
+                "Doesn't change anything a dispatcher sees — purely diagnostic."
+            )
+            if st.button("Run comparison", key="_dbg_readside_run"):
+                try:
+                    sheet_sent, sheet_ghost, sheet_archived, sheet_hist = fetch_sent_records_from_sheet()
+                    db_sent, db_ghost, db_archived, db_hist = _da.get_sent_records_from_db(
+                        DB_ENGINE, POD_CONFIGS, STATE_MAP, cutoff_date=MIGRATION_CUTOFF_DATE
+                    )
+
+                    def _ghost_count(gd):
+                        # Skip non-list side-channel keys (_fn_posted, _fn_provider,
+                        # _archive_read_failed) — same convention both paths use to
+                        # park extras on the ghost_routes dict.
+                        return sum(len(v) for v in gd.values() if isinstance(v, list))
+
+                    st.write("**Top-line counts (Sheets vs Postgres)**:")
+                    _count_rows = [
+                        ("sent_dict (tasks)", len(sheet_sent), len(db_sent)),
+                        ("ghost_routes (routes)", _ghost_count(sheet_ghost), _ghost_count(db_ghost)),
+                        ("archived_wos", len(sheet_archived), len(db_archived)),
+                        ("history_db (tasks with history)", len(sheet_hist), len(db_hist)),
+                    ]
+                    st.table(pd.DataFrame(_count_rows, columns=["", "Sheets", "Postgres"]))
+                    st.caption(
+                        "Expect Postgres counts to run well below Sheets today — Postgres only has "
+                        "what's been dual-written since Step 6/7 landed (2026-09-20 onward), plus "
+                        "whatever's been backfilled by import_from_sheets.py. A gap alone isn't a "
+                        "bug; it's what 'still accumulating, not yet backfilled' looks like."
+                    )
+
+                    # Cross-check the tasks BOTH paths already know about (both sides
+                    # already filter to MIGRATION_CUTOFF_DATE, so this isn't a
+                    # freshness question) — this is the part that would catch a real
+                    # logic divergence between the two implementations, not just a
+                    # data-coverage gap.
+                    _sheet_tids = set(sheet_sent.keys())
+                    _db_tids = set(db_sent.keys())
+                    _only_sheet = _sheet_tids - _db_tids
+                    _only_db = _db_tids - _sheet_tids
+                    _both = _sheet_tids & _db_tids
+                    st.write(
+                        f"**Task IDs**: {len(_both)} in both, {len(_only_sheet)} Sheets-only, "
+                        f"{len(_only_db)} Postgres-only."
+                    )
+
+                    _mismatches = []
+                    for tid in _both:
+                        s, d = sheet_sent[tid], db_sent[tid]
+                        if s.get("status") != d.get("status") or s.get("wo") != d.get("wo"):
+                            _mismatches.append({
+                                "task_id": tid,
+                                "sheet_status": s.get("status"), "db_status": d.get("status"),
+                                "sheet_wo": s.get("wo"), "db_wo": d.get("wo"),
+                            })
+                    if _mismatches:
+                        st.warning(f"⚠️ {len(_mismatches)} task(s) exist in both but disagree on status/WO — worth a look:")
+                        st.dataframe(pd.DataFrame(_mismatches).head(50))
+                    elif _both:
+                        st.success(f"✅ All {len(_both)} tasks present in both paths agree on status and WO.")
+                    else:
+                        st.caption("No overlapping task IDs yet to cross-check.")
+
+                    if st.checkbox("Show raw Postgres ghost_routes by pod", key="_dbg_readside_raw"):
+                        for pod, entries in db_ghost.items():
+                            if not isinstance(entries, list) or not entries:
+                                continue
+                            st.write(f"**{pod}** ({len(entries)}):")
+                            st.dataframe(pd.DataFrame(entries).head(25).reindex(
+                                columns=["wo", "status", "city", "state", "route_ts"]
+                            ))
+                except Exception as _e:
+                    st.error(f"{type(_e).__name__}: {_e}")
+            st.caption("Add `?debug=readside` to the URL (ADMIN/MANAGER only) to see this panel.")
+
 # Security audit M13 - reset the once-per-render sync-check guard. This line
 # runs exactly once per Streamlit script run (it is in the linear flow, not
 # inside any loop/function), so auto_sync_checker fires once even for the

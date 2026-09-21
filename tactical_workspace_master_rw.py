@@ -2058,11 +2058,17 @@ div[data-baseweb="popover"]:has([role="listbox"]):not(:has([role="option"])) {{
 """, unsafe_allow_html=True)
 
 # --- 1. BACKGROUND THREAD WORKER ---
-def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_label="Revoked", ic_name=""):
+def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_label="Revoked", ic_name="", wo=None):
     """Silent worker to update Google Sheets AND scrub Onfleet — never blocks the UI.
     Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
     so the Ready-card history banner can recover Revoked/Re-Routed events after a
-    session reset (was previously session-only via st.session_state['_actions_*'])."""
+    session reset (was previously session-only via st.session_state['_actions_*']).
+
+    `wo` (Sep 2026, Phase 2 migration) is the work order this cluster was last
+    dispatched under, captured on the main thread by the caller (this function
+    runs off-thread with no ScriptRunContext, so it can't read st.session_state
+    itself). When present, it's used for a best-effort Postgres status mirror
+    -- see the dual-write block below."""
     # Security audit H17 / M7 - the archive POST is retried on a genuine
     # transient failure (connection error / non-200) so a network hiccup or a
     # process recycle mid-flight does not silently lose the archive write
@@ -2132,6 +2138,18 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
             pass
         _log_err("background_sheet_move/archive",
                  f"archive write FAILED after 3 attempts for cluster {cluster_hash}")
+    # --- Phase 2 migration: best-effort Postgres status mirror ---
+    # archive_route() is a plain `UPDATE routes SET status='archived' ...` --
+    # no Onfleet/Monday side effects, so it's safe to call unconditionally
+    # here (unlike markFNAssigned/processDecision/saveToFieldNation, which do
+    # trigger real side effects and are intentionally NOT mirrored this way).
+    # No-ops harmlessly if this wo was never dual-written to Postgres (e.g.
+    # dispatched before this code existed, or DB_ENGINE only came up after).
+    if DB_ENGINE is not None and wo:
+        try:
+            _da.archive_route(DB_ENGINE, wo, {"action_label": action_label, "ic_name": ic_name})
+        except Exception as _dw_e:
+            _log_err("pg_dual_write_archive_route", _dw_e)
     # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
     # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
     if task_ids:
@@ -2311,6 +2329,10 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # archive write.
     import copy as _copy_h7
     _cluster_snapshot = _copy_h7.deepcopy(cluster_data) if cluster_data is not None else None
+    # Phase 2 migration — capture the WO on the main thread (st.session_state
+    # isn't safe to read from the background thread below) so
+    # background_sheet_move can best-effort mirror this archive into Postgres.
+    _wo_for_pg_mirror = st.session_state.get(f"wo_{cluster_hash}")
     def _bg_reconcile():
         # 🌟 PARALLEL RECONCILE (May 2026 revoke-speedup): the Onfleet PUTs and
         # the GAS archiveRoute POST have no dependency on each other — running
@@ -2339,7 +2361,7 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
 
         def _do_sheet_archive():
             try:
-                background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name)
+                background_sheet_move(cluster_hash, _cluster_snapshot, None, action_label, ic_name, wo=_wo_for_pg_mirror)
                 # 🌟 Sep 2026 (Nick: "reroute isn't pulling back into dispatch") —
                 # bust the 5-minute sheet cache right after the archive write
                 # lands. Without this, the post-revoke 12s auto-resync (or even
@@ -2713,8 +2735,18 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
             
             # 2. 🧠 INSTANT UI OVERRIDE (Only runs if Google Sheets confirmed the move!)
             st.session_state[f"route_state_{cluster_hash}"] = "finalized"
-            st.session_state[f"reverted_{cluster_hash}"] = True 
-            
+            st.session_state[f"reverted_{cluster_hash}"] = True
+
+            # --- Phase 2 migration: best-effort Postgres status mirror ---
+            # finalize_route() is a plain status UPDATE, no Onfleet/Monday
+            # side effects -- safe to mirror directly, unlike the FN/decision
+            # actions. No-ops harmlessly if this wo isn't in Postgres yet.
+            if DB_ENGINE is not None:
+                try:
+                    _da.finalize_route(DB_ENGINE, st.session_state.get(f"wo_{cluster_hash}", ""))
+                except Exception as _dw_e:
+                    _log_err("pg_dual_write_finalize_route", _dw_e)
+
             st.toast("🏁 Route Finalized! Moving to Finalized tab...")
             st.rerun(scope="app")
         
@@ -6794,6 +6826,22 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"due_{cluster_hash}"] = str(due)
                 st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
                 st.session_state[f"reverted_{cluster_hash}"] = False
+                # --- Phase 2 migration: best-effort Postgres dual-write ---
+                # Mirrors this successful GAS saveRoute into Postgres so the
+                # portal (migration/portal_api.py) and any future read-side
+                # work have real, live route data instead of only the
+                # one-time historical import. Purely additive: save_route()
+                # only INSERTs (ON CONFLICT (wo) DO NOTHING) and appends a
+                # route_events row -- no Onfleet/Monday side effects, and any
+                # failure here is swallowed and logged, never surfaced to the
+                # dispatcher or allowed to affect the GAS path above, which
+                # remains the sole source of truth until migration/README.md
+                # Step 8 (the real cutover) is done and verified.
+                if DB_ENGINE is not None:
+                    try:
+                        _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
+                    except Exception as _dw_e:
+                        _log_err("pg_dual_write_save_route", _dw_e)
                 # Sep 2026 — Nick: "after the email is sent the refresh to
                 # reflect the new change takes at least 2 minutes." Root
                 # cause: this card doesn't need fresh sheet data to show up

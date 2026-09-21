@@ -309,6 +309,22 @@ def remove_field_nation(engine: sa.Engine, work_order: str) -> None:
     with engine.begin() as conn:
         conn.execute(sa.text("DELETE FROM field_nation_orders WHERE work_order = :wo"), {"wo": work_order})
 
+def mirror_remove_field_nation_by_cluster_hash(engine: sa.Engine, cluster_hash: str) -> dict[str, Any]:
+    """Dual-write mirror for removeFieldNation (2026-09-21), for
+    background_fn_revoke()'s call site in tactical_workspace_master_rw.py,
+    which only has cluster_hash in scope. removeFieldNation has no
+    Onfleet/Monday side effect in GAS either -- remove_field_nation() never
+    called fn_side_effects -- so there's no mirror_only distinction to make
+    here, just the same cluster_hash -> work_order resolution the other FN
+    mirrors use. No-ops harmlessly (returns a `skipped` result, never
+    raises) if no matching row exists yet."""
+    with engine.connect() as conn:
+        work_order = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+    if not work_order:
+        return {"success": False, "skipped": f"no field_nation_orders row found for cluster_hash={cluster_hash!r}"}
+    remove_field_nation(engine, work_order)
+    return {"success": True, "work_order": work_order}
+
 def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
     """Replaces `markFNPosted`."""
     with engine.begin() as conn:
@@ -316,6 +332,20 @@ def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
             sa.text("UPDATE field_nation_orders SET status = 'posted', updated_at = now() WHERE work_order = :wo"),
             {"wo": work_order},
         )
+
+def mirror_mark_fn_posted_by_cluster_hash(engine: sa.Engine, cluster_hash: str) -> dict[str, Any]:
+    """Dual-write mirror for markFNPosted (2026-09-21). Same cluster_hash
+    resolution as the other FN mirrors. GAS's markFNPosted accepts a
+    comma-separated list of cluster_hashes for the app's two bulk call
+    sites (bulk-pod, bulk-digital) -- this function takes exactly one, so
+    callers loop and call it once per hash rather than passing a CSV string
+    here. No-ops harmlessly if no matching row exists yet."""
+    with engine.connect() as conn:
+        work_order = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+    if not work_order:
+        return {"success": False, "skipped": f"no field_nation_orders row found for cluster_hash={cluster_hash!r}"}
+    mark_fn_posted(engine, work_order)
+    return {"success": True, "work_order": work_order}
 
 def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None, *, mirror_only: bool = False) -> dict[str, Any]:
     """Replaces `markFNAssigned`.
@@ -486,6 +516,17 @@ def set_fn_provider(engine: sa.Engine, work_order: str, provider: str) -> None:
             {"wo": work_order, "provider": provider, "payload": json.dumps(payload)},
         )
 
+def mirror_set_fn_provider_by_cluster_hash(engine: sa.Engine, cluster_hash: str, provider: str) -> dict[str, Any]:
+    """Dual-write mirror for setFnProvider (2026-09-21), for
+    fn_utils.save_fn_provider()'s call site, which only has cluster_hash in
+    scope. No-ops harmlessly if no matching row exists yet."""
+    with engine.connect() as conn:
+        work_order = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+    if not work_order:
+        return {"success": False, "skipped": f"no field_nation_orders row found for cluster_hash={cluster_hash!r}"}
+    set_fn_provider(engine, work_order, provider)
+    return {"success": True, "work_order": work_order}
+
 def bulk_set_fn_providers_by_address(engine: sa.Engine, address_to_provider: dict[str, str]) -> int:
     """Replaces `bulkSetFnProvidersByAddress` (fn_utils.bulk_save_fn_providers_by_address).
 
@@ -515,6 +556,18 @@ def set_fn_route_plan_id(engine: sa.Engine, work_order: str, route_plan_id: str)
             sa.text("UPDATE field_nation_orders SET route_plan_id = :rpid, updated_at = now() WHERE work_order = :wo"),
             {"wo": work_order, "rpid": route_plan_id},
         )
+
+def mirror_set_fn_route_plan_id_by_cluster_hash(engine: sa.Engine, cluster_hash: str, route_plan_id: str) -> dict[str, Any]:
+    """Dual-write mirror for setFnRoutePlanId (2026-09-21), for
+    assign_tasks_to_fn_team()'s call site in tactical_workspace_master_rw.py,
+    which only has cluster_hash in scope. No-ops harmlessly if no matching
+    row exists yet."""
+    with engine.connect() as conn:
+        work_order = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+    if not work_order:
+        return {"success": False, "skipped": f"no field_nation_orders row found for cluster_hash={cluster_hash!r}"}
+    set_fn_route_plan_id(engine, work_order, route_plan_id)
+    return {"success": True, "work_order": work_order}
 
 # ---------------------------------------------------------------------------
 # Bundle maps (replaces GAS Script Properties saveBundleMap / loadBundleMap)

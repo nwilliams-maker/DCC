@@ -679,3 +679,111 @@ Postgres best-effort, alongside the still-authoritative GAS/Sheets path.
 Only `bulkSetFnProvidersByAddress` (driven externally, not from this app)
 and the Onfleet/Monday side effects inside `saveToFieldNation`/
 `markFNAssigned` remain unmirrored.
+
+### Step 8 (2026-09-22): read-side reconstruction built — NOT wired to the live app
+
+The next piece flagged back in "Step 4/5, in practice" (top of this doc) as
+needing to be "built and clicked through against a real staging database,
+not written blind": `_cached_fetch_sent_records_from_sheet()`
+(`tactical_workspace_master_rw.py`, ~380 lines) — the function every
+dispatcher's Ready/Sent/Accepted/Field Nation view is built from. Now that
+Step 4 and Step 7 have this app dual-writing `routes` and
+`field_nation_orders` in the background, there's finally real Postgres data
+to reconstruct that view from and test against.
+
+**Built:** `data_access.get_sent_records_from_db(engine, pod_configs,
+state_map)` — same four-tuple return shape as the sheet function
+(`sent_dict, ghost_routes, archived_wos, history_db`), so a future swap of
+the actual call sites is a substitution, not a rewrite of the surrounding
+UI code (same design goal this whole module states in its top docstring).
+`pod_configs` / `state_map` are passed in (the app's `POD_CONFIGS` /
+`STATE_MAP` constants) rather than imported, so `data_access.py` stays free
+of app/UI config and this new function is testable standalone like
+everything else in this module.
+
+**Deliberately a parallel implementation, not a refactor.** The sheet-CSV
+loop's ~170-line per-row derivation logic (pod/state guessing, digital-ghost
+detection, kiosk-count fallback, FN-provider/FN-posted hydration, ghost hash
+construction) was duplicated into a new `_ingest_sent_record()` helper
+rather than extracted out of `_cached_fetch_sent_records_from_sheet()` for
+both paths to share. Extracting it would touch code that runs live in
+production on every cache miss today — this migration has been careful to
+keep every Phase 2 change purely additive (new function, new best-effort
+dual-write) and never a modification of anything the dispatcher's current
+view depends on, and there was no reason to break that pattern here. If the
+two paths are ever proven equivalent on staging and the sheet path is
+retired, unifying them then removes the duplication with only one live path
+left to risk breaking.
+
+**Three known gaps found while building this** (all documented in
+`data_access.py`'s "Read-side reconstruction" section docstring, right
+above `_normalize_ts`):
+
+1. **Ghost-only revoke/re-route/ghost-archive history cannot be
+   reconstructed from Postgres.** `archive_route()`'s dual-write does
+   `UPDATE routes ... WHERE wo = :wo` and logs the event via `INSERT INTO
+   route_events SELECT id, ... FROM routes WHERE wo = :wo` — for a "Ghost
+   Archived" cluster that was never `saveRoute()`'d (a pure
+   OnFleet-reconstructed ghost with no `routes` row), that `SELECT` matches
+   zero rows, so *nothing* lands in `route_events`. GAS's Archive tab has no
+   such requirement — it can archive a ghost regardless of whether it was
+   ever "saved" — so the sheet path's `history_db` has entries this
+   function structurally cannot produce. This is a write-side gap (or a
+   deliberate design tradeoff — `route_events.route_id` is a real foreign
+   key, on purpose, so every event is traceable to a route), not something
+   fixable from the read side. Confirmed with a test
+   (`migration/tests/test_get_sent_records_from_db.py`) rather than left as
+   a theoretical concern.
+2. **FN order contractor/IC name is assumed to be `payload["icn"]`.**
+   `field_nation_orders` has no `contractor_name` column of its own (every
+   row's real "contractor" is the FN vendor, not an IC — see the table's
+   comment in `schema.sql`), and this app's own `fn_payload` always sets
+   `icn: "Field Nation"` when posting. What the *actual* GAS sheet's
+   "Contractor" column holds for these rows isn't visible from this repo
+   (`Code.gs` lives outside it), so this is an assumption, not a confirmed
+   match — worth checking against a real FN sheet row before trusting it
+   for anything user-facing.
+3. **A real bug this surfaced (fixed here, not just documented):**
+   `mark_fn_assigned()` was building the new `routes` payload (`
+   assigned_to_fn`, `fn_assigned_ts`, `wo`) without carrying `fn_provider`
+   forward onto it — even though `set_fn_provider()` already stamps
+   `fn_provider` onto the *`field_nation_orders`* row's payload
+   specifically so `mark_fn_assigned()` can resolve it (see that function's
+   own docstring). The resolved `provider` variable was being used to build
+   the new WO string but never written back into the payload that actually
+   lands on the promoted `routes` row, so any Postgres-only read of an
+   FN-assigned route would show a bare "FN" instead of "FN: <name>"
+   regardless of provider. Fixed by stamping `payload["fn_provider"] =
+   provider` alongside the other new fields — a pure data-completeness
+   addition to a dict already being constructed and saved, doesn't change
+   any existing side effect. Covered by both
+   `test_process_decision_and_fn_flow.py` (existing) and the new
+   `test_get_sent_records_from_db.py`.
+
+**Verified with `migration/tests/test_get_sent_records_from_db.py`**
+against real local Postgres, seeded through the same write-path functions
+the live app already dual-writes through (not hand-crafted rows): sent /
+accepted / declined / finalized routes each land (or correctly don't land,
+for declined) in the right pod's `ghost_routes`; an FN-posted order shows up
+as `status_label="field_nation"` with `fn_posted_ts`/`fn_provider`
+hydration; an FN-assigned order correctly disappears from the
+`field_nation` set and reappears as an `accepted` route with its provider
+intact (gap 3 above, before the fix, this assertion failed); Revoked /
+Re-Routed / Ghost Archived archive events produce the right `history_db`
+status strings and populate `archived_wos`; archived routes never leak into
+`ghost_routes` (matches the sheet path, which only reads its Archive tab
+for `archived_wos`/history, never for the live view); a jobOnly trigger
+word routes to `Global_Digital` regardless of the address's actual state;
+an unrecognized state produces no ghost entry anywhere but still populates
+`sent_dict`/`history_db`; and `cutoff_date` filtering excludes routes
+created before it. The gap-1 no-op is explicitly asserted too, not just
+described in a comment.
+
+**Not done, on purpose:** nothing in `tactical_workspace_master_rw.py` calls
+this yet. Swapping `fetch_sent_records_from_sheet()`'s call sites over is a
+separate, later decision — the same "no live cutover without a supervised
+test" policy that already governs every write-side call site in this
+migration (`saveToFieldNation`/`markFNAssigned`'s real OnFleet/Monday side
+effects, `processDecision`'s OnFleet auto-assign). This function existing
+and being tested against real local data is what makes that eventual
+staging comparison possible — it isn't the comparison itself.

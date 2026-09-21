@@ -2196,6 +2196,12 @@ def background_fn_revoke(cluster_hash):
         }, timeout=15)
     except Exception as e:
         _log_err("background_fn_revoke", e)
+    # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+    if DB_ENGINE is not None:
+        try:
+            _da.mirror_remove_field_nation_by_cluster_hash(DB_ENGINE, cluster_hash)
+        except Exception as _dw_e:
+            _log_err("pg_dual_write_remove_field_nation", _dw_e)
 
 def _onfleet_get_state(tid, auth_header):
     """GET an Onfleet task and return (tid, is_completed). Defaults to NOT completed
@@ -2874,6 +2880,12 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
                             )
                         except Exception as _rpid_err:
                             _log_err("assign_tasks_to_fn_team/setFnRoutePlanId", _rpid_err)
+                        # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+                        if DB_ENGINE is not None:
+                            try:
+                                _da.mirror_set_fn_route_plan_id_by_cluster_hash(DB_ENGINE, cluster_hash, _rid)
+                            except Exception as _dw_e:
+                                _log_err("pg_dual_write_set_fn_route_plan_id", _dw_e)
                 else:
                     _log_err("assign_tasks_to_fn_team/route_plan",
                              f"HTTP {_rp.status_code}: {_rp.text[:300]}")
@@ -7243,6 +7255,12 @@ text-decoration:none;">📨 Default Mail</a>
                         ).start()
                     except Exception as _fpe:
                         _log_err("markFNPosted/per-route", _fpe)
+                    # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+                    if DB_ENGINE is not None:
+                        try:
+                            _da.mirror_mark_fn_posted_by_cluster_hash(DB_ENGINE, cluster_hash)
+                        except Exception as _dw_e:
+                            _log_err("pg_dual_write_mark_fn_posted", _dw_e)
                     st.toast("📤 Marked as Posted to Field Nation.")
                     st.rerun()
         with _fn_act_c2:
@@ -9566,6 +9584,13 @@ def run_pod_tab(pod_name):
                                 ).start()
                             except Exception as _fpe:
                                 _log_err("markFNPosted/pod", _fpe)
+                            # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+                            if DB_ENGINE is not None:
+                                for _pmh in _sel_pending:
+                                    try:
+                                        _da.mirror_mark_fn_posted_by_cluster_hash(DB_ENGINE, _pmh)
+                                    except Exception as _dw_e:
+                                        _log_err(f"pg_dual_write_mark_fn_posted/{pod_name}", _dw_e)
                             st.session_state[_fn_select_reset_key] = True
                             st.toast(f"📤 Marked {len(_sel_pending)} pending route(s) as Posted to FN.")
                             st.rerun()
@@ -9725,7 +9750,7 @@ def run_pod_tab(pod_name):
                                 _val = (st.session_state.get(_key, '') or '').strip()
                                 _dict = st.session_state.setdefault('_fn_provider', {})
                                 _dict[_h] = _val
-                                save_fn_provider(GAS_WEB_APP_URL, _h, _val, st.session_state)
+                                save_fn_provider(GAS_WEB_APP_URL, _h, _val, st.session_state, db_engine=DB_ENGINE)
                             st.text_input(
                                 "🌐 Assigned Provider (Field Nation)",
                                 value=_fnprov_curr,
@@ -11156,6 +11181,13 @@ with tabs[6]:
                                     ).start()
                                 except Exception as _fpe:
                                     _log_err("markFNPosted/digital", _fpe)
+                                # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+                                if DB_ENGINE is not None:
+                                    for _pmh in _fn_selected:
+                                        try:
+                                            _da.mirror_mark_fn_posted_by_cluster_hash(DB_ENGINE, _pmh)
+                                        except Exception as _dw_e:
+                                            _log_err("pg_dual_write_mark_fn_posted/digital", _dw_e)
                                 st.toast(f"📤 Marked {len(_newly_posting)} digital route(s) as Posted to Field Nation.")
                                 st.rerun()
                         else:

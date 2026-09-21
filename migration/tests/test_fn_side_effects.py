@@ -163,27 +163,22 @@ os.environ.pop("MONDAY_GROUP_FILTER_ALLOW_WILDCARD", None)
 print("\n=== sync_monday_for_stops: skipped cleanly when MONDAY_API_TOKEN unset ===")
 os.environ.pop("MONDAY_API_TOKEN", None)
 result = fx.sync_monday_for_stops("100 Home St, Chicago, IL|200 Main St, Chicago, IL|100 Home St, Chicago, IL", "WO-1", "Acme Installs")
-assert result["skipped"] == "MONDAY_API_TOKEN not set"
+assert result["skipped"] == "Monday.com sync disabled 2026-09-21 (Terraboost no longer uses Monday)"
 print("OK:", result)
 
-print("\n=== sync_monday_for_stops: matches an item in an allowed group, skips a disallowed one ===")
+print("\n=== sync_monday_for_stops: 2026-09-21 hard kill switch -- stays skipped even WITH a valid token ===")
+# Terraboost doesn't use Monday.com anymore (Nick, 2026-09-21). This is now a
+# regression guard: sync_monday_for_stops must stay disabled unconditionally,
+# not just "when MONDAY_API_TOKEN happens to be unset" -- a token getting set
+# again by accident (e.g. copied into Railway from an old .env) must NOT
+# silently revive real Monday.com writes. No mocked HTTP here on purpose --
+# if this ever calls out to requests.post, the missing mock will raise and
+# fail the test instead of hitting the real Monday API.
 os.environ["MONDAY_API_TOKEN"] = "test-token"
-with patch("fn_side_effects.requests.post") as mock_post:
-    def _monday_side_effect(url, headers=None, json=None, timeout=None):
-        query = json.get("query", "")
-        if "items_page" in query:
-            return _resp(200, {"data": {"boards": [{"items_page": {"items": [
-                {"id": "item-allowed", "group": {"id": fx._MONDAY_DEFAULT_GROUPS[0]}, "column_values": [{"id": "text63", "text": "200 Main St"}]},
-                {"id": "item-blocked", "group": {"id": "group_HOLD"}, "column_values": [{"id": "text63", "text": "200 Main St"}]},
-            ]}}]}})
-        # mutation
-        return _resp(200, {"data": {"change_simple_column_value": {"id": "ok"}}})
-
-    mock_post.side_effect = _monday_side_effect
-    result = fx.sync_monday_for_stops("100 Home St, Chicago, IL|200 Main St, Chicago, IL|100 Home St, Chicago, IL", "WO-1", "Acme Installs")
-    assert result["matches"] == 1, result
-    assert result["instUpdates"] == 1 and result["woUpdates"] == 1
-    print("OK:", result)
+result = fx.sync_monday_for_stops("100 Home St, Chicago, IL|200 Main St, Chicago, IL|100 Home St, Chicago, IL", "WO-1", "Acme Installs")
+assert result["skipped"] == "Monday.com sync disabled 2026-09-21 (Terraboost no longer uses Monday)", result
+assert result["matches"] == 0 and result["instUpdates"] == 0 and result["woUpdates"] == 0
+print("OK -- still disabled with a token set:", result)
 os.environ.pop("MONDAY_API_TOKEN", None)
 
 print("\n=== _monday_mutation_ok: HTTP 200 with a GraphQL errors array is NOT ok ===")

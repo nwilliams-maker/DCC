@@ -251,14 +251,26 @@ def get_changes_since(engine: sa.Engine, since_version: int) -> list[dict[str, A
 # Field Nation (replaces the Field Nation tab and its GAS actions)
 # ---------------------------------------------------------------------------
 
-def save_to_field_nation(engine: sa.Engine, work_order: str, payload: dict[str, Any]) -> dict[str, Any]:
+def save_to_field_nation(engine: sa.Engine, work_order: str, payload: dict[str, Any], *, mirror_only: bool = False) -> dict[str, Any]:
     """Replaces `saveToFieldNation` (fn_utils.save_fn_to_sheet). Also pushes
     the Monday.com placeholder (installer="Field Nation") at each stop
     address, exactly like the live GAS action -- see
     fn_side_effects.push_fn_placeholder_to_monday. The DB write always
     happens even if the Monday push fails or is skipped (no MONDAY_API_TOKEN
     set); matches GAS's "any failure here CANNOT break the FN sheet save
-    above" comment."""
+    above" comment.
+
+    mirror_only=True (2026-09-21, dual-write path): skips the
+    fn_side_effects call entirely -- used when GAS has already performed the
+    real saveToFieldNation live (Monday push and all) and this call only
+    needs to mirror the resulting row into Postgres. This is the
+    "mirror-only write path" migration/README.md flagged as missing before
+    the Field Nation family could safely dual-write: without it, calling
+    this function alongside GAS would have re-run push_fn_placeholder_to_monday
+    a second time for the same order. mirror_save_to_field_nation() below is
+    the intended entry point for that case -- don't pass mirror_only=True
+    directly unless you have a specific reason to call save_to_field_nation()
+    itself this way."""
     with engine.begin() as conn:
         conn.execute(
             sa.text(
@@ -271,11 +283,26 @@ def save_to_field_nation(engine: sa.Engine, work_order: str, payload: dict[str, 
             {"work_order": work_order, "payload": json.dumps(payload)},
         )
 
+    if mirror_only:
+        return {"success": True, "monday": {"skipped": "mirror-only write -- GAS already performed the real Monday push live"}}
+
     try:
         monday_result = _fx.push_fn_placeholder_to_monday(payload, work_order)
     except Exception as exc:  # noqa: BLE001
         monday_result = {"skipped": f"exception: {exc}"}
     return {"success": True, "monday": monday_result}
+
+def mirror_save_to_field_nation(engine: sa.Engine, work_order: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Dual-write mirror for saveToFieldNation (2026-09-21): writes the
+    field_nation_orders row only, never calls into fn_side_effects -- GAS
+    already pushed the real Monday.com placeholder live (or would have, if
+    Monday.com weren't now retired -- see fn_side_effects.sync_monday_for_stops).
+    Safe to call unconditionally right after (or alongside) the existing
+    fn_utils.save_fn_to_sheet() GAS POST -- same best-effort,
+    exception-swallowed pattern already proven for save_route/archive_route/
+    finalize_route. No-ops harmlessly (ON CONFLICT DO NOTHING) on a retried
+    POST for the same work_order."""
+    return save_to_field_nation(engine, work_order, payload, mirror_only=True)
 
 def remove_field_nation(engine: sa.Engine, work_order: str) -> None:
     """Replaces `removeFieldNation`."""
@@ -290,7 +317,7 @@ def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
             {"wo": work_order},
         )
 
-def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None) -> dict[str, Any]:
+def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None, *, mirror_only: bool = False) -> dict[str, Any]:
     """Replaces `markFNAssigned`.
 
     GAS's markFNAssigned does more than flip a status: it MOVES the Field
@@ -309,7 +336,19 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
 
     Also runs the OnFleet routePlan rename + per-task metadata/worker re-PUT
     and the Monday.com address-matched sync (fn_side_effects.py), exactly
-    like the live GAS action -- see that module's docstring for the source."""
+    like the live GAS action -- see that module's docstring for the source.
+
+    mirror_only=True (2026-09-21, dual-write path): skips
+    fn_side_effects.apply_fn_assigned_side_effects() entirely -- no OnFleet
+    routePlan rename/re-PUT, no Monday sync -- because GAS already performed
+    those live. Everything else (the new_wo computation, the
+    field_nation_orders update, the routes insert/upsert, the event log)
+    still runs exactly as it would live, so the Postgres row ends up
+    identical to what the non-mirror call would produce, just without
+    re-triggering the side effects a second time. mirror_mark_fn_assigned()
+    / mirror_mark_fn_assigned_by_cluster_hash() below are the intended entry
+    points -- don't pass mirror_only=True directly unless you have a
+    specific reason to call mark_fn_assigned() itself this way."""
     with engine.begin() as conn:
         row = conn.execute(
             sa.text("SELECT payload, provider, route_plan_id FROM field_nation_orders WHERE work_order = :wo"),
@@ -335,10 +374,11 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
         payload["wo"] = new_wo
 
         side_effects: dict[str, Any] = {"partial": False, "partialReason": "", "routePlanId": route_plan_id or row["route_plan_id"]}
-        try:
-            side_effects = _fx.apply_fn_assigned_side_effects(payload, new_wo, provider, route_plan_id or row["route_plan_id"])
-        except Exception as exc:  # noqa: BLE001 -- sheet/row move already committed logically below; never block on this
-            side_effects = {"partial": True, "partialReason": f"side-effect exception: {exc}", "routePlanId": route_plan_id or row["route_plan_id"]}
+        if not mirror_only:
+            try:
+                side_effects = _fx.apply_fn_assigned_side_effects(payload, new_wo, provider, route_plan_id or row["route_plan_id"])
+            except Exception as exc:  # noqa: BLE001 -- sheet/row move already committed logically below; never block on this
+                side_effects = {"partial": True, "partialReason": f"side-effect exception: {exc}", "routePlanId": route_plan_id or row["route_plan_id"]}
 
         resolved_route_plan_id = side_effects.get("routePlanId") or route_plan_id or row["route_plan_id"]
 
@@ -374,6 +414,50 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
         _log_event(conn, new_wo, "markFNAssigned", {"work_order": work_order, "provider": provider, "side_effects": side_effects})
 
     return {"success": True, "wo": new_wo, "partial": side_effects.get("partial", False), "partialReason": side_effects.get("partialReason", "")}
+
+def mirror_mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None) -> dict[str, Any]:
+    """Dual-write mirror for markFNAssigned (2026-09-21), for a caller that
+    already knows the field_nation_orders `work_order` (the WO
+    mirror_save_to_field_nation wrote it under). Today's live call sites in
+    tactical_workspace_master_rw.py only have `cluster_hash` in scope --
+    use mirror_mark_fn_assigned_by_cluster_hash() for those."""
+    return mark_fn_assigned(engine, work_order, route_plan_id, mirror_only=True)
+
+def _fn_work_order_for_cluster_hash(conn, cluster_hash: str) -> str | None:
+    """Looks up the field_nation_orders.work_order whose payload was stamped
+    with this cluster_hash by mirror_save_to_field_nation() (fn_payload
+    always includes "cluster_hash" -- see the app's FN posting call site).
+    Postgres's ->> operator matches Sheet-based GAS's own by-cluster_hash
+    lookup for the same row. Most recent match wins on the rare chance the
+    same cluster_hash was posted more than once (shouldn't happen -- WOs are
+    unique -- but this is a read-only lookup, not a write, so it's cheap
+    insurance rather than something worth hard-failing on)."""
+    row = conn.execute(
+        sa.text(
+            "SELECT work_order FROM field_nation_orders WHERE payload ->> 'cluster_hash' = :ch "
+            "ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"ch": cluster_hash},
+    ).fetchone()
+    return row[0] if row else None
+
+def mirror_mark_fn_assigned_by_cluster_hash(engine: sa.Engine, cluster_hash: str, route_plan_id: str | None = None) -> dict[str, Any]:
+    """Dual-write entry point for the live app's three markFNAssigned call
+    sites (single-route, bulk-pod, bulk-digital in
+    tactical_workspace_master_rw.py), which only have `cluster_hash` in
+    scope -- the WO that mirror_save_to_field_nation() wrote the
+    field_nation_orders row under isn't otherwise available to them. Looks
+    that WO up (see _fn_work_order_for_cluster_hash), then delegates to
+    mirror_mark_fn_assigned(). No-ops harmlessly -- returns a `skipped`
+    result, never raises -- if no matching posted FN order is in Postgres
+    yet (e.g. this route was posted to FN before the saveToFieldNation
+    mirror existed, so there's nothing here for markFNAssigned to mirror
+    onto)."""
+    with engine.connect() as conn:
+        work_order = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+    if not work_order:
+        return {"success": False, "skipped": f"no field_nation_orders row found for cluster_hash={cluster_hash!r}"}
+    return mirror_mark_fn_assigned(engine, work_order, route_plan_id)
 
 def set_fn_provider(engine: sa.Engine, work_order: str, provider: str) -> None:
     """Replaces `setFnProvider` (fn_utils.save_fn_provider). GAS stamps

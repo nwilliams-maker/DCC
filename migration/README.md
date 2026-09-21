@@ -531,3 +531,78 @@ whether that's also stale/wanted gone, especially given the board-corruption
 incident the `MONDAY_GROUP_FILTER` guard exists because of (plausibly the
 reason Monday was dropped in the first place, though that connection hasn't
 been confirmed).
+
+### Step 7, the FN mirror-only write path (2026-09-21): the whole Field Nation family can now dual-write
+
+The Step 4 dual-write (above) deliberately left the entire Field Nation
+family unwired, because `save_to_field_nation()` and `mark_fn_assigned()`
+call into `fn_side_effects.py` for real Onfleet/Monday side effects that GAS
+already performs live — dual-writing them as-is would have duplicated those
+side effects. That required "a separate mirror-only write path that updates
+the DB row without re-triggering `_fx.*`", which didn't exist yet. It does
+now.
+
+**What changed in `migration/data_access.py`:** `save_to_field_nation()` and
+`mark_fn_assigned()` both gained a `mirror_only: bool = False` keyword-only
+flag. When `True`, they run every DB step exactly as before (the same
+`new_wo` computation, the same `field_nation_orders`/`routes` writes, the
+same event log) but skip the `fn_side_effects` call entirely — no Onfleet
+routePlan rename/re-PUT, no Monday sync. Three new wrapper functions are the
+intended entry points, so nobody has to remember to pass the flag correctly:
+
+- `mirror_save_to_field_nation(engine, work_order, payload)`
+- `mirror_mark_fn_assigned(engine, work_order, route_plan_id=None)` — for a
+  caller that already has the FN `work_order`.
+- `mirror_mark_fn_assigned_by_cluster_hash(engine, cluster_hash, route_plan_id=None)` —
+  for the live app's actual call sites, which only have `cluster_hash` in
+  scope. Looks up the `work_order` via `field_nation_orders.payload ->>
+  'cluster_hash'` (stamped there by `mirror_save_to_field_nation`'s own
+  payload), then delegates. No-ops harmlessly — returns `{"success": False,
+  "skipped": ...}`, never raises — if no matching row exists yet (e.g. a
+  route posted to FN before this mirror existed).
+
+All of this is covered by a new test file, `migration/tests/test_fn_mirror_writes.py`,
+run against a real local Postgres: it proves via `unittest.mock.patch` +
+call-count assertions (not just "didn't raise" — a bare `MagicMock` never
+raises) that the mirror path never calls into `fn_side_effects`, that the
+non-mirror path still does (a contrast check, so `mirror_only` can't
+silently become the accidental default), and that the DB end state
+(`field_nation_orders.status`, the new `routes` row, its `wo`/`status`/
+`contractor_name`) matches what the live, non-mirror path produces.
+
+**What changed in `fn_utils.py` and `tactical_workspace_master_rw.py` (the
+actual wiring):**
+
+- `fn_utils.save_fn_to_sheet()` (the `saveToFieldNation` call site) gained an
+  optional `db_engine` parameter. When set, its background thread
+  best-effort mirrors the save via `mirror_save_to_field_nation()` right
+  after the real GAS POST, same exception-swallowed pattern as the Step 4
+  mirrors. Its one call site (`tactical_workspace_master_rw.py`'s FN
+  checkbox handler) now passes `db_engine=DB_ENGINE`.
+- All three `markFNAssigned` call sites (single-route, bulk-pod,
+  bulk-digital) now call `_da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE,
+  cluster_hash)` best-effort, right after GAS confirms success, guarded by
+  `if DB_ENGINE is not None` and wrapped in try/except like every other
+  dual-write in this file. Wired at all three sites rather than just one —
+  leaving two of three unmirrored would make the Postgres mirror
+  inconsistent for the same action depending on which UI button fired it,
+  which is worse than not mirroring it at all.
+
+Verified locally end-to-end against a real Postgres (not just the unit
+tests above): `fn_utils.save_fn_to_sheet(..., db_engine=engine)` with GAS's
+`requests.post` mocked out actually lands a `field_nation_orders` row in the
+background thread, and `db_engine=None` (today's default — `DATABASE_URL`
+isn't set in Railway yet) still fires the real GAS POST with zero behavior
+change, confirming this is exactly as dormant-by-default as every other
+piece of this migration until `DATABASE_URL` is actually set.
+
+**Still not wired, and deliberately so:** `saveToFieldNation`'s Monday push
+and `markFNAssigned`'s Onfleet/Monday side effects are *never* mirrored —
+only their DB writes are. `processDecision` is still untouched (see Step 4
+above — it's not called from this file at all). `setFnProvider`,
+`removeFieldNation`, `markFNPosted`, `bulkSetFnProvidersByAddress`, and
+`setFnRoutePlanId` are technically safe to dual-write now (they never called
+`fn_side_effects` even in their non-mirror form, and the "rows wouldn't
+exist yet" blocker from Step 4 is gone now that `saveToFieldNation` is
+mirrored) — but wiring them wasn't done in this pass and is worth a
+follow-up, not an assumption that it's already covered.

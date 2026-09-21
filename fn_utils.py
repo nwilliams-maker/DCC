@@ -550,7 +550,7 @@ def generate_combined_fn_upload(clusters: list):
 # survives reload, and travels with the route into Accepted via markFNAssigned.
 # Display: card title reads "🌐 FN: <name>" when set, "🌐 FN" otherwise.
 
-def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None):
+def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None, db_engine=None):
     """Fire-and-forget: writes a single route's Assigned Provider to the FN
     sheet row's JSON payload (action=setFnProvider on the GAS side).
 
@@ -564,6 +564,12 @@ def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None):
             string clears the provider.
         session_state: optional Streamlit session_state for clearing any
             sync-pending flag once the write returns.
+        db_engine: optional Postgres engine (Phase 2 migration, 2026-09-21).
+            When set, best-effort mirrors this write into field_nation_orders
+            via migration.data_access.mirror_set_fn_provider_by_cluster_hash()
+            -- a DB-only write, same best-effort, exception-swallowed pattern
+            as the save_fn_to_sheet mirror. A failure here never affects the
+            real GAS save, session_state cleanup, or the caller.
     """
     cluster_hash = str(cluster_hash or "").strip()
     provider_name = str(provider_name or "").strip()
@@ -587,6 +593,14 @@ def save_fn_provider(gas_url, cluster_hash, provider_name, session_state=None):
         finally:
             if session_state is not None and cluster_hash:
                 session_state.pop(f"_pending_fn_provider_{cluster_hash}", None)
+
+        # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+        if db_engine is not None:
+            try:
+                from migration import data_access as _da
+                _da.mirror_set_fn_provider_by_cluster_hash(db_engine, cluster_hash, provider_name)
+            except Exception as e:
+                print(f"[fn_utils.save_fn_provider] pg_dual_write_fn_provider: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
     threading.Thread(target=_worker, daemon=True).start()
 

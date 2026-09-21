@@ -7005,7 +7005,7 @@ text-decoration:none;">📨 Default Mail</a>
                 } for addr, metrics in stop_metrics.items()]),
             }
 
-            save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state)
+            save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state, db_engine=DB_ENGINE)
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
             # 🌐 Move OnFleet tasks into the Field Nation team in parallel
             # with the sheet write — appears in OnFleet's FN team view.
@@ -7280,6 +7280,18 @@ text-decoration:none;">📨 Default Mail</a>
                             # and dropped any still-live cluster into Ready. Clear it so
                             # the route lands in Accepted on this rerun.
                             st.session_state[f"reverted_{cluster_hash}"] = False
+                            # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+                            # mirror_mark_fn_assigned_by_cluster_hash never calls
+                            # fn_side_effects (GAS already ran the real Onfleet
+                            # rename/re-PUT above) -- no-ops harmlessly if this
+                            # cluster_hash has no Postgres field_nation_orders row
+                            # yet (e.g. posted to FN before the saveToFieldNation
+                            # mirror existed).
+                            if DB_ENGINE is not None:
+                                try:
+                                    _da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE, cluster_hash)
+                                except Exception as _dw_e:
+                                    _log_err("pg_dual_write_mark_fn_assigned", _dw_e)
                             # Force the next render to re-pull the sheet so the new Accepted row is visible.
                             fetch_sent_records_from_sheet.clear()
                             st.toast("✅ Assigned to FN Rep — moved to Accepted!")
@@ -9595,6 +9607,12 @@ def run_pod_tab(pod_name):
                                         st.session_state.pop(f"route_state_{_h}", None)
                                         # NOT reverted — see per-route handler (May 23 2026).
                                         st.session_state[f"reverted_{_h}"] = False
+                                        # Phase 2 migration: best-effort Postgres mirror (2026-09-21) — see per-route handler above.
+                                        if DB_ENGINE is not None:
+                                            try:
+                                                _da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE, _h)
+                                            except Exception as _dw_e:
+                                                _log_err(f"pg_dual_write_mark_fn_assigned/{pod_name}", _dw_e)
                                     else:
                                         _fail += 1
                                         _log_err(f"bulk markFNAssigned/{pod_name} hash={_h}", _err)
@@ -11186,6 +11204,12 @@ with tabs[6]:
                                         st.session_state.pop(f"route_state_{_h}", None)
                                         # NOT reverted — see per-route handler (May 23 2026).
                                         st.session_state[f"reverted_{_h}"] = False
+                                        # Phase 2 migration: best-effort Postgres mirror (2026-09-21) — see per-route handler above.
+                                        if DB_ENGINE is not None:
+                                            try:
+                                                _da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE, _h)
+                                            except Exception as _dw_e:
+                                                _log_err("pg_dual_write_mark_fn_assigned/digital", _dw_e)
                                     else:
                                         _fail_d += 1
                                         _log_err(f"bulk markFNAssigned/digital hash={_h}", _err)

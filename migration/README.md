@@ -413,3 +413,121 @@ that's been verified with a live dispatch → live portal-link round trip, the
 same way this mistake was caught. Re-run this exact test (dispatch a real
 route, open its real portal link, confirm it renders and accept/decline
 works) before flipping `webAppUrl` back to `portal-api` a second time.
+
+### Step 4, done as a dual-write (2026-09-20): what's wired and what's deliberately not
+
+Nick asked for the rest of the migration to be built out now. Given the
+scale of what's left (the full read-side rewrite of
+`_cached_fetch_sent_records_from_sheet`, three GAS actions with real
+Onfleet/Monday.com side effects) and the fact that today's Step 6 mistake
+just showed exactly what happens when a piece is wired ahead of what it
+depends on, this was done as a **dual-write**, not the doc's original
+"hard cutover, no dual-write" plan: every write below still goes to GAS/the
+Sheet exactly as before (that's still the only thing any part of the app
+reads from), and a best-effort mirror also lands in Postgres. If the mirror
+write fails or is skipped, nothing about the dispatcher's experience
+changes — it's logged (`_log_err`) and swallowed, same pattern already
+proven safe for the bundle-map dual-path. This directly fixes the root
+cause of the Step 6 incident (Postgres never getting new routes) without
+requiring the full read-side rewrite or the side-effect-duplication risk of
+a true hard cutover.
+
+**Wired (safe — plain DB writes, zero Onfleet/Monday side effects):**
+- `saveRoute` → `data_access.save_route()`, called right after a successful
+  GAS dispatch (same `wo_val`/`payload` already computed locally for the
+  GAS POST — no adaptation needed). Upsert-safe against GAS's own retry
+  loop (`ON CONFLICT (wo) DO NOTHING`), verified against a real local
+  Postgres including the exact duplicate-POST-retry case.
+- `archiveRoute` → `data_access.archive_route()`, called from
+  `background_sheet_move()`'s background thread. The WO is captured on the
+  **main thread** (`st.session_state.get(f"wo_{cluster_hash}")`) before the
+  thread starts and passed in as an argument — the background thread itself
+  still touches nothing but `requests`/`_log_err`, preserving the "no
+  ScriptRunContext dependency" property the existing code comment calls out.
+- `finalizeRoute` → `data_access.finalize_route()`, called synchronously
+  right after GAS confirms the finalize, same button handler.
+- All three verified end-to-end against a real local Postgres (not just
+  imported/read): save → finalize → archive, event log order, and the
+  no-op-on-unknown-wo case (a route dispatched before this code existed, or
+  a save that failed to mirror) all confirmed safe.
+
+**Deliberately NOT wired — the entire Field Nation family** (`saveToFieldNation`,
+`removeFieldNation`, `markFNPosted`, `markFNAssigned`, `setFnProvider`,
+`setFnRoutePlanId`, `bulkSetFnProvidersByAddress`) **and `processDecision`.**
+Reasons, not an oversight:
+- `saveToFieldNation` and `markFNAssigned` (via `data_access.py`, which
+  calls into `fn_side_effects.py`) trigger **real** OnFleet routePlan
+  renames/worker PUTs and **real** Monday.com board mutations as part of a
+  normal call. GAS already performs these live today. Calling the
+  `data_access.py` versions alongside GAS would duplicate those real-world
+  side effects (double Monday writes, double Onfleet updates) — this is
+  exactly the class of bug `fn_side_effects.py`'s own board-corruption-guard
+  comment warns about from an earlier incident. A dual-write here needs a
+  separate "mirror-only" write path that updates the DB row without
+  re-triggering `_fx.*`, which does not exist yet and hasn't been built or
+  tested.
+- Everything else in the FN family (`removeFieldNation`, `markFNPosted`,
+  `setFnProvider`, `setFnRoutePlanId`, `bulkSetFnProvidersByAddress`) reads
+  or updates `field_nation_orders` rows that only ever get created by
+  `saveToFieldNation` — since that one isn't mirrored, wiring the rest would
+  just be updating rows that don't exist in Postgres. Wiring only some of
+  the family isn't safe on its own merits either — better to leave the
+  whole FN subsystem as GAS-only until `saveToFieldNation`'s mirror-only
+  path is built, rather than ship partial, silently-no-op coverage.
+- `processDecision` isn't called from `tactical_workspace_master_rw.py` at
+  all — it's only ever posted by `docs/portal-dcc-rw.html`, and the portal
+  is still pointed at GAS (see the Step 6 rollback above). No dispatch-flow
+  change was needed or made for it.
+- `getSyncVersion` / `fetch_sync_status()` stays GAS-only too — it already
+  has its own graceful degrade-to-GAS-only behavior and switching it to read
+  from Postgres before the FN/decision side effects are also mirrored would
+  surface an inconsistent event log (Postgres would show route saves/
+  finalizes/archives but never FN or decision events). Left for Step 8.
+
+**Net effect:** the app's behavior is completely unchanged today — GAS/the
+Sheet is still the only thing any read path uses, and every write still
+goes there first. Postgres now additionally accumulates real, live
+saveRoute/finalizeRoute/archiveRoute data going forward (best-effort,
+non-blocking), which is what actually needs to be true before Step 6 (the
+portal repoint) or Step 8 (the real cutover) can be attempted again safely.
+**Not done and not attempted:** the FN/decision mirror-only paths, the
+`_cached_fetch_sent_records_from_sheet` read-side rewrite, and any actual
+cutover. Per the standing commitment to Nick, nothing here flips a switch —
+it only starts populating Postgres safely in the background.
+
+### Correction (2026-09-21): Monday.com is retired — disabled in `fn_side_effects.py`
+
+Nick: Terraboost doesn't use Monday.com anymore. The Monday.com code in
+`fn_side_effects.py` (`sync_monday_for_stops`, called by both
+`push_fn_placeholder_to_monday` for `saveToFieldNation` and by
+`apply_fn_assigned_side_effects` for `markFNAssigned`) was not invented by
+this migration — it's a line-by-line port of the live "DCC" Apps Script
+source as it existed on 2026-09-19 (see that module's docstring for the
+exact script ID and pull date), which at that point still did an
+address-matched sync to a Monday.com "Route Planning" board on both of
+those actions. It was ported to keep the migration behavior-equivalent to
+GAS in case Monday syncing was still relied on somewhere.
+
+It isn't. **Fix:** `sync_monday_for_stops()` now unconditionally returns a
+`skipped` result before touching the network, regardless of whether
+`MONDAY_API_TOKEN` is set — this is a deliberate hard kill switch, not just
+"leave the token unset," so a future env var accidentally getting set can't
+silently revive Monday writes. The GAS-ported implementation is left in
+place below the kill switch, unreached, rather than deleted, in case this
+ever needs to be reversed — but treat that as reference/history, not as
+something to re-enable without checking with Nick first.
+
+**Not resolved by this change:** whether the live Apps Script (`Code.gs`,
+not something this repo can edit — it lives at
+script.google.com/d/1iyG4dr7iyoAD1sDkyySCh78baDOFJWBHt-_j9sS82oASl-
+dWInb50wOI) still actually fires those same Monday API calls today on every
+real `markFNAssigned`/`saveToFieldNation`. This migration module never sat
+in that live path (see "Deliberately NOT wired" above — the FN family was
+never dual-written), so disabling it here has zero effect on production
+behavior either way. If the live GAS script is still calling Monday for
+real, that's a separate cleanup in the Apps Script editor itself, outside
+what this repo or this migration touches — worth confirming with Nick
+whether that's also stale/wanted gone, especially given the board-corruption
+incident the `MONDAY_GROUP_FILTER` guard exists because of (plausibly the
+reason Monday was dropped in the first place, though that connection hasn't
+been confirmed).

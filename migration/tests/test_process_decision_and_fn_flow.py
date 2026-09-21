@@ -95,14 +95,14 @@ print("OK:", result["error"])
 # ---------------------------------------------------------------------------
 # save_to_field_nation -> mark_fn_assigned, full lifecycle
 # ---------------------------------------------------------------------------
-print("\n=== save_to_field_nation then mark_fn_assigned (Monday skipped, no token set) ===")
+print("\n=== save_to_field_nation then mark_fn_assigned (Monday sync disabled 2026-09-21) ===")
 fn_payload = {
     "wo": "FN-Placeholder-1", "cluster_hash": "hash-fn-1", "taskIds": "task9",
     "locs": "100 Home St, Chicago, IL|200 Main St, Chicago, IL|100 Home St, Chicago, IL",
 }
 save_result = da.save_to_field_nation(engine, "FN-Placeholder-1", fn_payload)
 assert save_result["success"] is True
-assert save_result["monday"]["skipped"] == "MONDAY_API_TOKEN not set"
+assert save_result["monday"]["skipped"] == "Monday.com sync disabled 2026-09-21 (Terraboost no longer uses Monday)"
 print("OK:", save_result)
 
 da.set_fn_provider(engine, "FN-Placeholder-1", "Acme Installs")

@@ -182,10 +182,20 @@ def _stop_identity_key(t):
 # ---------------------------------------------------------------------------
 # Background sheet save — never blocks the UI
 # ---------------------------------------------------------------------------
-def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
+def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None, db_engine=None) -> None:
     """Fire-and-forget: saves a route to the Field Nation Google Sheet tab.
-    Clears the reverted flag from session_state after the write completes."""
+    Clears the reverted flag from session_state after the write completes.
+
+    db_engine: optional Postgres engine (Phase 2 migration, 2026-09-21). When
+    set, best-effort mirrors this save into field_nation_orders via
+    migration.data_access.mirror_save_to_field_nation() -- a DB-only write,
+    never re-running the Monday.com push (GAS already did/does that live via
+    the POST above). Same best-effort, exception-swallowed pattern already
+    proven for the saveRoute/archiveRoute/finalizeRoute mirrors in
+    tactical_workspace_master_rw.py -- a failure here never affects the real
+    GAS save, session_state cleanup, or the caller in any way."""
     cluster_hash = payload.get("cluster_hash")
+    work_order = payload.get("wo")
 
     def _worker():
         try:
@@ -202,6 +212,14 @@ def save_fn_to_sheet(gas_url: str, payload: dict, session_state=None) -> None:
             # Clear reverted flag once sheet write is done (success or fail)
             if session_state is not None and cluster_hash:
                 session_state.pop(f"reverted_{cluster_hash}", None)
+
+        # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+        if db_engine is not None and work_order:
+            try:
+                from migration import data_access as _da
+                _da.mirror_save_to_field_nation(db_engine, work_order, payload)
+            except Exception as e:
+                print(f"[fn_utils.save_fn_to_sheet] pg_dual_write_fn: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
     threading.Thread(target=_worker, daemon=True).start()
 

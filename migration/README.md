@@ -787,3 +787,48 @@ migration (`saveToFieldNation`/`markFNAssigned`'s real OnFleet/Monday side
 effects, `processDecision`'s OnFleet auto-assign). This function existing
 and being tested against real local data is what makes that eventual
 staging comparison possible — it isn't the comparison itself.
+
+### Step 8 continued (2026-09-22, same day): a safe way to actually look at it
+
+`get_sent_records_from_db()` had only ever been checked from a test file
+run by hand in this sandbox — never from inside the running app, against
+whatever real data Postgres actually has today. Built a preview so that
+comparison can happen without it being, or turning into, a live cutover.
+
+**Added to `tactical_workspace_master_rw.py`:** a new debug panel, gated
+behind `?debug=readside` in the URL **and** `_is_admin_or_manager()` — the
+stricter of the two gates this file's existing `?debug=` panels use, since
+this one touches real route data rather than just Onfleet's API. Sits at
+module level (same place as the other `?debug=` panels), renders nothing
+unless both conditions are true, and does nothing at all until an
+ADMIN/MANAGER clicks "Run comparison" inside it — no automatic query on
+page load, no new background work for ordinary dispatchers.
+
+**What it does:** runs `get_sent_records_from_db()` against Postgres and
+`fetch_sent_records_from_sheet()` against the live Sheets (the exact same
+call every other part of the app already makes) side by side, then shows:
+top-line counts for all four return values; how many task IDs the two
+paths agree even exist (`_both` / `_only_sheet` / `_only_db`); and, for the
+tasks both paths agree exist, whether they agree on `status` and `wo` too
+— that last check is the one that would actually catch a logic bug between
+the two implementations, as opposed to just a "Postgres doesn't have this
+route yet" coverage gap. A checkbox reveals the raw `ghost_routes` Postgres
+produced, by pod, for a closer look.
+
+**Explicitly not a cutover mechanism:** it never assigns anything back
+into `st.session_state` beyond what `fetch_sent_records_from_sheet()`
+already does on every normal render (the existing `_fn_posted`/
+`_fn_provider` hydration), never writes to Postgres or Sheets, and doesn't
+change what any dispatcher below it on the page sees. It's a way for Nick
+and me to look at the comparison together, live, ahead of any real
+decision — not a soft-launch of the read side.
+
+**Verified:** re-seeded `dcc_test2` via `test_get_sent_records_from_db.py`,
+then ran the panel's exact comparison/rendering logic (counts table,
+overlap/mismatch cross-check including a forced-mismatch case, the
+no-overlap case, and the per-pod raw dataframe view) standalone against
+that real data — all paths run clean, no exceptions. Full Streamlit
+end-to-end wasn't feasible from this sandbox (no Onfleet/Sheets
+credentials here), so this is the same level of verification the rest of
+Step 8 got: real Postgres, real write-path-seeded data, not a live
+staging click-through.

@@ -485,8 +485,16 @@ def sync_monday_for_stops(locs: str, wo: str, installer_name: str, debug_label: 
 
     Returns {"skipped": reason} if MONDAY_API_TOKEN isn't set or there's no
     WO/installer to push -- exactly like GAS logged and moved on rather than
-    failing the caller."""
+    failing the caller.
+
+    2026-09-21 -- Nick: Terraboost doesn't use Monday.com anymore. Hard-disabled
+    here regardless of MONDAY_API_TOKEN, rather than relying on that env var
+    staying unset, so this can't fire even if a token gets set again by
+    accident later. The rest of this function (and the GAS-ported logic below
+    it) is left in place, unreached, in case Monday sync is ever reinstated --
+    delete it instead of re-enabling it blind if that day doesn't come."""
     debug: list[str] = []
+    return {"skipped": "Monday.com sync disabled 2026-09-21 (Terraboost no longer uses Monday)", "debug": debug, "matches": 0, "instUpdates": 0, "woUpdates": 0}
     cfg = _monday_config()
     if not cfg["token"]:
         return {"skipped": "MONDAY_API_TOKEN not set", "debug": debug, "matches": 0, "instUpdates": 0, "woUpdates": 0}

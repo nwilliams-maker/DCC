@@ -172,6 +172,9 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "ic_status": txt("ic_status"),
         "inactive_reason": txt("inactive_reason"),
     }
+    availability = _availability_class(source)
+    if availability:
+        source["ic_list"] = availability
     return source
 
 
@@ -354,8 +357,11 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 continue
 
             updates = _build_update(existing, source)
-            if "location" in updates:
-                lat, lng = _geocode(updates["location"])
+            if "location" in updates or (
+                _clean_text(source.get("location"))
+                and (existing.get("lat") is None or existing.get("lng") is None)
+            ):
+                lat, lng = _geocode(updates.get("location") or source.get("location"))
                 if lat is not None and lng is not None:
                     updates["lat"] = lat
                     updates["lng"] = lng

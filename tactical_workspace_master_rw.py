@@ -5845,22 +5845,43 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # Fail closed if status classification is unexpectedly absent.
                 v_ics = v_ics.iloc[0:0].copy()
 
-            # Missing lat/lng normally drops a row outright — skip that for
-            # unrestricted contractors too (a Field Agent may have no home
-            # coordinates on file at all, since FAs aren't normally routed
-            # by distance). _ic_home_loc()/get_gmaps() already fall back to
-            # the cluster center when coordinates are missing, so this is
-            # safe downstream.
+            # Resolve missing coordinates from the contractor's current
+            # location text instead of silently dropping otherwise-eligible ICs.
+            # This preserves the real 100-mile rule while avoiding false
+            # exclusions caused by incomplete historical lat/lng backfills.
             _unrestricted_v = (v_ics[_name_col].astype(str).apply(_is_unrestricted_name)
                                 if _name_col else pd.Series(False, index=v_ics.index))
-            v_ics = v_ics[v_ics[[lat_col, lng_col]].notna().all(axis=1) | _unrestricted_v]
+
+            def _resolve_ic_coords(_row):
+                try:
+                    _lat = _row.get(lat_col)
+                    _lng = _row.get(lng_col)
+                    if pd.notna(_lat) and pd.notna(_lng):
+                        return float(_lat), float(_lng)
+                except Exception:
+                    pass
+                _loc = str(_row.get('location', '') or '').strip()
+                if _loc:
+                    try:
+                        _coords = geocode(_loc)
+                        if _coords:
+                            # Existing geocode() returns (lng, lat).
+                            return float(_coords[1]), float(_coords[0])
+                    except Exception as _coord_e:
+                        _log_err("contractor_dropdown_geocode", _coord_e)
+                return None, None
 
             if not v_ics.empty:
-                # haversine() fails soft — it returns float('inf') on
-                # missing/non-numeric coordinates rather than raising — so
-                # this is safe to call even for a coordinate-less
-                # unrestricted row; it just won't ever satisfy `d <= 100`.
-                v_ics['d'] = v_ics.apply(lambda x: haversine(cluster['center'][0], cluster['center'][1], x[lat_col], x[lng_col]), axis=1)
+                _resolved = v_ics.apply(_resolve_ic_coords, axis=1)
+                v_ics['_resolved_lat'] = _resolved.apply(lambda p: p[0] if p else None)
+                v_ics['_resolved_lng'] = _resolved.apply(lambda p: p[1] if p else None)
+                v_ics['d'] = v_ics.apply(
+                    lambda x: haversine(
+                        cluster['center'][0], cluster['center'][1],
+                        x.get('_resolved_lat'), x.get('_resolved_lng')
+                    ),
+                    axis=1
+                )
                 _is_unrestricted = (v_ics[_name_col].astype(str).apply(_is_unrestricted_name)
                                     if _name_col else pd.Series(False, index=v_ics.index))
                 v_ics = v_ics[(v_ics['d'] <= 100) | _is_unrestricted].sort_values('d')

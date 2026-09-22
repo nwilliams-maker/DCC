@@ -181,23 +181,36 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
 def _availability_class(source: dict[str, Any], insurance_window_days: int = 90) -> str | None:
     status = _norm_title(source.get("ic_status"))
     reason = _norm_title(source.get("inactive_reason"))
+
     if status == "active":
         return "ACTIVE"
-    if status == "new":
+    if status in {"new", "in training", "training"}:
         return "IN TRAINING"
-    if status == "inactive":
-        raw = source.get("monday_updated_at")
+
+    raw = source.get("monday_updated_at")
+    recent = False
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        recent = dt >= datetime.now(timezone.utc) - timedelta(days=insurance_window_days)
+    except Exception:
         recent = False
-        try:
-            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            recent = dt >= datetime.now(timezone.utc) - timedelta(days=insurance_window_days)
-        except Exception:
-            recent = False
-        if "insur" in reason and recent:
+
+    # Monday has used several insurance-related labels over time. Treat any
+    # recent insurance hold as route-eligible NEED INSURANCE whether the word
+    # insurance appears in the status itself or in the inactive-reason field.
+    insurance_related = ("insur" in status) or ("insur" in reason)
+    inactive_related = (
+        status == "inactive"
+        or "inactive" in status
+        or insurance_related
+    )
+    if inactive_related:
+        if insurance_related and recent:
             return "NEED INSURANCE"
         return "INACTIVE"
+
     # Unknown/missing status is intentionally not considered route-eligible.
     return None
 

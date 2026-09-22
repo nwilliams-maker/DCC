@@ -5829,6 +5829,19 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                                  if _name_col else pd.Series(False, index=ic_df.index))
             v_ics = ic_df[(~_fa_mask) | _unrestricted_all].copy()
 
+            # Contractor eligibility comes from the hourly Monday -> Postgres
+            # sync, stored in the existing `ic list` field so no schema change
+            # is needed. Only ACTIVE / IN TRAINING / NEED INSURANCE contractors
+            # may appear in route dropdowns. INACTIVE / unknown are excluded,
+            # even if they are otherwise unrestricted by distance.
+            _elig_col = 'ic list' if 'ic list' in v_ics.columns else None
+            if _elig_col:
+                _elig_norm = v_ics[_elig_col].astype(str).str.strip().str.upper()
+                v_ics = v_ics[_elig_norm.isin(['ACTIVE', 'IN TRAINING', 'NEED INSURANCE'])].copy()
+            else:
+                # Fail closed if status classification is unexpectedly absent.
+                v_ics = v_ics.iloc[0:0].copy()
+
             # Missing lat/lng normally drops a row outright — skip that for
             # unrestricted contractors too (a Field Agent may have no home
             # coordinates on file at all, since FAs aren't normally routed
@@ -5885,7 +5898,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     # the arithmetic). Catch both rather than showing
                     # "(inf mi)" or "(nan mi)".
                     _dist_label = "distance unknown" if (pd.isna(r['d']) or r['d'] == float('inf')) else f"{round(r['d'], 1)} mi"
-                    label = f"{ic_name}{cert_icon}{_cnt_tag} ({_dist_label})"
+                    _elig = str(r.get('ic list', '') or '').strip().upper()
+                    if _elig == 'ACTIVE':
+                        _elig_tag = " 🟢 ACTIVE"
+                    elif _elig == 'IN TRAINING':
+                        _elig_tag = " 🟡 IN TRAINING"
+                    elif _elig == 'NEED INSURANCE':
+                        _elig_tag = " 🟠 NEED INSURANCE"
+                    else:
+                        continue
+                    label = f"{ic_name}{_elig_tag}{cert_icon}{_cnt_tag} ({_dist_label})"
                     ic_opts[label] = r
 
     # --- DYNAMIC PRICING SYNC ---

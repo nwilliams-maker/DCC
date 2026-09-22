@@ -22,6 +22,8 @@ COLUMN_ALIASES = {
     "pod_color": {"pod color", "pod", "pod_color", "pod colour"},
     "digital_certified": {"digital certified", "digital certification", "digital_certified", "digital cert"},
     "unrestricted": {"unrestricted", "unrestricted ic", "full access"},
+    "ic_status": {"ic status", "status", "contractor status"},
+    "inactive_reason": {"reason for inactive status", "inactive reason", "reason inactive"},
 }
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
@@ -167,8 +169,34 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "pod_color": txt("pod_color"),
         "digital_certified": parse_bool(txt("digital_certified")),
         "unrestricted": parse_bool(txt("unrestricted")),
+        "ic_status": txt("ic_status"),
+        "inactive_reason": txt("inactive_reason"),
     }
     return source
+
+
+def _availability_class(source: dict[str, Any], insurance_window_days: int = 90) -> str | None:
+    status = _norm_title(source.get("ic_status"))
+    reason = _norm_title(source.get("inactive_reason"))
+    if status == "active":
+        return "ACTIVE"
+    if status == "new":
+        return "IN TRAINING"
+    if status == "inactive":
+        raw = source.get("monday_updated_at")
+        recent = False
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            recent = dt >= datetime.now(timezone.utc) - timedelta(days=insurance_window_days)
+        except Exception:
+            recent = False
+        if "insur" in reason and recent:
+            return "NEED INSURANCE"
+        return "INACTIVE"
+    # Unknown/missing status is intentionally not considered route-eligible.
+    return None
 
 
 def _geocode(location: str | None) -> tuple[float | None, float | None]:

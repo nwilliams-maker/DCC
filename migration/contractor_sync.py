@@ -28,7 +28,12 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _norm_title(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower().replace("_", " "))
+    s = str(value or "").strip().lower().replace("_", " ")
+    # Monday boards often prefix required columns with "*" (for example
+    # "*email", "*phone", "*location"). Treat that as display decoration,
+    # not part of the semantic column title.
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    return re.sub(r"\s+", " ", s)
 
 
 def _clean_text(value: Any) -> str | None:
@@ -95,7 +100,7 @@ def _discover_mapping(columns: list[dict[str, Any]]) -> dict[str, str]:
         matches = [by_title[a] for a in aliases if a in by_title]
         if matches:
             mapping[field] = matches[0]
-    missing = [f for f in ("email", "name") if f not in mapping]
+    missing = [f for f in ("email",) if f not in mapping]
     if missing:
         raise RuntimeError(
             "Required Monday contractor columns could not be mapped by title: "

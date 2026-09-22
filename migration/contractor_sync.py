@@ -202,6 +202,91 @@ def _availability_class(source: dict[str, Any], insurance_window_days: int = 90)
     return None
 
 
+def _extract_state_zip_from_query(location: str) -> tuple[str | None, str | None]:
+    text = str(location or "").upper()
+    state = None
+    zip_code = None
+
+    # Prefer explicit USPS abbreviation near a ZIP / comma boundary.
+    m_state = re.search(r"(?:,|\\s)\\s*([A-Z]{2})(?:\\s|,|$)", text)
+    if m_state:
+        state = m_state.group(1)
+
+    m_zip = re.search(r"\\b(\\d{5})(?:-\\d{4})?\\b", text)
+    if m_zip:
+        zip_code = m_zip.group(1)
+
+    return state, zip_code
+
+
+def _mapbox_result_state_zip(feature: dict[str, Any]) -> tuple[str | None, str | None]:
+    state = None
+    zip_code = None
+
+    # State/postcode may appear either as the feature itself or in context.
+    parts = [feature] + list(feature.get("context") or [])
+    for part in parts:
+        pid = str(part.get("id") or "")
+        if pid.startswith("region."):
+            short = str((part.get("properties") or {}).get("short_code") or part.get("short_code") or "").upper()
+            if short.startswith("US-") and len(short) >= 5:
+                state = short[-2:]
+            elif len(short) == 2:
+                state = short
+        elif pid.startswith("postcode."):
+            txt = str(part.get("text") or "").strip()
+            m = re.search(r"\\b(\\d{5})\\b", txt)
+            if m:
+                zip_code = m.group(1)
+
+    return state, zip_code
+
+
+def _mapbox_match_is_acceptable(location: str, feature: dict[str, Any]) -> bool:
+    try:
+        relevance = float(feature.get("relevance", 0) or 0)
+    except Exception:
+        relevance = 0.0
+
+    # Reject weak/fuzzy first results. A complete street address should be
+    # essentially exact; city/state-only locations can be slightly less exact.
+    has_street_number = bool(re.search(r"\\b\\d{1,6}\\b", str(location or "")))
+    min_relevance = 0.90 if has_street_number else 0.80
+    if relevance < min_relevance:
+        return False
+
+    place_types = {str(x).lower() for x in (feature.get("place_type") or [])}
+    if has_street_number and not (
+        "address" in place_types
+        or _clean_text(feature.get("address"))
+    ):
+        return False
+
+    query_state, query_zip = _extract_state_zip_from_query(location)
+    result_state, result_zip = _mapbox_result_state_zip(feature)
+
+    # If Monday gives us a state/ZIP, do not accept a result that contradicts it.
+    if query_state and result_state and query_state != result_state:
+        return False
+    if query_zip and result_zip and query_zip != result_zip:
+        return False
+
+    center = feature.get("center") or []
+    if len(center) != 2:
+        return False
+    try:
+        lng, lat = float(center[0]), float(center[1])
+    except Exception:
+        return False
+
+    # U.S. sanity bounds, including Alaska/Hawaii. This mainly guards corrupt
+    # API payloads / coordinate-order mistakes rather than doing state policing.
+    if not (-179.9 <= lng <= -66.0 and 18.0 <= lat <= 72.0):
+        return False
+
+    return True
+
+
 def _geocode(location: str | None) -> tuple[float | None, float | None]:
     token = (os.environ.get("MAPBOX_TOKEN") or "").strip()
     if not token or not location:
@@ -211,17 +296,23 @@ def _geocode(location: str | None) -> tuple[float | None, float | None]:
             "https://api.mapbox.com/geocoding/v5/mapbox.places/"
             + requests.utils.quote(location, safe="")
             + ".json",
-            params={"access_token": token, "limit": 1, "country": "US"},
+            params={
+                "access_token": token,
+                "limit": 3,
+                "country": "US",
+                "autocomplete": "false",
+            },
             timeout=15,
         )
         resp.raise_for_status()
         features = (resp.json() or {}).get("features") or []
-        if not features:
-            return None, None
-        center = features[0].get("center") or []
-        if len(center) != 2:
-            return None, None
-        return float(center[1]), float(center[0])
+        for feature in features:
+            if not _mapbox_match_is_acceptable(location, feature):
+                continue
+            center = feature.get("center") or []
+            return float(center[1]), float(center[0])
+        # Fail closed: do not save coordinates for an ambiguous/weak match.
+        return None, None
     except Exception:
         return None, None
 

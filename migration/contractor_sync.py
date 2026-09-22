@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -118,7 +119,7 @@ def _fetch_board_rows() -> tuple[dict[str, str], list[dict[str, Any]]]:
         columns { id title type }
         items_page(limit:500) {
           cursor
-          items { id name column_values { id text value } }
+          items { id name updated_at column_values { id text value } }
         }
       }
     }
@@ -136,7 +137,7 @@ def _fetch_board_rows() -> tuple[dict[str, str], list[dict[str, Any]]]:
     query($cursor:String!) {
       next_items_page(limit:500, cursor:$cursor) {
         cursor
-        items { id name column_values { id text value } }
+        items { id name updated_at column_values { id text value } }
       }
     }
     """
@@ -157,6 +158,7 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         return _clean_text(v.get("text"))
     source = {
         "monday_item_id": str(item.get("id") or ""),
+        "monday_updated_at": item.get("updated_at"),
         "email": normalize_email(txt("email")),
         "name": txt("name") or _clean_text(item.get("name")),
         "phone": txt("phone"),
@@ -206,6 +208,21 @@ def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str,
     return out
 
 
+def _recent_source(source: dict[str, Any], lookback_hours: int) -> bool:
+    raw = source.get("monday_updated_at")
+    if not raw:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+        return dt >= cutoff
+    except Exception:
+        # If Monday changes timestamp formatting, fail open rather than miss an IC.
+        return True
+
+
 def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, Any]:
     if engine is None:
         db_url = (os.environ.get("DATABASE_URL") or "").strip()
@@ -214,12 +231,15 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         engine = sa.create_engine(db_url, pool_pre_ping=True)
 
     mapping, items = _fetch_board_rows()
-    sources = [_item_to_source(item, mapping) for item in items]
-    if not sources:
+    all_sources = [_item_to_source(item, mapping) for item in items]
+    lookback_hours = max(1, int(os.environ.get("MONDAY_SYNC_LOOKBACK_HOURS", "48")))
+    sources = [src for src in all_sources if _recent_source(src, lookback_hours)]
+    if not all_sources:
         raise RuntimeError("Monday contractor board returned no items; no database changes were made.")
 
     result = {
         "checked": len(sources),
+        "skipped_old": max(0, len(all_sources) - len(sources)),
         "added": 0,
         "updated": 0,
         "unchanged": 0,

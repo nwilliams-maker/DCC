@@ -10284,37 +10284,19 @@ if "ic_df" not in st.session_state:
     except: st.error("Database connection failed.")
 
 
-# --- CONTRACTOR SYNC (Monday -> Postgres) ---
-# Manual sync uses the exact same idempotent routine as the daily Railway cron.
-# No schema changes; new ICs are inserted and existing ICs are updated by email.
+# --- CONTRACTOR ROSTER AUTO-REFRESH ---
+# Railway updates Postgres in the background. DCC only needs to refresh its
+# in-memory contractor roster periodically so newly-added/updated ICs appear
+# without a manual sync button or page restart.
 if DB_ENGINE is not None:
-    _sync_col, _sync_status_col = st.columns([1.2, 5.8])
-    with _sync_col:
-        if st.button("🔄 Sync Contractors", key="sync_contractors_now", help="Pull the latest contractor roster from Monday into DCC.", use_container_width=True):
-            try:
-                from migration.contractor_sync import sync_contractors_from_monday
-                with st.spinner("Syncing contractors from Monday..."):
-                    _sync_result = sync_contractors_from_monday(DB_ENGINE)
-                # Refresh the in-memory contractor list immediately so new ICs
-                # are available for assignment in this same browser session.
-                st.session_state.ic_df = _ic_df_from_db(DB_ENGINE)
-                st.session_state["_contractor_sync_result"] = _sync_result
-            except Exception as _sync_exc:
-                _log_err("contractor_sync_manual", _sync_exc)
-                st.session_state["_contractor_sync_error"] = str(_sync_exc)
-    with _sync_status_col:
-        _sync_result = st.session_state.pop("_contractor_sync_result", None)
-        _sync_error = st.session_state.pop("_contractor_sync_error", None)
-        if _sync_result:
-            st.success(
-                f"Contractor sync complete — {_sync_result.get('added', 0)} added, "
-                f"{_sync_result.get('updated', 0)} updated, "
-                f"{_sync_result.get('unchanged', 0)} unchanged, "
-                f"{_sync_result.get('needs_review', 0)} need review, "
-                f"{_sync_result.get('failed', 0)} failed."
-            )
-        elif _sync_error:
-            st.error(f"Contractor sync failed: {_sync_error}")
+    _ic_refresh_now = time.time()
+    _ic_last_refresh = float(st.session_state.get("_ic_db_refresh_ts", 0) or 0)
+    if (_ic_refresh_now - _ic_last_refresh) >= 300:
+        try:
+            st.session_state.ic_df = _ic_df_from_db(DB_ENGINE)
+            st.session_state["_ic_db_refresh_ts"] = _ic_refresh_now
+        except Exception as _ic_refresh_exc:
+            _log_err("contractor_roster_auto_refresh", _ic_refresh_exc)
 
 # 🔵 PAGE-LOAD LAZY-INIT for worker task counts. Populates st.session_state['_worker_counts']
 # on the very first render of every fresh page load, BEFORE any tab/cluster renders. The

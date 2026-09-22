@@ -5827,7 +5827,10 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             _fa_mask = ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)
             _unrestricted_all = (ic_df[_name_col].astype(str).apply(_is_unrestricted_name)
                                  if _name_col else pd.Series(False, index=ic_df.index))
-            v_ics = ic_df[(~_fa_mask) | _unrestricted_all].copy()
+            # Field Agents must remain available in the route dropdown.
+            # They are employees and already get separate pay handling later;
+            # do not filter them out here.
+            v_ics = ic_df.copy()
 
             # Contractor eligibility comes from the hourly Monday -> Postgres
             # sync, stored in the existing `ic list` field so no schema change
@@ -5899,7 +5902,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     # "(inf mi)" or "(nan mi)".
                     _dist_label = "distance unknown" if (pd.isna(r['d']) or r['d'] == float('inf')) else f"{round(r['d'], 1)} mi"
                     _elig = str(r.get('ic list', '') or '').strip().upper()
-                    if _elig == 'ACTIVE':
+                    _is_field_agent_row = bool(
+                        r.astype(str).str.contains('Field Agent', case=False, na=False).any()
+                        if hasattr(r, 'astype') else False
+                    )
+                    if _is_field_agent_row:
+                        _elig_tag = " 👤 FIELD AGENT"
+                    elif _elig == 'ACTIVE':
                         _elig_tag = " 🟢 ACTIVE"
                     elif _elig == 'IN TRAINING':
                         _elig_tag = " 🟡 IN TRAINING"

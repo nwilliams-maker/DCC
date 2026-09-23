@@ -23,6 +23,7 @@ PRINT_STATUS_BOARD_ID = int(os.environ.get("PRINT_STATUS_BOARD_ID", "6920657806"
 PRINT_PACKING_LIST_COLUMN_ID = os.environ.get("PRINT_PACKING_LIST_COLUMN_ID", "files__1")
 POD_FILTER = (os.environ.get("POD_FILTER") or "Orange").strip()
 NOT_BEFORE = (os.environ.get("PACKING_SYNC_NOT_BEFORE") or "").strip()
+TEST_WO = (os.environ.get("PACKING_SYNC_TEST_WO") or "").strip()
 
 
 def _clean(v: Any) -> str:
@@ -88,6 +89,10 @@ def get_orange_accepted_routes() -> list[dict[str, Any]]:
     if NOT_BEFORE:
         where_time = " AND r.updated_at >= :not_before "
         params["not_before"] = NOT_BEFORE
+    where_test = ""
+    if TEST_WO:
+        where_test = " AND r.wo = :test_wo "
+        params["test_wo"] = TEST_WO
     engine = sa.create_engine(db_url, pool_pre_ping=True)
     sql = sa.text(f"""
         SELECT
@@ -104,6 +109,7 @@ def get_orange_accepted_routes() -> list[dict[str, Any]]:
         WHERE r.status::text = 'accepted'
           AND lower(coalesce(c.pod_color, r.payload->>'pod', r.payload->>'pod_name', '')) = :pod
           {where_time}
+          {where_test}
         ORDER BY r.updated_at ASC
     """)
     with engine.connect() as conn:
@@ -417,6 +423,7 @@ def main() -> None:
         "board_id": PRINT_STATUS_BOARD_ID,
         "pod": POD_FILTER,
         "not_before": NOT_BEFORE or None,
+        "test_wo": TEST_WO or None,
         "processed": [],
         "errors": [],
     }
@@ -428,7 +435,7 @@ def main() -> None:
     routes = get_orange_accepted_routes()
     result["candidate_count"] = len(routes)
     if not routes:
-        print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str))
+        print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str), flush=True)
         return
 
     token = tb_login()
@@ -440,7 +447,7 @@ def main() -> None:
         except Exception as exc:
             result["errors"].append({"wo": _clean(route.get("wo")), "error": str(exc)[:500]})
 
-    print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str))
+    print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str), flush=True)
 
 
 if __name__ == "__main__":

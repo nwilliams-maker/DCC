@@ -9976,6 +9976,22 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
 style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
 padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
+
+                            # Restore the Sent-route finalization checklist.
+                            # Kiosk routes get the extra "Ordered Kiosk(s)" item,
+                            # matching the checklist behavior used in Accepted.
+                            _sent_kiosk_total = sum(
+                                1 for _t in c.get('data', [])
+                                if 'kiosk' in str(_t.get('task_type', '') or '').lower()
+                                and 'remov' not in str(_t.get('task_type', '') or '').lower()
+                            )
+                            render_finalization_checklist(
+                                cluster_hash,
+                                pod_name,
+                                "sent_chk",
+                                is_fn=(ic_name == "Field Nation"),
+                                has_kiosks=(_sent_kiosk_total > 0),
+                            )
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):

@@ -61,7 +61,29 @@ def inspect_tb_schema(token: str) -> dict[str, Any]:
         # for eliciting exact missing-argument/type errors without reading data.
         q = f"query PackingProbe {{ {field} {{ __typename }} }}"
         results[field] = _tb_query(token, q)
-    return {"candidate_probes": results}
+    # Discover WorkOrdersConnection container fields and WorkOrder fields.
+    connection_probes: dict[str, Any] = {}
+    for container_field in ("data", "nodes", "items", "edges"):
+        q = f"query ConnectionProbe {{ workOrders {{ {container_field} {{ __typename }} }} }}"
+        connection_probes[container_field] = _tb_query(token, q)
+
+    work_order_fields: dict[str, Any] = {}
+    # Lighthouse-style connections generally expose `data`; probe candidate
+    # scalar/document fields one at a time so one bad field cannot mask others.
+    for field in (
+        "id", "name", "workOrderNumber", "workOrder", "orderNumber", "number",
+        "packingList", "packingListUrl", "packingListURL", "packingSlip",
+        "packingSlipUrl", "packingSlipURL", "pdf", "pdfUrl", "pdfURL",
+        "file", "fileUrl", "downloadUrl", "document", "documents", "files",
+    ):
+        q = f"query WorkOrderFieldProbe {{ workOrders {{ data {{ {field} }} }} }}"
+        work_order_fields[field] = _tb_query(token, q)
+
+    return {
+        "candidate_probes": results,
+        "connection_probes": connection_probes,
+        "work_order_fields": work_order_fields,
+    }
 
 
 def inspect_recent_orange_accepted() -> dict[str, Any]:

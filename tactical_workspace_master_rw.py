@@ -6934,13 +6934,18 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 outlook_url = f"https://outlook.office.com/mail/deeplink/compose?to={_to_enc}&subject={subject_line}&body={body_content}"
                 _link_ph = st.empty()
                 _link_ph.success("✅ Link Live! Outlook opening — or use the button below.")
-                # Best-effort automatic popup. Some browsers may block this because
-                # the save finishes asynchronously; the persistent Open Outlook
-                # button below is the guaranteed fallback.
-                st.components.v1.html(
-                    f"<script>if(window.screen.width>768){{try{{window.open({json.dumps(outlook_url)},'_blank');}}catch(e){{}}}}</script>",
-                    height=0,
-                )
+                # Best-effort automatic popup — ONE SHOT only. Store an
+                # explicit intent flag and consume it immediately on this generate/
+                # resend rerun so later actions (especially Move to Sent) can never
+                # reopen Outlook.
+                _popup_key = f"_outlook_popup_once_{cluster_hash}"
+                st.session_state[_popup_key] = outlook_url
+                _popup_url = st.session_state.pop(_popup_key, None)
+                if _popup_url:
+                    st.components.v1.html(
+                        f"<script>if(window.screen.width>768){{try{{window.open({json.dumps(_popup_url)},'_blank');}}catch(e){{}}}}</script>",
+                        height=0,
+                    )
                 st.session_state[f"_persisted_outlook_{cluster_hash}"] = outlook_url
                 # Stash the mailto: URL so the "Default Mail" button persists across
                 # reruns as a fallback for users who prefer their local mail client.
@@ -6966,7 +6971,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # bug where the button only appeared during the one rerun that processed the
     # click and then vanished. Disappears automatically if the route moves to
     # field_nation or is revoked back to pending (route_state changes).
-    if route_state == "email_sent" and not is_fn:
+    if route_state == "email_sent" and not is_fn and not st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
         _persisted_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
         _persisted_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
         if _persisted_outlook:
@@ -6990,6 +6995,9 @@ text-decoration:none;">📨 Default Mail</a>
             use_container_width=True,
             help="Moves this generated route into the Sent section after you have opened the email.",
         ):
+            # Never allow the Outlook auto-popup to replay on this rerun.
+            st.session_state.pop(f"_outlook_popup_once_{cluster_hash}", None)
+            st.session_state[f"_move_to_sent_confirmed_{cluster_hash}"] = True
             st.rerun(scope="app")
 
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
@@ -8843,7 +8851,15 @@ def run_pod_tab(pod_name):
         
         # 🌟 Handle Local Session State (Instant UI Moves)
         elif route_state == "email_sent" and not is_reverted:
-            sent.append(c) #
+            if st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
+                sent.append(c) #
+            else:
+                # Link has been generated, but dispatcher has not clicked
+                # Move to Sent yet. Keep the card available in Dispatch.
+                if c.get('status') == 'Ready':
+                    ready.append(c)
+                else:
+                    review.append(c)
         elif route_state == "field_nation":
             field_nation.append(c) #
         else:
@@ -10908,7 +10924,13 @@ def _render_global_tab_body():
                             sent.append(c)
                     # 🌟 Handle Local Session State
                     elif route_state == "email_sent" and not is_reverted:
-                        sent.append(c)
+                        if st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
+                            sent.append(c)
+                        else:
+                            if c.get('status') == 'Ready':
+                                ready.append(c)
+                            else:
+                                review.append(c)
                     elif route_state == "field_nation": 
                         field_nation.append(c)
                     elif route_state == "link_generated" and not is_reverted:

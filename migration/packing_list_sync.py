@@ -118,6 +118,34 @@ def inspect_recent_orange_accepted() -> dict[str, Any]:
     return {"wo": row["wo"] if row else None}
 
 
+def inspect_portal_frontend() -> dict[str, Any]:
+    import re
+    from urllib.parse import urljoin
+    base = "https://manage.terraboost.com/workorders?pageSize=50"
+    r = requests.get(base, timeout=30)
+    out = {"status": r.status_code, "url": r.url, "content_type": r.headers.get("content-type")}
+    html = r.text
+    scripts = re.findall(r'<script[^>]+src=["\\\']([^"\\\']+)["\\\']', html, flags=re.I)
+    out["scripts"] = scripts[-20:]
+    hits = []
+    for src in scripts[-20:]:
+        try:
+            u = urljoin(r.url, src)
+            js = requests.get(u, timeout=30).text
+            low = js.lower()
+            if any(k in low for k in ("packing", "workorders", "workorder", "pdf")):
+                for kw in ("packing", "workorders", "workorder", "pdf"):
+                    pos = low.find(kw)
+                    if pos >= 0:
+                        snippet = js[max(0,pos-500):pos+1500]
+                        hits.append({"script": u, "keyword": kw, "snippet": snippet[:2000]})
+                        break
+        except Exception as exc:
+            hits.append({"script": src, "error": str(exc)[:200]})
+    out["hits"] = hits[:20]
+    return out
+
+
 def inspect_monday_board() -> dict[str, Any]:
     token = (os.environ.get("MONDAY_API_TOKEN") or "").strip()
     if not token:

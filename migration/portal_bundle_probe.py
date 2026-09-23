@@ -13,12 +13,13 @@ def main():
     scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)["\']',r.text,flags=re.I)
     out={"page_status":r.status_code,"scripts":[]}
     needles=[
-        "function KOr",
-        "handleDownloadPackingList",
-        "Download Packing List",
-        "new Ga(",
-        ".save(",
-        "output(\"blob",
+        "function zOr",
+        "const zOr",
+        "zOr=",
+        "function UOr",
+        "const UOr",
+        "UOr=",
+        "const GOr",
     ]
     for src in scripts:
         u=urljoin(r.url,src)
@@ -38,7 +39,7 @@ def main():
                 matches.append({
                     "needle":needle,
                     "pos":pos,
-                    "snippet":js[max(0,pos-5000):pos+9000]
+                    "snippet":js[max(0,pos-3000):pos+15000]
                 })
                 start=pos+len(needle)
                 found+=1

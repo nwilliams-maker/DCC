@@ -9953,6 +9953,23 @@ def run_pod_tab(pod_name):
     </div>
     {_venues_html}
 </div>""", unsafe_allow_html=True)
+
+                            # Keep email controls accessible after Generate Link
+                            # moves the route into the Sent bucket.
+                            _sent_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
+                            _sent_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
+                            if _sent_outlook:
+                                st.markdown(f"""<div style="display:flex;margin:8px 0 4px 0;">
+<a href="{_sent_outlook}" target="_blank" rel="noopener noreferrer"
+style="flex:1;text-align:center;background:#633094;color:#ffffff;border:1px solid #633094;
+padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:none;">📬 Open Outlook</a>
+</div>""", unsafe_allow_html=True)
+                            if _sent_mailto:
+                                st.markdown(f"""<div style="display:flex;margin:4px 0 8px 0;">
+<a href="{_sent_mailto}"
+style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
+padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:none;">📨 Default Mail</a>
+</div>""", unsafe_allow_html=True)
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):

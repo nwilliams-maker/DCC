@@ -258,7 +258,9 @@ def download_portal_packing_list(page: Any, work_order_id: int, wo: str) -> tupl
     """Download the PDF produced by Terraboost's own Work Order button."""
     page.goto(f"https://manage.terraboost.com/workorders/{work_order_id}", wait_until="domcontentloaded")
     email_box = page.get_by_role("textbox", name="Email Address")
-    if email_box.is_visible(timeout=10000):
+    button = page.get_by_role("button", name="Download Packing List")
+    email_box.or_(button).first.wait_for(state="visible", timeout=45000)
+    if email_box.is_visible():
         email = _clean(os.environ.get("TERRABOOST_EMAIL"))
         password = _clean(os.environ.get("TERRABOOST_PASSWORD"))
         if not email or not password:
@@ -269,8 +271,12 @@ def download_portal_packing_list(page: Any, work_order_id: int, wo: str) -> tupl
         email_box.wait_for(state="hidden", timeout=30000)
         page.goto(f"https://manage.terraboost.com/workorders/{work_order_id}", wait_until="domcontentloaded")
 
-    button = page.get_by_role("button", name="Download Packing List")
-    button.wait_for(state="visible", timeout=45000)
+    try:
+        button.wait_for(state="visible", timeout=45000)
+    except Exception as exc:
+        if email_box.is_visible():
+            raise RuntimeError("Terraboost portal remained on the sign-in screen") from exc
+        raise RuntimeError(f"Terraboost packing-list button unavailable at {page.url}") from exc
     with page.expect_download(timeout=90000) as download_event:
         button.click()
     download = download_event.value

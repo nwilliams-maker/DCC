@@ -13,13 +13,19 @@ def main():
     scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)["\']',r.text,flags=re.I)
     out={"page_status":r.status_code,"scripts":[]}
     needles=[
-        "DOWNLOAD_WORKORDER_PACKING_LIST",
+        "downloadPackingList",
+        "DownloadPackingList",
         "packingList",
+        "PackingList",
         "packing-list",
         "packing_list",
         "Packing List",
-        "workOrders(",
-        "workOrders",
+        "generatePacking",
+        "packingSlip",
+        "pdfMake",
+        "jsPDF",
+        "application/pdf",
+        ".pdf",
     ]
     for src in scripts:
         u=urljoin(r.url,src)
@@ -39,7 +45,7 @@ def main():
                 matches.append({
                     "needle":needle,
                     "pos":pos,
-                    "snippet":js[max(0,pos-1200):pos+3000]
+                    "snippet":js[max(0,pos-1800):pos+4200]
                 })
                 start=pos+len(needle)
                 found+=1

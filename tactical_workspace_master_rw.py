@@ -6933,27 +6933,25 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _to_enc = requests.utils.quote(str(ic.get('email', '') or ''))
                 outlook_url = f"https://outlook.office.com/mail/deeplink/compose?to={_to_enc}&subject={subject_line}&body={body_content}"
                 _link_ph = st.empty()
-                _link_ph.success("✅ Link Live! Use Open Outlook below.")
-                # Do NOT auto-popup Outlook here. Browsers can block window.open()
-                # because this code runs after the server-side save completes rather
-                # than synchronously inside the original click event. Persist the
-                # Outlook compose URL instead and render a normal clickable button
-                # below; this behaves consistently across pods/browsers.
+                _link_ph.success("✅ Link Live! Outlook opening — or use the button below.")
+                # Best-effort automatic popup. Some browsers may block this because
+                # the save finishes asynchronously; the persistent Open Outlook
+                # button below is the guaranteed fallback.
+                st.components.v1.html(
+                    f"<script>if(window.screen.width>768){{try{{window.open({json.dumps(outlook_url)},'_blank');}}catch(e){{}}}}</script>",
+                    height=0,
+                )
                 st.session_state[f"_persisted_outlook_{cluster_hash}"] = outlook_url
                 # Stash the mailto: URL so the "Default Mail" button persists across
                 # reruns as a fallback for users who prefer their local mail client.
                 _mailto = f"mailto:{ic.get('email','')}?subject={subject_line}&body={body_content}"
                 st.session_state[f"_persisted_mailto_{cluster_hash}"] = _mailto
-                time.sleep(1)
+                # Keep this route card visible after generation so dispatchers can
+                # click Open Outlook before the route moves to Sent. The explicit
+                # "Move to Sent" button below triggers the app-level rerun.
+                route_state = "email_sent"
+                time.sleep(0.25)
                 _link_ph.empty()
-                # App-scope rerun (May 18 2026 — restored after the fragment-scope
-                # version left the route stuck in Ready after dispatch). The
-                # bucketing logic that decides Ready vs Sent lives in run_pod_tab
-                # OUTSIDE this fragment, so a fragment-scope rerun can't move the
-                # route to the Sent bucket. User explicitly clicked Generate Link;
-                # an app rerun here is expected (it's a user action, not an
-                # automatic-poll-triggered rerun).
-                st.rerun(scope="app")
             else:
                 # Surface any other GAS response so silent failures (auth gate
                 # returning {"error": "Unauthorized"} as HTTP 200, etc.) become
@@ -6985,6 +6983,14 @@ style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px soli
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
+        if st.button(
+            "➡️ Move to Sent",
+            key=f"move_to_sent_{pod_name}_{cluster_hash}",
+            type="primary",
+            use_container_width=True,
+            help="Moves this generated route into the Sent section after you have opened the email.",
+        ):
+            st.rerun(scope="app")
 
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 

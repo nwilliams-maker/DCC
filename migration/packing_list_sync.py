@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
+import pandas as pd
 import sqlalchemy as sa
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
@@ -80,40 +81,72 @@ def monday_query(query: str, variables: dict[str, Any] | None = None) -> dict[st
     return body.get("data") or {}
 
 
+def _orange_from_payload(payload: dict[str, Any]) -> bool:
+    orange_states = {"AK", "AZ", "CA", "HI", "ID", "NV", "OR", "WA"}
+    state = _clean(payload.get("state")).upper()[:2]
+    if state in orange_states:
+        return True
+    locs = _clean(payload.get("locs"))
+    if locs:
+        for stop in [x.strip() for x in locs.split("|") if x.strip()]:
+            m = re.search(r",\s*([A-Za-z]{2})\s+\d{5}(?:-\d{4})?\s*$", stop)
+            if m and m.group(1).upper() in orange_states:
+                return True
+    return False
+
+
 def get_orange_accepted_routes() -> list[dict[str, Any]]:
-    db_url = _clean(os.environ.get("DATABASE_URL"))
-    if not db_url:
-        raise RuntimeError("DATABASE_URL is not configured")
-    where_time = ""
-    params: dict[str, Any] = {"pod": POD_FILTER.lower()}
-    if NOT_BEFORE:
-        where_time = " AND r.updated_at >= :not_before "
-        params["not_before"] = NOT_BEFORE
-    where_test = ""
-    if TEST_WO:
-        where_test = " AND r.wo = :test_wo "
-        params["test_wo"] = TEST_WO
-    engine = sa.create_engine(db_url, pool_pre_ping=True)
-    sql = sa.text(f"""
-        SELECT
-          r.id,
-          r.wo,
-          r.contractor_name,
-          r.contractor_id,
-          r.updated_at,
-          r.payload,
-          r.stop_data,
-          c.pod_color
-        FROM routes r
-        LEFT JOIN contractors c ON c.id = r.contractor_id
-        WHERE r.status::text = 'accepted'
-          AND lower(coalesce(c.pod_color, r.payload->>'pod', r.payload->>'pod_name', '')) = :pod
-          {where_time}
-          {where_test}
-        ORDER BY r.updated_at ASC
-    """)
-    with engine.connect() as conn:
-        return [dict(x) for x in conn.execute(sql, params).mappings().all()]
+    """Read the same Accepted Routes source DCC uses.
+
+    Accepted decisions are still authoritative in the Google Sheet tab
+    (gid 934075207); Postgres does not currently mirror processDecision.
+    """
+    sheet_url = _clean(os.environ.get("IC_SHEET_URL"))
+    if not sheet_url:
+        raise RuntimeError("IC_SHEET_URL is not configured")
+    base = sheet_url.split("/edit")[0]
+    url = f"{base}/export?format=csv&gid=934075207"
+    df = pd.read_csv(url)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "json payload" not in df.columns:
+        raise RuntimeError("Accepted Routes sheet has no 'json payload' column")
+
+    out: list[dict[str, Any]] = []
+    cutoff = pd.to_datetime(NOT_BEFORE, utc=True, errors="coerce") if NOT_BEFORE else None
+    for _, row in df.iterrows():
+        raw_payload = row.get("json payload")
+        if pd.isna(raw_payload) or not _clean(raw_payload):
+            continue
+        try:
+            payload = json.loads(str(raw_payload))
+        except Exception:
+            continue
+        wo = _clean(payload.get("wo"))
+        if not wo:
+            continue
+        if TEST_WO and wo != TEST_WO:
+            continue
+        if not _orange_from_payload(payload):
+            continue
+
+        raw_date = row.get("date created")
+        dt = pd.to_datetime(raw_date, utc=True, errors="coerce")
+        if cutoff is not None and pd.notna(dt) and dt < cutoff:
+            continue
+
+        out.append({
+            "id": None,
+            "wo": wo,
+            "contractor_name": _clean(row.get("contractor")) or _clean(payload.get("contractor")) or "Unknown Contractor",
+            "contractor_id": None,
+            "updated_at": dt.isoformat() if pd.notna(dt) else _clean(raw_date),
+            "payload": payload,
+            "stop_data": payload.get("stopData"),
+            "pod_color": "Orange",
+        })
+
+    out.sort(key=lambda x: _clean(x.get("updated_at")))
+    return out
 
 
 def monday_board_meta() -> dict[str, Any]:

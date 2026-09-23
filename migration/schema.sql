@@ -57,6 +57,17 @@ CREATE INDEX idx_routes_status ON routes (status);
 CREATE INDEX idx_routes_cluster_hash ON routes (cluster_hash);
 CREATE INDEX idx_routes_contractor ON routes (contractor_id);
 
+-- Contractor emails sent before the Railway cutover contain R-... route IDs.
+-- Keep each old link distinct, including archived (inactive) links.
+CREATE TABLE legacy_route_links (
+    route_id           TEXT PRIMARY KEY,
+    wo                 TEXT NOT NULL,
+    payload            JSONB NOT NULL,
+    source_status      TEXT NOT NULL,
+    active             BOOLEAN NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL
+);
+
 -- Replaces the Field Nation tab (gid=1396320527). Separate from `routes`
 -- because every row's "contractor" is the vendor itself, not an IC, and it
 -- has its own two-state lifecycle (Posted -> Assigned).

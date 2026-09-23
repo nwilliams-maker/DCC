@@ -17,8 +17,8 @@ so that Step 6 ("repoint the portal") is a one-line change to portal-dcc-rw.html
 (the `webAppUrl` constant) rather than a portal rewrite -- see that file's
 window.onload and submitFinalResponse for the exact shapes this mirrors.
 
-Uses `wo` as the routeId (the routes table's natural key -- there is no
-separate opaque token column). This is the SAME security posture
+New links use `wo` as the routeId (the routes table's natural key). Older
+emailed R-... route IDs are resolved through legacy_route_links. This is the SAME security posture
 portal-dcc-rw.html's own [M24] comment already documents as a known,
 deliberately-not-fixed-here limitation: the only thing standing between
 "anyone with this link" and "a valid accept/decline" is how guessable the ID
@@ -86,6 +86,31 @@ app.add_middleware(
 )
 
 
+def _resolve_route(conn, route_id: str):
+    """Resolve new WO links and pre-migration R- links without changing their URLs."""
+    row = conn.execute(
+        sa.text("SELECT wo, payload FROM routes WHERE wo = :identifier"),
+        {"identifier": route_id},
+    ).mappings().first()
+    if row:
+        return row["wo"], row["payload"], False
+    # The recovery job creates this table. A normal WO link continues to work
+    # during deployment even if the recovery job has not run yet.
+    try:
+        row = conn.execute(
+            sa.text("""
+                SELECT l.wo, l.payload, l.active
+                FROM legacy_route_links l
+                WHERE l.route_id = :identifier
+            """), {"identifier": route_id}
+        ).mappings().first()
+    except sa.exc.ProgrammingError:
+        return None
+    if not row or not row["active"]:
+        return None
+    return row["wo"], row["payload"], True
+
+
 @app.get("/")
 def get_route(action: str = "", routeId: str = ""):
     """Mirrors GAS's `?action=getRoute&routeId=<wo>`. portal-dcc-rw.html's
@@ -99,16 +124,15 @@ def get_route(action: str = "", routeId: str = ""):
         return JSONResponse({"error": "Missing routeId."}, status_code=400)
 
     with engine.connect() as conn:
-        row = conn.execute(
-            sa.text("SELECT payload FROM routes WHERE wo = :wo"), {"wo": wo}
-        ).mappings().first()
-    if not row:
+        route = _resolve_route(conn, wo)
+    if not route:
         # Matches the portal's existing error-banner path (see the [M22]/[H4]
         # comments in portal-dcc-rw.html) -- a plain res.error string it
         # already knows how to display.
         return {"error": "This route link has expired or the route was not found."}
 
-    payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+    payload_value = route[1]
+    payload = payload_value if isinstance(payload_value, dict) else json.loads(payload_value)
     return {"payload": payload}
 
 
@@ -131,9 +155,23 @@ async def post_decision(request: Request):
     # The portal's radio buttons send "Accepted"/"Declined" (see ic_decision
     # in portal-dcc-rw.html); process_decision() expects "accept"/"decline".
     decision = "accept" if str(body.get("decision", "")).strip().lower() == "accepted" else "decline"
-    wo = str(body.get("routeId") or body.get("wo") or "").strip()
-    if not wo:
+    route_id = str(body.get("routeId") or body.get("wo") or "").strip()
+    if not route_id:
         return JSONResponse({"error": "Missing routeId."}, status_code=400)
+
+    with engine.connect() as conn:
+        resolved = _resolve_route(conn, route_id)
+        if not resolved:
+            return {"error": "This route link has expired or the route was not found."}
+        wo, linked_payload, is_legacy = resolved
+        if is_legacy:
+            current = conn.execute(sa.text("SELECT payload, status::text AS status FROM routes WHERE wo = :wo"), {"wo": wo}).mappings().first()
+            if not current:
+                return {"error": "This route link has expired or the route was not found."}
+            if current["status"] in ("archived", "finalized"):
+                return {"error": "This route is no longer open. Contact dispatch."}
+            if current["status"] == "sent" and current["payload"] != linked_payload:
+                return {"error": "This route was changed after this link was sent. Contact dispatch for the current link."}
 
     try:
         result = da.process_decision(

@@ -19,6 +19,10 @@ NOT_BEFORE = (os.environ.get("PACKING_SYNC_NOT_BEFORE") or "").strip()
 TEST_WO = (os.environ.get("PACKING_SYNC_TEST_WO") or "").strip()
 
 
+class PortalSSORequired(RuntimeError):
+    """The portal requires an interactive SSO login for this account."""
+
+
 def _clean(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
@@ -262,6 +266,8 @@ def download_portal_packing_list(page: Any, work_order_id: int, wo: str) -> tupl
     email_box.or_(button).first.wait_for(state="visible", timeout=45000)
     if email_box.is_visible():
         email = _clean(os.environ.get("TERRABOOST_EMAIL"))
+        if email.lower().endswith("@terraboost.biz"):
+            raise PortalSSORequired("Terraboost portal requires Microsoft SSO for this account")
         password = _clean(os.environ.get("TERRABOOST_PASSWORD"))
         if not email or not password:
             raise RuntimeError("Terraboost portal credentials are not configured")
@@ -339,7 +345,10 @@ def main() -> None:
                     try:
                         result["processed"].append(sync_one(route, group_id, token, page))
                     except Exception as exc:
-                        result["errors"].append({"wo": _clean(route.get("wo")), "error": str(exc)[:500]})
+                        # Playwright errors can echo filled form values in their
+                        # call log. Never print exception text from this path.
+                        result["errors"].append({"wo": _clean(route.get("wo")),
+                                                 "error_type": type(exc).__name__})
             finally:
                 browser.close()
     print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str), flush=True)

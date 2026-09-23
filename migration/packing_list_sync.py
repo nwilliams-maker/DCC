@@ -48,46 +48,56 @@ def _tb_query(token: str, query: str, variables: dict[str, Any] | None = None) -
 
 
 def inspect_tb_schema(token: str) -> dict[str, Any]:
-    q = """query PackingSchema {
-      workOrderType: __type(name: "WorkOrder") {
-        name
-        fields(includeDeprecated: true) {
-          name
-          args { name type { kind name ofType { kind name } } }
-          type { kind name ofType { kind name ofType { kind name } } }
-        }
-      }
-      connectionType: __type(name: "WorkOrdersConnection") {
-        name
-        fields(includeDeprecated: true) {
-          name
-          args { name type { kind name ofType { kind name } } }
-          type { kind name ofType { kind name ofType { kind name } } }
-        }
-      }
-      queryType: __type(name: "Query") {
-        fields(includeDeprecated: true) {
-          name
-          args { name type { kind name ofType { kind name } } }
-          type { kind name ofType { kind name ofType { kind name } } }
-        }
-      }
-    }"""
-    raw = _tb_query(token, q)
-    body = raw.get("body") or {}
-    if body.get("errors"):
-        return {"http_status": raw.get("http_status"), "errors": body.get("errors")}
-    data = body.get("data") or {}
-    query_fields = []
-    for fld in ((data.get("queryType") or {}).get("fields") or []):
-        n = str(fld.get("name") or "")
-        if any(term in n.lower() for term in ("work", "order", "pack", "print", "pdf", "file", "document")):
-            query_fields.append(fld)
-    return {
-        "workOrderType": data.get("workOrderType"),
-        "connectionType": data.get("connectionType"),
-        "queryFields": query_fields,
-    }
+    """Read-only field discovery without GraphQL introspection."""
+    candidates = [
+        "id","uuid","workOrderId","workOrderID","workOrderName","workOrderNo","workOrderNum",
+        "wo","woNumber","code","title","label","description","status","statusId","statusName",
+        "order","orderId","orderName","orderNo","createdAt","updatedAt","date","dueDate",
+        "assignedTo","assignedToName","installer","installerName","contractor","contractorName",
+        "route","routeName","pod","podName","notes","address","city","state","zip",
+        "packingListFile","packingListPath","packingListPdf","packingListPDF","packingListDocument",
+        "packingListData","packingListHtml","packingListLink","packingListDownload","printPackingList",
+        "printPackingListUrl","printPackingListURL","packingListFileUrl","packingListFileURL",
+        "packingSlipFile","packingSlipPdf","packingSlipPDF","pdfFile","pdfPath","workOrderPdfUrl",
+        "workOrderPDFUrl","workOrderFileUrl","download","downloadLink","link","url",
+        "workOrderItems","items","tasks","locations","stops","documents","attachments","assets",
+    ]
+    successes = {}
+    failures = {}
+    for field in candidates:
+        q = f"query FieldProbe {{ workOrders {{ nodes {{ {field} }} }} }}"
+        raw = _tb_query(token, q)
+        body = raw.get("body") or {}
+        errs = body.get("errors") or []
+        if errs:
+            msg = "; ".join(str(e.get("message") or e) for e in errs)
+            failures[field] = msg[:240]
+            continue
+        nodes = (((body.get("data") or {}).get("workOrders") or {}).get("nodes") or [])
+        vals = []
+        for node in nodes[:3]:
+            if isinstance(node, dict):
+                v = node.get(field)
+                if isinstance(v, (dict, list)):
+                    v = f"<{type(v).__name__}>"
+                vals.append(v)
+        successes[field] = vals
+
+    arg_probes = {}
+    for args in [
+        "first: 1", "page: 1", "limit: 1", "take: 1",
+        'search: "x"', 'query: "x"', 'filter: "x"',
+    ]:
+        q = f"query ArgProbe {{ workOrders({args}) {{ nodes {{ id }} }} }}"
+        raw = _tb_query(token, q)
+        body = raw.get("body") or {}
+        errs = body.get("errors") or []
+        arg_probes[args] = (
+            {"ok": True}
+            if not errs else
+            {"ok": False, "error": "; ".join(str(e.get("message") or e) for e in errs)[:300]}
+        )
+    return {"success_fields": successes, "arg_probes": arg_probes}
 
 
 def inspect_recent_orange_accepted() -> dict[str, Any]:

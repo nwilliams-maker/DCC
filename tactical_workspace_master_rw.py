@@ -48,15 +48,12 @@ if not ONFLEET_KEY or not MAPBOX_TOKEN:
     st.stop()
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"
-# GAS_WEB_APP_URL and IC_SHEET_URL are credential-equivalent and MUST come from
-# the environment — no in-source fallback (security audit H1). Fail fast if unset.
-GAS_WEB_APP_URL = (os.environ.get("GAS_WEB_APP_URL") or "").strip()
-GAS_AUTH = (os.environ.get("DCC_SHARED_SECRET") or "").strip()
-IC_SHEET_URL = (os.environ.get("IC_SHEET_URL") or "").strip()
-if not GAS_WEB_APP_URL or not IC_SHEET_URL:
-    st.error("\U0001F511 **Backend configuration missing!**")
-    st.info("GAS_WEB_APP_URL and IC_SHEET_URL must be set in Railway's 'Variables' tab.")
-    st.stop()
+# Legacy Google backend variables are retained only so old helper code can
+# import cleanly during the Railway/Postgres cutover. Production route state
+# no longer depends on Google Sheets or Apps Script.
+GAS_WEB_APP_URL = ""
+GAS_AUTH = ""
+IC_SHEET_URL = ""
 
 # --- TUNABLES (hoisted from inline magic numbers) ---
 DEFAULT_DUE_DAYS = 14   # default deadline offset from today when dispatcher hasn't picked one
@@ -2059,97 +2056,19 @@ div[data-baseweb="popover"]:has([role="listbox"]):not(:has([role="option"])) {{
 
 # --- 1. BACKGROUND THREAD WORKER ---
 def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_label="Revoked", ic_name="", wo=None):
-    """Silent worker to update Google Sheets AND scrub Onfleet — never blocks the UI.
-    Apr 27 2026 — also stamps action_label + ic_name into the GAS archiveRoute payload
-    so the Ready-card history banner can recover Revoked/Re-Routed events after a
-    session reset (was previously session-only via st.session_state['_actions_*']).
-
-    `wo` (Sep 2026, Phase 2 migration) is the work order this cluster was last
-    dispatched under, captured on the main thread by the caller (this function
-    runs off-thread with no ScriptRunContext, so it can't read st.session_state
-    itself). When present, it's used for a best-effort Postgres status mirror
-    -- see the dual-write block below."""
-    # Security audit H17 / M7 - the archive POST is retried on a genuine
-    # transient failure (connection error / non-200) so a network hiccup or a
-    # process recycle mid-flight does not silently lose the archive write
-    # (which would recycle the WO-suffix counter and produce duplicate WOs).
-    # On final failure the route hash is recorded in a module-level set the
-    # main thread surfaces to the dispatcher.
-    #
-    # Sep 2026 (Nick: "removing routes takes way too long... 2 minutes") —
-    # root cause: archiveRoute on the GAS side does the same expensive
-    # full-sheet-scan-plus-JSON.parse-per-row search (across up to 4 sheets)
-    # that saveRoute used to do before its Sep perf fix, and every doPost
-    # action is serialized behind ONE global script lock. The per-attempt
-    # timeout here was 8s with 3 attempts — as the sheets have grown, a
-    # single archiveRoute call can legitimately run past 8s, so the client
-    # gave up and fired attempt 2 while attempt 1 was STILL RUNNING server-
-    # side (Apps Script keeps executing after the HTTP client disconnects).
-    # Attempt 2 then queues behind attempt 1's still-held lock, times out
-    # at 8s waiting on the queue, and attempt 3 repeats the pattern — three
-    # overlapping server-side executions all fighting over one lock instead
-    # of one execution finishing cleanly. That pileup, not any single slow
-    # call, is what stretched a several-second operation into ~2 minutes.
-    # Fix: give each attempt enough time to actually finish (25s, matching
-    # saveRoute's client timeout) so it doesn't abandon a call that's still
-    # working, and drop to 2 attempts so a genuine failure can't stack more
-    # than one extra overlapping execution behind the lock.
-    _archive_payload = {
-        "action": "archiveRoute",
-        "auth_secret": GAS_AUTH,
-        "cluster_hash": cluster_hash,
-        "taskIds": ",".join(task_ids) if task_ids else "",  # Fallback for hash mismatch
-        "payload": payload_json if payload_json else {},
-        "action_label": action_label,
-        "ic_name": ic_name,
-    }
+    """Archive route state in Railway/Postgres, then scrub OnFleet."""
     _archive_ok = False
-    for _attempt in range(2):
+    if DB_ENGINE is not None and wo:
         try:
-            _ar = requests.post(GAS_WEB_APP_URL, json=_archive_payload, timeout=25)
-            if _ar.status_code == 200:
-                # GAS always returns HTTP 200 even on rejections — parse the body
-                # to confirm it actually archived. The auth gate returns
-                # {"error":"Unauthorized"} on a wrong/missing DCC_SHARED_SECRET;
-                # the old status-only check treated that as success, so the sheet
-                # row never moved and the route reverted on next refresh. (Jun 3 2026 - Nick.)
-                try:
-                    _body = _ar.json()
-                except Exception:
-                    _body = None
-                if isinstance(_body, dict) and _body.get("error"):
-                    _log_err("background_sheet_move/archive",
-                             f"GAS error on attempt {_attempt + 1}: {_body.get('error')}")
-                else:
-                    _archive_ok = True
-                    break
-            else:
-                _log_err("background_sheet_move/archive",
-                         f"HTTP {_ar.status_code} on attempt {_attempt + 1}")
-        except Exception as e:
-            _log_err("background_sheet_move/archive",
-                     f"attempt {_attempt + 1}: {type(e).__name__}: {e}")
-        if _attempt < 1:
-            time.sleep(1)
+            _da.archive_route(DB_ENGINE, wo, {"action_label": action_label, "ic_name": ic_name})
+            _archive_ok = True
+        except Exception as _dw_e:
+            _log_err("postgres_archive_route", _dw_e)
     if not _archive_ok:
         try:
             _RECONCILE_FAILURES.add(str(cluster_hash))
         except Exception:
             pass
-        _log_err("background_sheet_move/archive",
-                 f"archive write FAILED after 3 attempts for cluster {cluster_hash}")
-    # --- Phase 2 migration: best-effort Postgres status mirror ---
-    # archive_route() is a plain `UPDATE routes SET status='archived' ...` --
-    # no Onfleet/Monday side effects, so it's safe to call unconditionally
-    # here (unlike markFNAssigned/processDecision/saveToFieldNation, which do
-    # trigger real side effects and are intentionally NOT mirrored this way).
-    # No-ops harmlessly if this wo was never dual-written to Postgres (e.g.
-    # dispatched before this code existed, or DB_ENGINE only came up after).
-    if DB_ENGINE is not None and wo:
-        try:
-            _da.archive_route(DB_ENGINE, wo, {"action_label": action_label, "ic_name": ic_name})
-        except Exception as _dw_e:
-            _log_err("pg_dual_write_archive_route", _dw_e)
     # Onfleet scrub: actually UNASSIGN the worker now (was a no-op GET previously).
     # Sets worker=null and clears WO/PAY metadata so the task returns to the team pool.
     if task_ids:
@@ -2187,21 +2106,12 @@ def background_sheet_move(cluster_hash, payload_json, task_ids=None, action_labe
         
 # --- 2. INSTANT REVOKE LOGIC ---
 def background_fn_revoke(cluster_hash):
-    """Silently removes a route from the Field Nation tab in Google Sheets."""
-    try:
-        requests.post(GAS_WEB_APP_URL, json={
-            "action": "removeFieldNation",
-            "auth_secret": GAS_AUTH,
-            "cluster_hash": cluster_hash
-        }, timeout=15)
-    except Exception as e:
-        _log_err("background_fn_revoke", e)
-    # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
+    """Remove a Field Nation route from Railway/Postgres."""
     if DB_ENGINE is not None:
         try:
             _da.mirror_remove_field_nation_by_cluster_hash(DB_ENGINE, cluster_hash)
         except Exception as _dw_e:
-            _log_err("pg_dual_write_remove_field_nation", _dw_e)
+            _log_err("postgres_remove_field_nation", _dw_e)
 
 def _onfleet_get_state(tid, auth_header):
     """GET an Onfleet task and return (tid, is_completed). Defaults to NOT completed
@@ -2726,32 +2636,18 @@ def render_finalization_checklist(cluster_hash, pod_name, prefix="chk", is_fn=Fa
 
     if _all_checked:
         if st.button("🏁 Finalize Route", key=f"finbtn_{prefix}_{cluster_hash}_{pod_name}", type="primary", use_container_width=True):
-            # 1. 🚀 SYNCHRONOUS SHEET UPDATE
-            with st.spinner("Archiving to Google Sheets..."):
-                try:
-                    res = requests.post(GAS_WEB_APP_URL, json={"action": "finalizeRoute", "auth_secret": GAS_AUTH, "cluster_hash": cluster_hash}, timeout=15)
-                    res_data = res.json() # 🌟 Parse the response!
-                    
-                    if not res_data.get("success"):
-                        st.error(f"Google Sheets Error: {res_data.get('error')}")
-                        st.stop() # 🚨 HALT EXECUTION! Do not hide the card if the database failed.
-                except Exception as e:
-                    st.error(f"Failed to connect to Google Sheets: {e}")
-                    st.stop() # 🚨 HALT EXECUTION!
-            
-            # 2. 🧠 INSTANT UI OVERRIDE (Only runs if Google Sheets confirmed the move!)
+            # 1. Railway/Postgres is the source of truth.
+            try:
+                if DB_ENGINE is None:
+                    raise RuntimeError("Railway database is unavailable")
+                _da.finalize_route(DB_ENGINE, st.session_state.get(f"wo_{cluster_hash}", ""))
+            except Exception as e:
+                st.error(f"Failed to finalize route in Railway: {e}")
+                st.stop()
+
+            # 2. 🧠 INSTANT UI OVERRIDE
             st.session_state[f"route_state_{cluster_hash}"] = "finalized"
             st.session_state[f"reverted_{cluster_hash}"] = True
-
-            # --- Phase 2 migration: best-effort Postgres status mirror ---
-            # finalize_route() is a plain status UPDATE, no Onfleet/Monday
-            # side effects -- safe to mirror directly, unlike the FN/decision
-            # actions. No-ops harmlessly if this wo isn't in Postgres yet.
-            if DB_ENGINE is not None:
-                try:
-                    _da.finalize_route(DB_ENGINE, st.session_state.get(f"wo_{cluster_hash}", ""))
-                except Exception as _dw_e:
-                    _log_err("pg_dual_write_finalize_route", _dw_e)
 
             st.toast("🏁 Route Finalized! Moving to Finalized tab...")
             st.rerun(scope="app")
@@ -3281,37 +3177,33 @@ def extract_art_file(notes: str) -> str:
 
 
 def fetch_sync_status(since: int = 0):
-    """Cheap GAS poll — returns (version, changes) tuple.
-
-    With ``since=N``, GAS returns any change events recorded with v > N
-    (processDecision / archiveRoute / finalizeRoute / etc.) so we can patch
-    st.session_state.sent_db in-memory without re-fetching the entire sheet.
-    Each change event is a dict like::
-        {v, a, r, t, d, ts}
-        # version, action, routeId, taskIds (csv), decision, timestamp_ms
-
-    Returns ``(version, changes_list)``. On error returns ``(-1, [])`` so
-    auto_sync_checker can fall back gracefully if the GAS sync patch isn't
-    deployed yet.
-    """
+    """Railway/Postgres change poll. Returns (version, changes)."""
+    if DB_ENGINE is None:
+        return (-1, [])
     try:
-        r = requests.get(
-            GAS_WEB_APP_URL,
-            params={"action": "getSyncVersion", "auth_secret": GAS_AUTH, "since": str(int(since or 0))},
-            timeout=5,
-        )
-        if r.status_code != 200:
-            return (-1, [])
-        j = r.json()
-        v = int(j.get("version", 0) or 0)
-        ch = j.get("changes", [])
-        if not isinstance(ch, list):
-            ch = []
-        return (v, ch)
+        rows = _da.get_changes_since(DB_ENGINE, int(since or 0))
+        changes = []
+        version = int(since or 0)
+        for row in rows:
+            version = max(version, int(row.get("version") or 0))
+            payload = row.get("payload") or {}
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            decision = str(payload.get("decision") or "")
+            changes.append({
+                "v": row.get("version"),
+                "a": row.get("action"),
+                "r": row.get("route_wo"),
+                "t": str(payload.get("taskIds") or payload.get("task_ids") or ""),
+                "d": "accepted" if decision == "accept" else ("declined" if decision == "decline" else decision),
+                "ts": row.get("created_at"),
+            })
+        return (version, changes)
     except Exception as _ss_e:
-        # Security audit L4 - log instead of failing silently so an
-        # intermittent sync outage is diagnosable in Railway logs.
-        _log_err("fetch_sync_status", _ss_e)
+        _log_err("fetch_sync_status/postgres", _ss_e)
         return (-1, [])
 
 
@@ -3742,58 +3634,44 @@ def _cached_fetch_sent_records_from_sheet():
         return {}, {}, set(), {}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_fetch_sent_records_from_db():
+    if DB_ENGINE is None:
+        return {}, {}, set(), {}
+    return _da.get_sent_records_from_db(
+        DB_ENGINE, POD_CONFIGS, STATE_MAP, cutoff_date=MIGRATION_CUTOFF_DATE
+    )
+
+
 def fetch_sent_records_from_sheet():
-    """Public entry point. Calls the cached fetcher then runs the per-call
-    side-effects (currently: hydrate _fn_posted into session_state).
-
-    Background: @st.cache_data short-circuits the function body on a cache
-    hit, which means side-effects inside the cached function don't run on
-    hits — only on misses. The FN-Posted hydration is a side-effect on
-    session_state, so it was being silently skipped on every cache hit
-    after the first. Symptom: dispatcher hits Posted, GAS row updates,
-    DCC reload pulls cached tuple, FN tab forgets which routes were Posted.
-
-    Fix: cached function parks fn_posted_dict on ghost_routes['_fn_posted'].
-    This wrapper merges that dict into session_state on every call. Merge
-    uses setdefault so an in-flight click whose GAS write hasn't been read
-    back yet stays put.
-    """
-    sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_sheet()
+    """Compatibility name; production source is Railway Postgres."""
+    sent_dict, ghost_routes, archived_wos, history_db = _cached_fetch_sent_records_from_db()
     try:
-        _fp_from_sheet = (ghost_routes or {}).get('_fn_posted', {}) or {}
-        if _fp_from_sheet:
+        _fp_from_db = (ghost_routes or {}).get('_fn_posted', {}) or {}
+        if _fp_from_db:
             _ss_fp = st.session_state.get('_fn_posted', {}) or {}
-            for _h, _ts in _fp_from_sheet.items():
+            for _h, _ts in _fp_from_db.items():
                 _ss_fp.setdefault(_h, _ts)
             st.session_state['_fn_posted'] = _ss_fp
     except Exception as _fpe:
-        _log_err("fn_posted_hydrate_wrapper", _fpe)
-    # 🌐 Same hydration pattern for _fn_provider: cache-hit-safe merge into
-    # session_state so the Assigned Provider name survives reloads.
+        _log_err("fn_posted_hydrate_db", _fpe)
     try:
-        _fpv_from_sheet = (ghost_routes or {}).get('_fn_provider', {}) or {}
-        if _fpv_from_sheet:
+        _fpv_from_db = (ghost_routes or {}).get('_fn_provider', {}) or {}
+        if _fpv_from_db:
             _ss_fpv = st.session_state.get('_fn_provider', {}) or {}
-            for _h, _name in _fpv_from_sheet.items():
-                # Sheet value wins on conflict — it's the source of truth.
+            for _h, _name in _fpv_from_db.items():
                 _ss_fpv[_h] = _name
             st.session_state['_fn_provider'] = _ss_fpv
     except Exception as _fpv:
-        _log_err("fn_provider_hydrate_wrapper", _fpv)
-    # Security audit M5 - lift the archive-read-failure flag into
-    # session_state so the dispatch WO-suffix block can warn the user.
-    try:
-        st.session_state['_archive_read_failed'] = bool(
-            (ghost_routes or {}).get('_archive_read_failed', False)
-        )
-    except Exception:
-        pass
+        _log_err("fn_provider_hydrate_db", _fpv)
+    st.session_state['_archive_read_failed'] = False
     return sent_dict, ghost_routes, archived_wos, history_db
+
 
 
 # Forward .clear() so existing `fetch_sent_records_from_sheet.clear()` call
 # sites still invalidate the underlying cache without having to be edited.
-fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_sheet.clear
+fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_db.clear
 
 # ─── Routing engine: Mapbox Optimization API + persistent shared cache ───
 # Two-stage cache:
@@ -6826,42 +6704,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     # more retries at the same fixed gap, since a longer-than-
                     # usual blip is exactly the case a flat short gap can't
                     # cover.
-                    _resp = None
-                    _SR_MAX_ATTEMPTS = 3
-                    for _sr_attempt in range(_SR_MAX_ATTEMPTS):
-                        _sr_backoff = 2 * (2 ** _sr_attempt)  # 2s, 4s (2nd/3rd attempt only)
-                        try:
-                            _resp = requests.post(GAS_WEB_APP_URL, json={"action": "saveRoute", "auth_secret": GAS_AUTH, "payload": payload}, timeout=25)
-                        except requests.exceptions.Timeout:
-                            raise
-                        except requests.exceptions.RequestException:
-                            if _sr_attempt < _SR_MAX_ATTEMPTS - 1:
-                                time.sleep(_sr_backoff)
-                                continue
-                            raise
-                        if _resp.status_code >= 400 and _sr_attempt < _SR_MAX_ATTEMPTS - 1:
-                            time.sleep(_sr_backoff)
-                            continue
-                        break
                     try:
-                        _dispatch_result = _resp.json()
-                    except ValueError:
-                        # GAS returned 200/non-200 but the body wasn't JSON —
-                        # surface WHICH failure mode instead of the raw
-                        # "Expecting value" decoder message, so it's
-                        # diagnosable from the UI without digging through logs.
-                        _raw = (_resp.text or "").strip()
-                        if "accounts.google.com" in _raw or "ServiceLogin" in _raw:
-                            _msg = "GAS web app is asking for Google sign-in — deployment access/permissions changed. Redeploy the Apps Script (Deploy > Manage deployments) with 'Who has access: Anyone', then update GAS_WEB_APP_URL if the URL changed."
-                        elif not _raw:
-                            _msg = f"GAS returned an empty response (HTTP {_resp.status_code}) — the script likely errored or timed out server-side. Check Apps Script > Executions for the saveRoute call."
-                        else:
-                            _msg = f"GAS returned non-JSON (HTTP {_resp.status_code}): {_raw[:200]}"
-                        _dispatch_result = {"_error": _msg}
-                except requests.exceptions.Timeout:
-                    _dispatch_result = {"_timeout": True}
-                except Exception as e:
-                    _dispatch_result = {"_error": str(e)}
+                        if DB_ENGINE is None:
+                            raise RuntimeError("Railway database is unavailable")
+                        _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
+                        _dispatch_result = {"success": True, "routeId": wo_val}
+                    except Exception as e:
+                        _dispatch_result = {"_error": str(e)}
 
             # Security audit H23 - the saveRoute POST has resolved; release
             # the in-flight guard so a later legitimate dispatch / resend works.
@@ -6890,22 +6739,6 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[f"due_{cluster_hash}"] = str(due)
                 st.session_state[f"route_state_{cluster_hash}"] = "email_sent"
                 st.session_state[f"reverted_{cluster_hash}"] = False
-                # --- Phase 2 migration: best-effort Postgres dual-write ---
-                # Mirrors this successful GAS saveRoute into Postgres so the
-                # portal (migration/portal_api.py) and any future read-side
-                # work have real, live route data instead of only the
-                # one-time historical import. Purely additive: save_route()
-                # only INSERTs (ON CONFLICT (wo) DO NOTHING) and appends a
-                # route_events row -- no Onfleet/Monday side effects, and any
-                # failure here is swallowed and logged, never surfaced to the
-                # dispatcher or allowed to affect the GAS path above, which
-                # remains the sole source of truth until migration/README.md
-                # Step 8 (the real cutover) is done and verified.
-                if DB_ENGINE is not None:
-                    try:
-                        _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
-                    except Exception as _dw_e:
-                        _log_err("pg_dual_write_save_route", _dw_e)
                 # Sep 2026 — Nick: "after the email is sent the refresh to
                 # reflect the new change takes at least 2 minutes." Root
                 # cause: this card doesn't need fresh sheet data to show up

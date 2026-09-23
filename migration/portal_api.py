@@ -78,6 +78,14 @@ _ALLOWED_ORIGINS = [
 ]
 
 app = FastAPI(title="DCC portal API")
+
+
+@app.on_event("startup")
+def _optional_one_time_recovery() -> None:
+    """Explicit one-time Railway trigger; disabled during normal operation."""
+    if os.environ.get("RECOVERY_RUN_ON_STARTUP") == "1":
+        from .recover_legacy_routes import main
+        main()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,

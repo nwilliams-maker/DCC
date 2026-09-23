@@ -20,11 +20,8 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 
 GIDS = (
-    ("sent", "1477617688"),
-    ("accepted", "934075207"),
-    ("declined", "600909788"),
-    ("finalized", "1907347870"),
-    ("archived", "1841508981"),
+    ("sent", "1477617688"),  # Saved_Routes
+    ("accepted", "934075207"),  # Accepted routes
 )
 FN_GID = "1396320527"
 CHICAGO = ZoneInfo("America/Chicago")
@@ -105,7 +102,7 @@ def main() -> None:
             raise RuntimeError(f"Too many invalid {status} rows: {len(parsed)}/{len(fetched)}")
         routes.extend(parsed)
         print(f"source {status}: {len(parsed)} valid rows", flush=True)
-    fn_rows = source_rows(sheet_url, FN_GID)
+    fn_rows = []  # Only the two requested route tabs are recovered.
     chosen = canonical_routes(routes)
     engine = sa.create_engine(database_url, pool_pre_ping=True)
     with engine.connect() as conn:

@@ -289,6 +289,12 @@ def sync_one(route: dict[str, Any], group_id: str | None, token: str, page: Any)
         return {"status": "skipped", "reason": "blank WO"}
     item = monday_find_item_by_name(wo_name)
     if item is not None and monday_item_has_file(item):
+        if TEST_WO == wo_name:
+            match = tb_find_work_order(token, wo_name)
+            filename, pdf_bytes = download_portal_packing_list(page, int(match["id"]), wo_name)
+            return {"wo": wo_name, "item_id": item.get("id"), "created": False,
+                    "status": "verified_portal_pdf_existing_item", "filename": filename,
+                    "bytes": len(pdf_bytes)}
         return {"wo": wo_name, "item_id": item.get("id"), "created": False, "status": "already_has_pdf"}
 
     match = tb_find_work_order(token, wo_name)

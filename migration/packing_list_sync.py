@@ -60,12 +60,32 @@ def inspect_tb_schema(token: str) -> dict[str, Any]:
         # __typename is legal for object/list object selections and is useful
         # for eliciting exact missing-argument/type errors without reading data.
         q = f"query PackingProbe {{ {field} {{ __typename }} }}"
-        results[field] = _tb_query(token, q)
+        raw = _tb_query(token, q)
+        body = raw.get("body") if isinstance(raw, dict) else {}
+        errs = (body or {}).get("errors") or []
+        results[field] = {
+            "http_status": raw.get("http_status"),
+            "error": "; ".join(str(e.get("message") or e) for e in errs) if errs else None,
+            "typename": ((((body or {}).get("data") or {}).get(field) or {}).get("__typename")
+                         if isinstance(((body or {}).get("data") or {}).get(field), dict) else None),
+        }
     # Discover WorkOrdersConnection container fields and WorkOrder fields.
     connection_probes: dict[str, Any] = {}
     for container_field in ("data", "nodes", "items", "edges"):
         q = f"query ConnectionProbe {{ workOrders {{ {container_field} {{ __typename }} }} }}"
-        connection_probes[container_field] = _tb_query(token, q)
+        raw = _tb_query(token, q)
+        body = raw.get("body") if isinstance(raw, dict) else {}
+        errs = (body or {}).get("errors") or []
+        conn = ((body or {}).get("data") or {}).get("workOrders") or {}
+        val = conn.get(container_field) if isinstance(conn, dict) else None
+        connection_probes[container_field] = {
+            "http_status": raw.get("http_status"),
+            "error": "; ".join(str(e.get("message") or e) for e in errs) if errs else None,
+            "sample_typename": (
+                val[0].get("__typename") if isinstance(val, list) and val and isinstance(val[0], dict)
+                else None
+            ),
+        }
 
     work_order_fields: dict[str, Any] = {}
     # Lighthouse-style connections generally expose `data`; probe candidate
@@ -77,7 +97,24 @@ def inspect_tb_schema(token: str) -> dict[str, Any]:
         "file", "fileUrl", "downloadUrl", "document", "documents", "files",
     ):
         q = f"query WorkOrderFieldProbe {{ workOrders {{ nodes {{ {field} }} }} }}"
-        work_order_fields[field] = _tb_query(token, q)
+        raw = _tb_query(token, q)
+        body = raw.get("body") if isinstance(raw, dict) else {}
+        errs = (body or {}).get("errors") or []
+        nodes = (((body or {}).get("data") or {}).get("workOrders") or {}).get("nodes") or []
+        if errs:
+            work_order_fields[field] = {
+                "http_status": raw.get("http_status"),
+                "error": "; ".join(str(e.get("message") or e) for e in errs),
+            }
+        else:
+            vals = []
+            for node in nodes[:3]:
+                if isinstance(node, dict):
+                    vals.append(node.get(field))
+            work_order_fields[field] = {
+                "http_status": raw.get("http_status"),
+                "sample_values": vals,
+            }
 
     return {
         "candidate_probes": results,

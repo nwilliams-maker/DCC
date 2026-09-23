@@ -75,6 +75,10 @@ def monday_query(query: str, variables: dict[str, Any] | None = None) -> dict[st
 
 def get_orange_accepted_routes() -> list[dict[str, Any]]:
     """Read accepted Orange routes from Railway Postgres only."""
+    # A named work order permits one supervised legacy-route test after the
+    # Postgres cutover; it never scans a Sheet or processes other old routes.
+    if TEST_WO:
+        return [{"wo": TEST_WO}]
     db_url = _clean(os.environ.get("DATABASE_URL"))
     if not db_url:
         raise RuntimeError("DATABASE_URL is not configured")

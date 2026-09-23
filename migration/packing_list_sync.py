@@ -48,78 +48,45 @@ def _tb_query(token: str, query: str, variables: dict[str, Any] | None = None) -
 
 
 def inspect_tb_schema(token: str) -> dict[str, Any]:
-    """Probe likely root fields without relying on GraphQL introspection."""
-    candidates = [
-        "workOrders", "workorders", "workOrder", "workorder",
-        "orders", "order", "packingLists", "packingList",
-        "workOrderPackingList", "printWorkOrder", "workOrderPrint",
-        "workOrderPdf", "workOrderPDF",
-    ]
-    results: dict[str, Any] = {}
-    for field in candidates:
-        # __typename is legal for object/list object selections and is useful
-        # for eliciting exact missing-argument/type errors without reading data.
-        q = f"query PackingProbe {{ {field} {{ __typename }} }}"
-        raw = _tb_query(token, q)
-        body = raw.get("body") if isinstance(raw, dict) else {}
-        errs = (body or {}).get("errors") or []
-        results[field] = {
-            "http_status": raw.get("http_status"),
-            "error": "; ".join(str(e.get("message") or e) for e in errs) if errs else None,
-            "typename": ((((body or {}).get("data") or {}).get(field) or {}).get("__typename")
-                         if isinstance(((body or {}).get("data") or {}).get(field), dict) else None),
+    q = """query PackingSchema {
+      workOrderType: __type(name: "WorkOrder") {
+        name
+        fields(includeDeprecated: true) {
+          name
+          args { name type { kind name ofType { kind name } } }
+          type { kind name ofType { kind name ofType { kind name } } }
         }
-    # Discover WorkOrdersConnection container fields and WorkOrder fields.
-    connection_probes: dict[str, Any] = {}
-    for container_field in ("data", "nodes", "items", "edges"):
-        q = f"query ConnectionProbe {{ workOrders {{ {container_field} {{ __typename }} }} }}"
-        raw = _tb_query(token, q)
-        body = raw.get("body") if isinstance(raw, dict) else {}
-        errs = (body or {}).get("errors") or []
-        conn = ((body or {}).get("data") or {}).get("workOrders") or {}
-        val = conn.get(container_field) if isinstance(conn, dict) else None
-        connection_probes[container_field] = {
-            "http_status": raw.get("http_status"),
-            "error": "; ".join(str(e.get("message") or e) for e in errs) if errs else None,
-            "sample_typename": (
-                val[0].get("__typename") if isinstance(val, list) and val and isinstance(val[0], dict)
-                else None
-            ),
+      }
+      connectionType: __type(name: "WorkOrdersConnection") {
+        name
+        fields(includeDeprecated: true) {
+          name
+          args { name type { kind name ofType { kind name } } }
+          type { kind name ofType { kind name ofType { kind name } } }
         }
-
-    work_order_fields: dict[str, Any] = {}
-    # Lighthouse-style connections generally expose `data`; probe candidate
-    # scalar/document fields one at a time so one bad field cannot mask others.
-    for field in (
-        "id", "name", "workOrderNumber", "workOrder", "orderNumber", "number",
-        "packingList", "packingListUrl", "packingListURL", "packingSlip",
-        "packingSlipUrl", "packingSlipURL", "pdf", "pdfUrl", "pdfURL",
-        "file", "fileUrl", "downloadUrl", "document", "documents", "files",
-    ):
-        q = f"query WorkOrderFieldProbe {{ workOrders {{ nodes {{ {field} }} }} }}"
-        raw = _tb_query(token, q)
-        body = raw.get("body") if isinstance(raw, dict) else {}
-        errs = (body or {}).get("errors") or []
-        nodes = (((body or {}).get("data") or {}).get("workOrders") or {}).get("nodes") or []
-        if errs:
-            work_order_fields[field] = {
-                "http_status": raw.get("http_status"),
-                "error": "; ".join(str(e.get("message") or e) for e in errs),
-            }
-        else:
-            vals = []
-            for node in nodes[:3]:
-                if isinstance(node, dict):
-                    vals.append(node.get(field))
-            work_order_fields[field] = {
-                "http_status": raw.get("http_status"),
-                "sample_values": vals,
-            }
-
+      }
+      queryType: __type(name: "Query") {
+        fields(includeDeprecated: true) {
+          name
+          args { name type { kind name ofType { kind name } } }
+          type { kind name ofType { kind name ofType { kind name } } }
+        }
+      }
+    }"""
+    raw = _tb_query(token, q)
+    body = raw.get("body") or {}
+    if body.get("errors"):
+        return {"http_status": raw.get("http_status"), "errors": body.get("errors")}
+    data = body.get("data") or {}
+    query_fields = []
+    for fld in ((data.get("queryType") or {}).get("fields") or []):
+        n = str(fld.get("name") or "")
+        if any(term in n.lower() for term in ("work", "order", "pack", "print", "pdf", "file", "document")):
+            query_fields.append(fld)
     return {
-        "candidate_probes": results,
-        "connection_probes": connection_probes,
-        "work_order_fields": work_order_fields,
+        "workOrderType": data.get("workOrderType"),
+        "connectionType": data.get("connectionType"),
+        "queryFields": query_fields,
     }
 
 
@@ -190,7 +157,8 @@ def main() -> None:
         result["monday_error"] = str(exc)
 
     # Do not print credentials or auth tokens.
-    print(json.dumps(result, indent=2, default=str))
+    # Keep one compact line so Railway logs are readable.
+    print("PACKING_PROBE=" + json.dumps(result, separators=(",", ":"), default=str))
 
 
 if __name__ == "__main__":

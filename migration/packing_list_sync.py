@@ -190,6 +190,10 @@ def main() -> None:
     except Exception as exc:
         result["orange_sample_error"] = str(exc)
     try:
+        result["portal_frontend"] = inspect_portal_frontend()
+    except Exception as exc:
+        result["portal_frontend_error"] = str(exc)
+    try:
         result["monday"] = inspect_monday_board()
     except Exception as exc:
         result["monday_error"] = str(exc)

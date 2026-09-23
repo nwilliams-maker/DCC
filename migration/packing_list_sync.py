@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import io
 import json
 import os
-import re
-from datetime import datetime, timezone
 from typing import Any
 
 import requests
 import sqlalchemy as sa
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from playwright.sync_api import sync_playwright
 
 TB_GQL = "https://be-terraboost-v3.terraboost.com/graphql"
 MONDAY_GQL = "https://api.monday.com/v2"
@@ -116,8 +109,9 @@ def get_orange_accepted_routes() -> list[dict[str, Any]]:
           ) AS accepted_at
         FROM routes r
         LEFT JOIN contractors c ON c.id = r.contractor_id
+          OR (r.contractor_id IS NULL AND lower(c.email) = lower(r.payload->>'ice'))
         WHERE r.status::text = 'accepted'
-          AND lower(coalesce(c.pod_color, r.payload->>'pod', r.payload->>'pod_name', '')) = :pod
+          AND lower(coalesce(nullif(trim(r.payload->>'pod'), ''), nullif(trim(c.pod_color), ''), nullif(trim(r.payload->>'pod_name'), ''), '')) = :pod
           {where_time}
           {where_test}
         ORDER BY coalesce((
@@ -173,7 +167,7 @@ def monday_find_item_by_name(name: str) -> dict[str, Any] | None:
                 id
                 name
                 group { id }
-                column_values(ids:["files__1"]) { id text value }
+                column_values { id text value }
               }
             }
           }
@@ -239,6 +233,8 @@ def monday_upload_file(item_id: str, filename: str, pdf_bytes: bytes) -> None:
     body = r.json()
     if body.get("errors"):
         raise RuntimeError("; ".join(_clean(e.get("message") or e) for e in body["errors"]))
+    if not (((body.get("data") or {}).get("add_file_to_column") or {}).get("id")):
+        raise RuntimeError("Monday upload returned no asset ID")
 
 
 def tb_find_work_order(token: str, wo: str) -> dict[str, Any]:
@@ -251,187 +247,54 @@ def tb_find_work_order(token: str, wo: str) -> dict[str, Any]:
     exact = [n for n in nodes if _clean(n.get("onfleetRoutePlanName")) == wo]
     if exact:
         return exact[0]
-    if len(nodes) == 1:
-        return nodes[0]
     raise RuntimeError(f"Terraboost work order '{wo}' was not uniquely matched")
 
 
-def tb_get_work_order(token: str, work_order_id: int) -> dict[str, Any]:
-    q = """query GetWorkOrderById($id:Int!) {
-      workOrderById(id:$id) {
-        id
-        installerName
-        onfleetRoutePlanName
-        statusId
-        workOrderDueDateLocal
-        routePlanTimezone
-        workOrderTasks {
-          id
-          name
-          kioskId
-          campaignId
-          notes
-          taskTypeId
-          workOrderTaskSequence
-          campaign {
-            id
-            orderNumber
-            name
-            customerCampaigns {
-              customer { customerType { typeName } }
-            }
-          }
-          campaignKiosk {
-            boosted
-            printCollection { collectionName }
-          }
-          kiosk {
-            importKioskId
-            isDigital
-            kioskLocation { typeName }
-            venueId
-            venue {
-              venueName
-              address1
-              address2
-              city
-              state
-              zip
-            }
-          }
-        }
-      }
-    }"""
-    wo = tb_query(token, q, {"id": int(work_order_id)}).get("workOrderById")
-    if not wo:
-        raise RuntimeError(f"Terraboost work order id {work_order_id} not found")
-    return wo
+def download_portal_packing_list(page: Any, work_order_id: int, wo: str) -> tuple[str, bytes]:
+    """Download the PDF produced by Terraboost's own Work Order button."""
+    page.goto(f"https://manage.terraboost.com/workorders/{work_order_id}", wait_until="domcontentloaded")
+    email_box = page.get_by_role("textbox", name="Email Address")
+    if email_box.is_visible(timeout=10000):
+        email = _clean(os.environ.get("TERRABOOST_EMAIL"))
+        password = _clean(os.environ.get("TERRABOOST_PASSWORD"))
+        if not email or not password:
+            raise RuntimeError("Terraboost portal credentials are not configured")
+        email_box.fill(email)
+        page.get_by_role("textbox", name="Password").fill(password)
+        page.get_by_role("button", name="Sign in").click()
+        email_box.wait_for(state="hidden", timeout=30000)
+        page.goto(f"https://manage.terraboost.com/workorders/{work_order_id}", wait_until="domcontentloaded")
+
+    button = page.get_by_role("button", name="Download Packing List")
+    button.wait_for(state="visible", timeout=45000)
+    with page.expect_download(timeout=90000) as download_event:
+        button.click()
+    download = download_event.value
+    pdf_bytes = open(download.path(), "rb").read()
+    if not pdf_bytes.startswith(b"%PDF-") or len(pdf_bytes) < 1000:
+        raise RuntimeError(f"Terraboost returned an invalid packing-list PDF for '{wo}'")
+    filename = download.suggested_filename
+    if not filename.lower().endswith(".pdf"):
+        raise RuntimeError("Terraboost download did not have a PDF filename")
+    return filename, pdf_bytes
 
 
-def tb_record_type_names(token: str) -> dict[int, str]:
-    q = """query {
-      recordTypes(where:{active:{eq:true}}) { id typeName }
-    }"""
-    rows = tb_query(token, q).get("recordTypes") or []
-    out: dict[int, str] = {}
-    for row in rows:
-        try:
-            out[int(row.get("id"))] = _clean(row.get("typeName"))
-        except Exception:
-            pass
-    return out
-
-
-def _fmt_address(venue: dict[str, Any]) -> str:
-    line1 = ", ".join(x for x in [_clean(venue.get("address1")), _clean(venue.get("address2"))] if x)
-    city_state = ", ".join(x for x in [_clean(venue.get("city")), _clean(venue.get("state"))] if x)
-    tail = " ".join(x for x in [city_state, _clean(venue.get("zip"))] if x)
-    return ", ".join(x for x in [line1, tail] if x)
-
-
-def build_packing_pdf(wo: dict[str, Any], type_names: dict[int, str]) -> tuple[str, bytes]:
-    route_name = _clean(wo.get("onfleetRoutePlanName")) or f"WO-{wo.get('id')}"
-    installer = _clean(wo.get("installerName")) or "Unassigned"
-    tasks = list(wo.get("workOrderTasks") or [])
-    tasks.sort(key=lambda t: (t.get("workOrderTaskSequence") is None, t.get("workOrderTaskSequence") or 999999, t.get("id") or 0))
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(letter),
-        leftMargin=0.25 * inch,
-        rightMargin=0.25 * inch,
-        topMargin=0.25 * inch,
-        bottomMargin=0.25 * inch,
-        title=route_name,
-    )
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph(f"<b>{installer}</b>", styles["Title"]),
-        Paragraph(f"WO#: {route_name}", styles["Normal"]),
-        Spacer(1, 8),
-    ]
-
-    headers = ["Kiosk ID", "Notes", "Boosted/Standard", "SIO", "Task Type", "Venue Name", "Client Company", "Allocated Resources", "Customer Type", "State"]
-    rows: list[list[Any]] = [headers]
-
-    for t in tasks:
-        kiosk = t.get("kiosk") or {}
-        venue = kiosk.get("venue") or {}
-        campaign = t.get("campaign") or {}
-        campaign_kiosk = t.get("campaignKiosk") or {}
-        customer_type = ""
-        ccs = campaign.get("customerCampaigns") or []
-        if ccs:
-            customer_type = _clean((((ccs[0] or {}).get("customer") or {}).get("customerType") or {}).get("typeName"))
-        task_type = type_names.get(int(t.get("taskTypeId") or 0), "")
-        rows.append([
-            _clean(kiosk.get("importKioskId")),
-            _clean(t.get("notes")),
-            "Boosted" if campaign_kiosk.get("boosted") else "Standard",
-            _clean(campaign.get("orderNumber")) or "Default",
-            task_type,
-            _clean(venue.get("venueName")),
-            _clean(campaign.get("name")) or "Default",
-            _clean(((campaign_kiosk.get("printCollection") or {}).get("collectionName"))),
-            customer_type,
-            _clean(venue.get("state")),
-        ])
-
-    table = Table(
-        rows,
-        repeatRows=1,
-        colWidths=[0.65*inch,1.0*inch,0.8*inch,0.72*inch,0.85*inch,0.95*inch,1.55*inch,1.0*inch,0.8*inch,0.45*inch],
-    )
-    style_cmds = [
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 8),
-        ("FONTSIZE", (0,1), (-1,-1), 8),
-        ("GRID", (0,0), (-1,-1), 0.35, colors.lightgrey),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (-1,-1), 3),
-        ("RIGHTPADDING", (0,0), (-1,-1), 3),
-        ("TOPPADDING", (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-    ]
-    for i, t in enumerate(tasks, start=1):
-        if (t.get("campaignKiosk") or {}).get("boosted"):
-            style_cmds.append(("BACKGROUND", (0,i), (-1,i), colors.HexColor("#DDEEFF")))
-    table.setStyle(TableStyle(style_cmds))
-    story.append(table)
-    doc.build(story)
-
-    safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", route_name).strip() or f"WO-{wo.get('id')}"
-    return f"{safe}.pdf", buf.getvalue()
-
-
-def sync_one(route: dict[str, Any], board: dict[str, Any], group_id: str | None, token: str, type_names: dict[int, str]) -> dict[str, Any]:
+def sync_one(route: dict[str, Any], group_id: str | None, token: str, page: Any) -> dict[str, Any]:
     wo_name = _clean(route.get("wo"))
     if not wo_name:
         return {"status": "skipped", "reason": "blank WO"}
-
     item = monday_find_item_by_name(wo_name)
-    created = False
-    if item is None:
-        item = monday_create_item(wo_name, group_id)
-        item["column_values"] = []
-        created = True
-
-    if monday_item_has_file(item):
-        return {"wo": wo_name, "item_id": item.get("id"), "created": created, "status": "already_has_pdf"}
+    if item is not None and monday_item_has_file(item):
+        return {"wo": wo_name, "item_id": item.get("id"), "created": False, "status": "already_has_pdf"}
 
     match = tb_find_work_order(token, wo_name)
-    detail = tb_get_work_order(token, int(match["id"]))
-    filename, pdf_bytes = build_packing_pdf(detail, type_names)
+    filename, pdf_bytes = download_portal_packing_list(page, int(match["id"]), wo_name)
+    created = item is None
+    if created:
+        item = monday_create_item(wo_name, group_id)
     monday_upload_file(str(item["id"]), filename, pdf_bytes)
-    return {
-        "wo": wo_name,
-        "item_id": item.get("id"),
-        "created": created,
-        "status": "uploaded",
-        "filename": filename,
-        "bytes": len(pdf_bytes),
-    }
+    return {"wo": wo_name, "item_id": item["id"], "created": created,
+            "status": "uploaded", "filename": filename, "bytes": len(pdf_bytes)}
 
 
 def main() -> None:
@@ -447,23 +310,25 @@ def main() -> None:
     group_id = choose_target_group(board)
     result["board_name"] = board.get("name")
     result["group_id"] = group_id
-
     routes = get_orange_accepted_routes()
     result["candidate_count"] = len(routes)
-    if not routes:
-        print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str), flush=True)
-        return
-
-    token = tb_login()
-    type_names = tb_record_type_names(token)
-
-    for route in routes:
-        try:
-            result["processed"].append(sync_one(route, board, group_id, token, type_names))
-        except Exception as exc:
-            result["errors"].append({"wo": _clean(route.get("wo")), "error": str(exc)[:500]})
-
+    if routes:
+        token = tb_login()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(accept_downloads=True)
+            try:
+                page = context.new_page()
+                for route in routes:
+                    try:
+                        result["processed"].append(sync_one(route, group_id, token, page))
+                    except Exception as exc:
+                        result["errors"].append({"wo": _clean(route.get("wo")), "error": str(exc)[:500]})
+            finally:
+                browser.close()
     print("PACKING_SYNC=" + json.dumps(result, separators=(",", ":"), default=str), flush=True)
+    if result["errors"]:
+        raise RuntimeError(f"Packing sync failed for {len(result['errors'])} work order(s)")
 
 
 if __name__ == "__main__":

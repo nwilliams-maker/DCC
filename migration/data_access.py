@@ -98,14 +98,15 @@ def save_route(engine: sa.Engine, wo: str, contractor_name: str, payload: dict[s
         conn.execute(
             sa.text(
                 """
-                INSERT INTO routes (wo, contractor_name, status, comp, due, locs, stop_data, cluster_hash, payload)
-                VALUES (:wo, :contractor_name, 'sent', :comp, :due, :locs, :stop_data, :cluster_hash, :payload)
+                INSERT INTO routes (wo, contractor_id, contractor_name, status, comp, due, locs, stop_data, cluster_hash, payload)
+                VALUES (:wo, (SELECT id FROM contractors WHERE lower(email) = lower(:email) LIMIT 1), :contractor_name, 'sent', :comp, :due, :locs, :stop_data, :cluster_hash, :payload)
                 ON CONFLICT (wo) DO NOTHING
                 """
             ),
             {
                 "wo": wo,
                 "contractor_name": contractor_name,
+                "email": str(payload.get("ice") or "").strip(),
                 "comp": payload.get("comp"),
                 "due": payload.get("due"),
                 "locs": json.dumps(payload.get("locs")) if payload.get("locs") is not None else None,

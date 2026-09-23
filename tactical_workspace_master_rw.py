@@ -6613,6 +6613,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     "icn": ic.get('name', 'Unknown'),
                     "ice": ic.get('email', ''),
                     "wo": wo_val, 
+                    "pod": pod_name,
                     "city": cluster.get('city', 'Unknown'),
                     "state": cluster.get('state', 'Unknown'),
                     "due": str(due), "comp": final_pay, "lCnt": cluster['stops'], "mi": mi, "time": t_str,

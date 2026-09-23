@@ -53,6 +53,14 @@ def sheet_time(value: str) -> datetime:
     return datetime.strptime(value.strip(), "%m/%d/%Y %H:%M:%S").replace(tzinfo=CHICAGO)
 
 
+def archive_time(row: dict) -> datetime:
+    try:
+        archived_at = datetime.fromisoformat(str(row["archive_time"]).replace("Z", "+00:00"))
+        return archived_at if archived_at.tzinfo else archived_at.replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return row["created_at"]
+
+
 def parse_route(row: dict, status: str) -> dict | None:
     identifier = str(row.get("Route ID") or "").strip()
     wo = str(row.get("WO") or row.get("WO#") or "").strip()
@@ -104,7 +112,8 @@ def main() -> None:
         existing = {row[0]: row[1] for row in conn.execute(sa.text("SELECT wo, status::text FROM routes"))}
         fn_existing = {row[0] for row in conn.execute(sa.text("SELECT work_order FROM field_nation_orders"))}
     missing = [wo for wo in chosen if wo not in existing]
-    new_archive = [r for r in routes if r["status"] == "archived" and r["wo"] not in existing and r["wo"] not in chosen]
+    new_archive = [r for r in routes if r["status"] == "archived" and r["wo"] not in existing
+                   and r["wo"] not in chosen and archive_time(r) >= datetime(2026, 9, 18, tzinfo=timezone.utc)]
     print(json.dumps({"mode": "apply" if apply else "dry_run", "source_routes": len(routes),
                       "unique_active_wos": len(chosen), "missing_active_wos": len(missing),
                       "missing_by_status": dict(Counter(chosen[w]["status"] for w in missing)),
@@ -185,12 +194,7 @@ def main() -> None:
         for row in routes:
             if row["status"] != "archived":
                 continue
-            try:
-                archived_at = datetime.fromisoformat(str(row["archive_time"]).replace("Z", "+00:00"))
-                if archived_at.tzinfo is None:
-                    archived_at = archived_at.replace(tzinfo=timezone.utc)
-            except (TypeError, ValueError):
-                archived_at = row["created_at"]
+            archived_at = archive_time(row)
             if archived_at < datetime(2026, 9, 18, tzinfo=timezone.utc):
                 continue
             event = {"action_label": row["payload"].get("archive_action") or "Archived",

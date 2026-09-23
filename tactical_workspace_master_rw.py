@@ -6957,6 +6957,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 route_state = "email_sent"
                 time.sleep(0.25)
                 _link_ph.empty()
+                st.rerun(scope="app")
             else:
                 # Surface any other GAS response so silent failures (auth gate
                 # returning {"error": "Unauthorized"} as HTTP 200, etc.) become
@@ -6971,7 +6972,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # bug where the button only appeared during the one rerun that processed the
     # click and then vanished. Disappears automatically if the route moves to
     # field_nation or is revoked back to pending (route_state changes).
-    if route_state == "email_sent" and not is_fn and not st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
+    if route_state == "email_sent" and not is_fn:
         _persisted_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
         _persisted_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
         if _persisted_outlook:
@@ -6988,17 +6989,6 @@ style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px soli
 padding:12px;border-radius:10px;font-weight:800;font-size:14px;
 text-decoration:none;">📨 Default Mail</a>
 </div>""", unsafe_allow_html=True)
-        if st.button(
-            "➡️ Move to Sent",
-            key=f"move_to_sent_{pod_name}_{cluster_hash}",
-            type="primary",
-            use_container_width=True,
-            help="Moves this generated route into the Sent section after you have opened the email.",
-        ):
-            # Never allow the Outlook auto-popup to replay on this rerun.
-            st.session_state.pop(f"_outlook_popup_once_{cluster_hash}", None)
-            st.session_state[f"_move_to_sent_confirmed_{cluster_hash}"] = True
-            st.rerun(scope="app")
 
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 
@@ -8851,15 +8841,7 @@ def run_pod_tab(pod_name):
         
         # 🌟 Handle Local Session State (Instant UI Moves)
         elif route_state == "email_sent" and not is_reverted:
-            if st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
-                sent.append(c) #
-            else:
-                # Link has been generated, but dispatcher has not clicked
-                # Move to Sent yet. Keep the card available in Dispatch.
-                if c.get('status') == 'Ready':
-                    ready.append(c)
-                else:
-                    review.append(c)
+            sent.append(c) #
         elif route_state == "field_nation":
             field_nation.append(c) #
         else:
@@ -10924,13 +10906,7 @@ def _render_global_tab_body():
                             sent.append(c)
                     # 🌟 Handle Local Session State
                     elif route_state == "email_sent" and not is_reverted:
-                        if st.session_state.get(f"_move_to_sent_confirmed_{cluster_hash}", False):
-                            sent.append(c)
-                        else:
-                            if c.get('status') == 'Ready':
-                                ready.append(c)
-                            else:
-                                review.append(c)
+                        sent.append(c)
                     elif route_state == "field_nation": 
                         field_nation.append(c)
                     elif route_state == "link_generated" and not is_reverted:

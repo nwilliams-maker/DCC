@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 import requests
+import sqlalchemy as sa
 
 TB_GQL = "https://be-terraboost-v3.terraboost.com/graphql"
 MONDAY_GQL = "https://api.monday.com/v2"
@@ -31,47 +32,54 @@ def tb_login() -> str:
     return token
 
 
-def inspect_tb_schema(token: str) -> dict[str, Any]:
-    q = """query PackingSchemaInspection {
-      __schema {
-        queryType { name }
-        types {
-          kind
-          name
-          fields(includeDeprecated: true) {
-            name
-            args {
-              name
-              type { kind name ofType { kind name ofType { kind name } } }
-            }
-            type { kind name ofType { kind name ofType { kind name } } }
-          }
-        }
-      }
-    }"""
+def _tb_query(token: str, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
     r = requests.post(
         TB_GQL,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"query": q},
-        timeout=40,
+        json={"query": query, "variables": variables or {}},
+        timeout=30,
     )
-    r.raise_for_status()
-    j = r.json()
-    if j.get("errors"):
-        return {"errors": j["errors"]}
-    schema = ((j.get("data") or {}).get("__schema") or {})
-    terms = ("work", "order", "packing", "print", "pdf", "document", "file")
-    matches = []
-    for t in schema.get("types") or []:
-        tname = str(t.get("name") or "")
-        fields = t.get("fields") or []
-        if any(term in tname.lower() for term in terms):
-            matches.append({"type": tname, "kind": t.get("kind"), "fields": fields})
-            continue
-        field_hits = [f for f in fields if any(term in str(f.get("name") or "").lower() for term in terms)]
-        if field_hits:
-            matches.append({"type": tname, "kind": t.get("kind"), "fields": field_hits})
-    return {"queryType": schema.get("queryType"), "matches": matches}
+    # Preserve GraphQL/body errors even when the gateway returns 400.
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text[:1000]}
+    return {"http_status": r.status_code, "body": body}
+
+
+def inspect_tb_schema(token: str) -> dict[str, Any]:
+    """Probe likely root fields without relying on GraphQL introspection."""
+    candidates = [
+        "workOrders", "workorders", "workOrder", "workorder",
+        "orders", "order", "packingLists", "packingList",
+        "workOrderPackingList", "printWorkOrder", "workOrderPrint",
+        "workOrderPdf", "workOrderPDF",
+    ]
+    results: dict[str, Any] = {}
+    for field in candidates:
+        # __typename is legal for object/list object selections and is useful
+        # for eliciting exact missing-argument/type errors without reading data.
+        q = f"query PackingProbe {{ {field} {{ __typename }} }}"
+        results[field] = _tb_query(token, q)
+    return {"candidate_probes": results}
+
+
+def inspect_recent_orange_accepted() -> dict[str, Any]:
+    db_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not db_url:
+        return {"error": "DATABASE_URL not configured"}
+    engine = sa.create_engine(db_url, pool_pre_ping=True)
+    with engine.connect() as conn:
+        row = conn.execute(sa.text("""
+            SELECT r.wo
+            FROM routes r
+            LEFT JOIN contractors c ON c.id = r.contractor_id
+            WHERE r.status::text = 'accepted'
+              AND lower(coalesce(c.pod_color, r.payload->>'pod', r.payload->>'pod_name', '')) = 'orange'
+            ORDER BY r.updated_at DESC
+            LIMIT 1
+        """)).mappings().first()
+    return {"wo": row["wo"] if row else None}
 
 
 def inspect_monday_board() -> dict[str, Any]:
@@ -83,9 +91,13 @@ def inspect_monday_board() -> dict[str, Any]:
         id
         name
         groups { id title }
-        columns { id title type settings_str }
-        items_page(limit: 25) {
-          items { id name column_values { id text value } }
+        columns { id title type }
+        items_page(limit: 20) {
+          items {
+            id
+            name
+            column_values(ids:["files__1"]) { id text value }
+          }
         }
       }
     }"""
@@ -109,6 +121,10 @@ def main() -> None:
         result["terraboost"] = inspect_tb_schema(token)
     except Exception as exc:
         result["terraboost_error"] = str(exc)
+    try:
+        result["orange_sample"] = inspect_recent_orange_accepted()
+    except Exception as exc:
+        result["orange_sample_error"] = str(exc)
     try:
         result["monday"] = inspect_monday_board()
     except Exception as exc:

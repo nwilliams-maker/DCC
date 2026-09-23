@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -28,6 +29,126 @@ COLUMN_ALIASES = {
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+ONFLEET_API_URL = "https://onfleet.com/api/v2"
+
+
+def _onfleet_headers() -> dict[str, str] | None:
+    key = (os.environ.get("ONFLEET_KEY") or "").strip()
+    if not key:
+        return None
+    token = base64.b64encode(f"{key}:".encode()).decode()
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+
+
+def _onfleet_request(method: str, path: str, **kwargs: Any) -> requests.Response:
+    headers = _onfleet_headers()
+    if not headers:
+        raise RuntimeError("ONFLEET_KEY is not configured.")
+    resp = requests.request(
+        method,
+        ONFLEET_API_URL + path,
+        headers=headers,
+        timeout=20,
+        **kwargs,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"OnFleet {method} {path} failed ({resp.status_code}): {resp.text[:300]}")
+    return resp
+
+
+def _onfleet_list_workers() -> list[dict[str, Any]]:
+    workers: list[dict[str, Any]] = []
+    last_id = None
+    seen: set[str] = set()
+    for _ in range(50):
+        path = "/workers" + (f"?lastId={last_id}" if last_id else "")
+        payload = _onfleet_request("GET", path).json()
+        page = payload if isinstance(payload, list) else (payload.get("workers") or [])
+        if not page:
+            break
+        new_count = 0
+        for worker in page:
+            wid = str(worker.get("id") or "")
+            if wid and wid not in seen:
+                seen.add(wid)
+                workers.append(worker)
+                new_count += 1
+        if new_count == 0:
+            break
+        last_id = page[-1].get("id")
+        if not last_id:
+            break
+    return workers
+
+
+def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
+    """Create a new Monday contractor as an OnFleet worker and add Pod team.
+
+    This is intentionally called only for contractors newly inserted into DCC.
+    Existing OnFleet workers are matched by normalized phone first, then email,
+    making retries idempotent instead of creating duplicate drivers.
+    """
+    pod = _clean_text(source.get("pod_color"))
+    if not pod:
+        return {"status": "skipped", "reason": "missing pod color"}
+
+    pod_norm = _norm_title(pod)
+    expected_team = f"pod: {pod_norm}"
+    teams_payload = _onfleet_request("GET", "/teams").json()
+    teams = teams_payload if isinstance(teams_payload, list) else (teams_payload.get("teams") or [])
+    team = next(
+        (t for t in teams if _norm_title(t.get("name")) == expected_team),
+        None,
+    )
+    if not team:
+        return {"status": "failed", "reason": f"OnFleet team POD: {pod} not found"}
+
+    email = normalize_email(source.get("email"))
+    phone = normalize_phone(source.get("phone"))
+    workers = _onfleet_list_workers()
+    worker = None
+    for candidate in workers:
+        c_phone = normalize_phone(candidate.get("phone"))
+        c_email = normalize_email(candidate.get("email"))
+        if (phone and c_phone == phone) or (email and c_email == email):
+            worker = candidate
+            break
+
+    if worker is None:
+        if not phone:
+            return {"status": "failed", "reason": "valid phone required to create OnFleet driver"}
+        payload = {
+            "name": _clean_text(source.get("name")),
+            "phone": "+1" + phone if len(phone) == 10 else phone,
+            "teams": [team.get("id")],
+        }
+        if email:
+            payload["email"] = email
+        worker = _onfleet_request("POST", "/workers", json=payload).json()
+        return {
+            "status": "created",
+            "worker_id": worker.get("id"),
+            "team": team.get("name"),
+        }
+
+    worker_id = worker.get("id")
+    if not worker_id:
+        return {"status": "failed", "reason": "matched OnFleet driver has no id"}
+
+    existing_team_ids = set(worker.get("teams") or [])
+    target_team_id = team.get("id")
+    if target_team_id and target_team_id not in existing_team_ids:
+        existing_team_ids.add(target_team_id)
+        _onfleet_request(
+            "PUT",
+            f"/workers/{worker_id}",
+            json={"teams": list(existing_team_ids)},
+        )
+        return {"status": "updated", "worker_id": worker_id, "team": team.get("name")}
+
+    return {"status": "already_present", "worker_id": worker_id, "team": team.get("name")}
 
 
 def _norm_title(value: Any) -> str:
@@ -380,6 +501,9 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         "unchanged": 0,
         "needs_review": 0,
         "failed": 0,
+        "onfleet_created": 0,
+        "onfleet_updated": 0,
+        "onfleet_failed": 0,
         "details": [],
         "mapped_columns": sorted(mapping),
     }
@@ -444,7 +568,7 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                     "digital_certified": bool(source.get("digital_certified")) if source.get("digital_certified") is not None else False,
                     "unrestricted": bool(source.get("unrestricted")) if source.get("unrestricted") is not None else False,
                 }
-                conn.execute(
+                insert_res = conn.execute(
                     sa.text(
                         """
                         INSERT INTO contractors
@@ -456,8 +580,24 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                     ),
                     row,
                 )
-                result["added"] += 1
-                result["details"].append({"email": email, "name": name, "status": "added"})
+                if insert_res.rowcount:
+                    result["added"] += 1
+                    detail = {"email": email, "name": name, "status": "added"}
+                    try:
+                        of_result = _onfleet_sync_new_contractor(source)
+                        detail["onfleet"] = of_result
+                        if of_result.get("status") == "created":
+                            result["onfleet_created"] += 1
+                        elif of_result.get("status") == "updated":
+                            result["onfleet_updated"] += 1
+                        elif of_result.get("status") == "failed":
+                            result["onfleet_failed"] += 1
+                    except Exception as exc:
+                        result["onfleet_failed"] += 1
+                        detail["onfleet"] = {"status": "failed", "reason": str(exc)}
+                    result["details"].append(detail)
+                else:
+                    result["unchanged"] += 1
                 continue
 
             updates = _build_update(existing, source)

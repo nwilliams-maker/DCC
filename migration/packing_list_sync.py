@@ -132,7 +132,7 @@ def inspect_monday_board() -> dict[str, Any]:
           items {
             id
             name
-            column_values(ids:["files__1"]) { id text value }
+            column_values(ids:["files__1","link_mkmen4ch"]) { id text value }
           }
         }
       }

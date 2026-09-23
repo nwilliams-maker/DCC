@@ -126,6 +126,11 @@ def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
         }
         if email:
             payload["email"] = email
+        address = _clean_text(source.get("location"))
+        if address:
+            payload["metadata"] = [
+                {"name": "Address", "type": "string", "value": address}
+            ]
         worker = _onfleet_request("POST", "/workers", json=payload).json()
         return {
             "status": "created",
@@ -139,14 +144,23 @@ def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
 
     existing_team_ids = set(worker.get("teams") or [])
     target_team_id = team.get("id")
+    update_payload: dict[str, Any] = {}
     if target_team_id and target_team_id not in existing_team_ids:
         existing_team_ids.add(target_team_id)
-        _onfleet_request(
-            "PUT",
-            f"/workers/{worker_id}",
-            json={"teams": list(existing_team_ids)},
-        )
-        return {"status": "updated", "worker_id": worker_id, "team": team.get("name")}
+        update_payload["teams"] = list(existing_team_ids)
+
+    address = _clean_text(source.get("location"))
+    if address:
+        existing_metadata = [
+            m for m in (worker.get("metadata") or [])
+            if _norm_title(m.get("name")) != "address"
+        ]
+        existing_metadata.append({"name": "Address", "type": "string", "value": address})
+        update_payload["metadata"] = existing_metadata
+
+    if update_payload:
+        _onfleet_request("PUT", f"/workers/{worker_id}", json=update_payload)
+        return {"status": "updated", "worker_id": worker_id, "team": team.get("name"), "address_added": bool(address)}
 
     return {"status": "already_present", "worker_id": worker_id, "team": team.get("name")}
 

@@ -6933,16 +6933,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _to_enc = requests.utils.quote(str(ic.get('email', '') or ''))
                 outlook_url = f"https://outlook.office.com/mail/deeplink/compose?to={_to_enc}&subject={subject_line}&body={body_content}"
                 _link_ph = st.empty()
-                _link_ph.success("✅ Link Live! Outlook opening...")
-                # Desktop: fire popup via height=0 script (not blocked by browser).
-                # This IS the "Generate Link & Open Outlook" behavior — the click both
-                # generates the link AND opens Outlook in a new tab on desktop.
-                st.components.v1.html(f"<script>if(window.screen.width>768){{window.open({json.dumps(outlook_url)},'_blank');}}</script>", height=0)
+                _link_ph.success("✅ Link Live! Use Open Outlook below.")
+                # Do NOT auto-popup Outlook here. Browsers can block window.open()
+                # because this code runs after the server-side save completes rather
+                # than synchronously inside the original click event. Persist the
+                # Outlook compose URL instead and render a normal clickable button
+                # below; this behaves consistently across pods/browsers.
+                st.session_state[f"_persisted_outlook_{cluster_hash}"] = outlook_url
                 # Stash the mailto: URL so the "Default Mail" button persists across
-                # reruns (was previously rendered inline inside this click block and
-                # vanished as soon as st.rerun() fired — second-generate bug).
-                # The persistent render block is below the GENERATE button — it picks
-                # this up and renders the button whenever route_state == "email_sent".
+                # reruns as a fallback for users who prefer their local mail client.
                 _mailto = f"mailto:{ic.get('email','')}?subject={subject_line}&body={body_content}"
                 st.session_state[f"_persisted_mailto_{cluster_hash}"] = _mailto
                 time.sleep(1)
@@ -6970,7 +6969,15 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # click and then vanished. Disappears automatically if the route moves to
     # field_nation or is revoked back to pending (route_state changes).
     if route_state == "email_sent" and not is_fn:
+        _persisted_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
         _persisted_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
+        if _persisted_outlook:
+            st.markdown(f"""<div style="display:flex;margin:6px 0;">
+<a href="{_persisted_outlook}" target="_blank" rel="noopener noreferrer"
+style="flex:1;text-align:center;background:#633094;color:#ffffff;border:1px solid #633094;
+padding:12px;border-radius:10px;font-weight:800;font-size:14px;
+text-decoration:none;">📬 Open Outlook</a>
+</div>""", unsafe_allow_html=True)
         if _persisted_mailto:
             st.markdown(f"""<div style="display:flex;margin:6px 0;">
 <a href="{_persisted_mailto}"

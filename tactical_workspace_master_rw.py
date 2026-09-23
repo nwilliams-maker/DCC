@@ -6675,42 +6675,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     } for addr, metrics in stop_metrics.items()])
                 }
                 try:
-                    # Sep 2026 — Nick: hit "GAS returned non-JSON (HTTP 404)"
-                    # on Generate Link; confirmed live that same second that
-                    # the deployment itself was healthy and answering
-                    # correctly — it cleared on his own retry a moment
-                    # later. That's Apps Script's web app front-end
-                    # occasionally blipping for a couple of seconds, not a
-                    # code or config problem, but it shouldn't take a human
-                    # noticing and clicking again to recover from. One quiet
-                    # retry here does that automatically. Safe to resend the
-                    # identical payload: the GAS-side saveRoute dedupe
-                    # (CacheService, 10-min window — see the Sep 2026 perf
-                    # fix) guarantees a retry of the same cluster_hash can
-                    # never create a duplicate route, it just hands back the
-                    # original routeId. Timeouts are deliberately NOT retried
-                    # here — that path already has its own safe-retry flow
-                    # (the _timed_out_key / "Step 0" fresh-fetch-before-retry
-                    # logic above), which forces a live collision check
-                    # first instead of blindly resending.
-                    #
-                    # Sep 14 2026 — Nick hit the exact same 404 again. Checked
-                    # Apps Script Executions at the time: no failed runs, no
-                    # gap — the request never reached doPost at all, so the
-                    # single retry with a flat 2s gap wasn't enough cushion
-                    # for this particular blip (it outlasted 2s). Widened to
-                    # 3 total attempts with escalating backoff (2s, then 4s —
-                    # ~6s of total cushion instead of 2s) rather than adding
-                    # more retries at the same fixed gap, since a longer-than-
-                    # usual blip is exactly the case a flat short gap can't
-                    # cover.
-                    try:
-                        if DB_ENGINE is None:
-                            raise RuntimeError("Railway database is unavailable")
-                        _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
-                        _dispatch_result = {"success": True, "routeId": wo_val}
-                    except Exception as e:
-                        _dispatch_result = {"_error": str(e)}
+                    if DB_ENGINE is None:
+                        raise RuntimeError("Railway database is unavailable")
+                    _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
+                    _dispatch_result = {"success": True, "routeId": wo_val}
+                except Exception as e:
+                    _dispatch_result = {"_error": str(e)}
 
             # Security audit H23 - the saveRoute POST has resolved; release
             # the in-flight guard so a later legitimate dispatch / resend works.

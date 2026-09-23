@@ -76,7 +76,7 @@ def inspect_tb_schema(token: str) -> dict[str, Any]:
         "packingSlipUrl", "packingSlipURL", "pdf", "pdfUrl", "pdfURL",
         "file", "fileUrl", "downloadUrl", "document", "documents", "files",
     ):
-        q = f"query WorkOrderFieldProbe {{ workOrders {{ data {{ {field} }} }} }}"
+        q = f"query WorkOrderFieldProbe {{ workOrders {{ nodes {{ {field} }} }} }}"
         work_order_fields[field] = _tb_query(token, q)
 
     return {

@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import html as _html
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
@@ -48,6 +49,14 @@ if not ONFLEET_KEY or not MAPBOX_TOKEN:
     st.stop()
 
 PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/TerraboostRouteRequest.html"
+
+def portal_route_url(route_id):
+    """Build a clickable portal URL even when a WO contains spaces or symbols."""
+    parts = urlsplit(PORTAL_BASE_URL)
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    params.update(route=str(route_id), v2="true")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(params, quote_via=quote), parts.fragment))
 # Legacy Google backend variables are retained only so old helper code can
 # import cleanly during the Railway/Postgres cutover. Production route state
 # no longer depends on Google Sheets or Apps Script.
@@ -6473,7 +6482,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f"⚠️ ACTION REQUIRED:\n"
             f"You must confirm by selecting 'Accept' or 'Decline' directly through the portal link.\n\n"
             f"Terraboost Route Request Link:\n"
-            f"{PORTAL_BASE_URL}?route={link_id}&v2=true"
+            f"{portal_route_url(link_id)}"
         )
     
         # 🌟 UNIQUE KEY
@@ -6500,7 +6509,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         if active_tx_key not in st.session_state:
             st.session_state[active_tx_key] = sig_preview
         elif real_id and "LINK_PENDING" in st.session_state[active_tx_key]:
-            st.session_state[active_tx_key] = st.session_state[active_tx_key].replace("LINK_PENDING", real_id)
+            st.session_state[active_tx_key] = st.session_state[active_tx_key].replace(
+                "LINK_PENDING", quote(str(real_id), safe=""))
     
        # 🌟 UNIQUE KEY & PERFECT INDENTATION
         # Email Preview shows only for admin/manager. Pod accounts (Dispatchers
@@ -6721,7 +6731,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # sooner by any other dispatcher's own action), so
                 # cross-dispatcher visibility of this row still catches up
                 # on its own without blocking this render.
-                final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
+                final_sig = email_body_content.replace(
+                    "LINK_PENDING", quote(str(final_route_id), safe=""))
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
                 # Security audit M3 - the IC email is quote()-encoded like the
@@ -9768,6 +9779,12 @@ def run_pod_tab(pod_name):
 
                             # Keep email controls accessible after Generate Link
                             # moves the route into the Sent bucket.
+                            if wo_display and wo_display != "Unknown":
+                                st.link_button(
+                                    "🔗 Open Terraboost Route Request",
+                                    portal_route_url(wo_display),
+                                    use_container_width=True,
+                                )
                             _sent_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
                             _sent_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
                             if _sent_outlook:
@@ -9840,6 +9857,12 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
     </div>
     {_gvenues_html}
 </div>""", unsafe_allow_html=True)
+                            if wo_display and wo_display != "Unknown":
+                                st.link_button(
+                                    "🔗 Open Terraboost Route Request",
+                                    portal_route_url(wo_display),
+                                    use_container_width=True,
+                                )
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):

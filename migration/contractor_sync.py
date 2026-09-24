@@ -644,7 +644,18 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         }
     eligible = [src for src in all_sources
                 if src.get("email") in pending_emails and src.get("name") and src.get("pod_color")]
-    if eligible:
+    # Audit contractors already in Postgres. Those rows may have been imported
+    # or created before the retry queue existed, so zero DB inserts alone does
+    # not prove that all new ICs exist in Onfleet.
+    recent_db = {
+        normalize_email(row.get("email")) for row in existing_rows
+        if row.get("created_at") and row["created_at"] >= datetime.now(timezone.utc) - timedelta(days=14)
+    }
+    audit = [src for src in sources if src.get("email") in recent_db
+             and src.get("name") and src.get("pod_color")
+             and src.get("email") not in pending_emails]
+    result["onfleet_recent_db_audited"] = len(audit)
+    if eligible or audit:
         try:
             teams_payload = _onfleet_request("GET", "/teams").json()
             teams = teams_payload if isinstance(teams_payload, list) else (teams_payload.get("teams") or [])
@@ -653,6 +664,13 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
             result["onfleet_failed"] += len(eligible)
             result["onfleet_error"] = str(exc)
             return result
+        worker_phones = {normalize_phone(w.get("phone")) for w in workers}
+        worker_emails = {normalize_email(w.get("email")) for w in workers}
+        missing = [src for src in audit if
+                   (not normalize_phone(src.get("phone")) or normalize_phone(src.get("phone")) not in worker_phones)
+                   and src.get("email") not in worker_emails]
+        result["onfleet_recent_db_missing"] = len(missing)
+        result["onfleet_recent_db_missing_names"] = [src["name"] for src in missing[:20]]
         for source in eligible:
             try:
                 of_result = _onfleet_sync_new_contractor(source, teams, workers)

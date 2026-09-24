@@ -83,21 +83,14 @@ def _onfleet_list_workers() -> list[dict[str, Any]]:
     return workers
 
 
-def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
-    """Create a new Monday contractor as an OnFleet worker and add Pod team.
-
-    This is intentionally called only for contractors newly inserted into DCC.
-    Existing OnFleet workers are matched by normalized phone first, then email,
-    making retries idempotent instead of creating duplicate drivers.
-    """
+def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, Any]], workers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reconcile a recent Monday contractor with Onfleet, without duplicate drivers."""
     pod = _clean_text(source.get("pod_color"))
     if not pod:
         return {"status": "skipped", "reason": "missing pod color"}
 
     pod_norm = _norm_title(pod)
     expected_team = f"pod: {pod_norm}"
-    teams_payload = _onfleet_request("GET", "/teams").json()
-    teams = teams_payload if isinstance(teams_payload, list) else (teams_payload.get("teams") or [])
     team = next(
         (t for t in teams if _norm_title(t.get("name")) == expected_team),
         None,
@@ -107,7 +100,6 @@ def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
 
     email = normalize_email(source.get("email"))
     phone = normalize_phone(source.get("phone"))
-    workers = _onfleet_list_workers()
     worker = None
     for candidate in workers:
         c_phone = normalize_phone(candidate.get("phone"))
@@ -132,6 +124,7 @@ def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
                 {"name": "Address", "type": "string", "value": address}
             ]
         worker = _onfleet_request("POST", "/workers", json=payload).json()
+        workers.append({**worker, "phone": payload["phone"], "email": email, "teams": payload["teams"]})
         return {
             "status": "created",
             "worker_id": worker.get("id"),
@@ -160,6 +153,7 @@ def _onfleet_sync_new_contractor(source: dict[str, Any]) -> dict[str, Any]:
 
     if update_payload:
         _onfleet_request("PUT", f"/workers/{worker_id}", json=update_payload)
+        worker.update(update_payload)
         return {"status": "updated", "worker_id": worker_id, "team": team.get("name"), "address_added": bool(address)}
 
     return {"status": "already_present", "worker_id": worker_id, "team": team.get("name")}
@@ -523,12 +517,18 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
     }
 
     with engine.begin() as conn:
+        conn.execute(sa.text("""
+            CREATE TABLE IF NOT EXISTS contractor_onfleet_sync (
+                email TEXT PRIMARY KEY,
+                synced_at TIMESTAMPTZ
+            )
+        """))
         existing_rows = [
             dict(r)
             for r in conn.execute(
                 sa.text(
                     """
-                    SELECT id,email,name,location,phone,ic_list,lat,lng,pod_color,
+                    SELECT id,email,name,location,phone,ic_list,lat,lng,pod_color,created_at,
                            digital_certified,unrestricted
                     FROM contractors
                     """
@@ -597,18 +597,10 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 if insert_res.rowcount:
                     result["added"] += 1
                     detail = {"email": email, "name": name, "status": "added"}
-                    try:
-                        of_result = _onfleet_sync_new_contractor(source)
-                        detail["onfleet"] = of_result
-                        if of_result.get("status") == "created":
-                            result["onfleet_created"] += 1
-                        elif of_result.get("status") == "updated":
-                            result["onfleet_updated"] += 1
-                        elif of_result.get("status") == "failed":
-                            result["onfleet_failed"] += 1
-                    except Exception as exc:
-                        result["onfleet_failed"] += 1
-                        detail["onfleet"] = {"status": "failed", "reason": str(exc)}
+                    conn.execute(sa.text("""
+                        INSERT INTO contractor_onfleet_sync (email) VALUES (:email)
+                        ON CONFLICT (email) DO NOTHING
+                    """), {"email": email})
                     result["details"].append(detail)
                 else:
                     result["unchanged"] += 1
@@ -642,13 +634,50 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 "fields": sorted(updates),
             })
 
+    # The queue contains only inserts made by this sync, never historical
+    # database imports. Failed Onfleet calls stay queued for the next run.
+    with engine.connect() as conn:
+        pending_emails = {
+            row[0] for row in conn.execute(sa.text(
+                "SELECT email FROM contractor_onfleet_sync WHERE synced_at IS NULL"
+            ))
+        }
+    eligible = [src for src in all_sources
+                if src.get("email") in pending_emails and src.get("name") and src.get("pod_color")]
+    if eligible:
+        try:
+            teams_payload = _onfleet_request("GET", "/teams").json()
+            teams = teams_payload if isinstance(teams_payload, list) else (teams_payload.get("teams") or [])
+            workers = _onfleet_list_workers()
+        except Exception as exc:
+            result["onfleet_failed"] += len(eligible)
+            result["onfleet_error"] = str(exc)
+            return result
+        for source in eligible:
+            try:
+                of_result = _onfleet_sync_new_contractor(source, teams, workers)
+            except Exception as exc:
+                of_result = {"status": "failed", "reason": str(exc)}
+            status = of_result.get("status")
+            if status in {"created", "updated", "failed"}:
+                result[f"onfleet_{status}"] += 1
+            if status in {"created", "updated", "already_present"}:
+                with engine.begin() as conn:
+                    conn.execute(sa.text("""
+                        UPDATE contractor_onfleet_sync SET synced_at = now()
+                        WHERE email = :email
+                    """), {"email": source["email"]})
+            if status == "failed":
+                result["details"].append({"name": source["name"], "status": "onfleet_failed", "reason": of_result.get("reason")})
     return result
 
 
 def main() -> None:
     try:
         result = sync_contractors_from_monday()
-        print(json.dumps(result, indent=2, default=str))
+        # Railway has a per-replica log rate limit; report a compact run summary.
+        result["details"] = [d for d in result["details"] if d.get("status") in {"failed", "needs_review", "onfleet_failed"}]
+        print(json.dumps(result, default=str))
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         raise SystemExit(1)

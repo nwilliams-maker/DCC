@@ -69,6 +69,7 @@ RATE_WARNING = 21.00    # $/stop — orange status
 # _rate_master_key must clamp through PAY_CAP / RATE_CAP.
 PAY_CAP = 10000.00      # $ — matches the Total Comp widget's max_value
 RATE_CAP = 2000.00      # $/stop — matches the Rate/Stop widget's max_value
+HIGH_RATE_FLAG_THRESHOLD = 25.00
 
 # 🌟 FA (Field Agent) employees — Nick, Sep 19 2026: "For FAs they don't need
 # any pay rate, they are employees" (Biscardi is an IC and keeps normal
@@ -2757,26 +2758,12 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
                         _rid = "?"
                     _log_err("assign_tasks_to_fn_team/route_plan",
                              f"created route plan '{wo_name}' id={_rid} for {len(task_ids)} tasks")
-                    # 🟪 Persist routePlanId onto the FN sheet payload so
+                    # 🟪 Persist routePlanId onto the FN Postgres row so
                     # markFNAssigned can later PUT-rename it by ID. Without
                     # this, the rename path silently no-ops (OnFleet's list
                     # endpoint ignores date filters so name-based lookup is
                     # unreliable). May 16 2026.
                     if _rid and _rid != "?" and cluster_hash:
-                        try:
-                            requests.post(
-                                GAS_WEB_APP_URL,
-                                json={
-                                    "action": "setFnRoutePlanId",
-                                    "auth_secret": GAS_AUTH,
-                                    "cluster_hash": cluster_hash,
-                                    "routePlanId": _rid,
-                                },
-                                timeout=10,
-                            )
-                        except Exception as _rpid_err:
-                            _log_err("assign_tasks_to_fn_team/setFnRoutePlanId", _rpid_err)
-                        # --- Phase 2 migration: best-effort Postgres mirror (2026-09-21) ---
                         if DB_ENGINE is not None:
                             try:
                                 _da.mirror_set_fn_route_plan_id_by_cluster_hash(DB_ENGINE, cluster_hash, _rid)
@@ -2831,7 +2818,7 @@ def revoke_field_nation(cluster_hash, pod_name, cluster_data=None):
 
 # --- FIELD NATION MASS UPLOAD GENERATOR ---
 
-from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_to_sheet, save_fn_provider, extract_fn_provider, format_fn_card_title
+from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_upload, save_fn_provider, extract_fn_provider, format_fn_card_title
 
 
 
@@ -4295,7 +4282,7 @@ def process_digital_pool(master_bar=None):
                 _, d_hrs, _, _ = get_gmaps(ic_loc_d, tuple(list(unique_stops)[:25]))
                 d_pay = round(d_hrs * 25.0, 2)
                 d_rate = round(d_pay / len(unique_stops), 2) if unique_stops else 0
-                if d_rate > 50.0:
+                if d_rate >= HIGH_RATE_FLAG_THRESHOLD:
                     status = "Flagged"
 
         # Any-match boosted-tier (see process_pod for rationale).
@@ -5943,12 +5930,19 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
         curr_rate = 0.0 if is_fa else st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
-        needs_unlock = (curr_rate >= 25.0) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
+        needs_unlock = (curr_rate >= HIGH_RATE_FLAG_THRESHOLD) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
+        # The selected contractor can cost more than the closest IC used by
+        # the route builder. Move that card to Flagged on its first render.
+        if (curr_rate >= HIGH_RATE_FLAG_THRESHOLD and not is_fa
+                and cluster.get("status") == "Ready" and route_state not in ("email_sent", "field_nation")
+                and not st.session_state.get(f"_high_rate_rerouted_{cluster_hash}", False)):
+            st.session_state[f"_high_rate_rerouted_{cluster_hash}"] = True
+            st.rerun(scope="app")
         is_unlocked = True
 
         if needs_unlock:
             reasons = []
-            if curr_rate >= 25.0: reasons.append(f"High Rate (${curr_rate})")
+            if curr_rate >= HIGH_RATE_FLAG_THRESHOLD: reasons.append(f"High Rate (${curr_rate})")
             if ic['d'] > 60: reasons.append(f"Distance ({round(ic['d'],1)}mi)")
             if cluster['status'] == 'Flagged': reasons.append("Flagged Route")
             st.markdown(f"""<div style="background:#fef2f2; border:1px solid #ef4444; padding:8px 10px; border-radius:8px; margin:6px 0;"><span style="color:#b91c1c; font-weight:800; font-size:11px;">🔒 ACTION REQUIRED:</span> <span style="color:#7f1d1d; font-size:11px;">{" & ".join(reasons)}</span></div>""", unsafe_allow_html=True)
@@ -6797,12 +6791,9 @@ text-decoration:none;">📨 Default Mail</a>
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 
     if route_state != "email_sent":
-        # Checkbox is rendered up top (paired with Generate Link) for non-FN
-        # routes; FN routes render it here so un-check = revoke still works.
-        if is_fn:
-            fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
+        # Reuse the checkbox rendered above for assignment and revocation.
         if fn_checked and not is_fn:
-            # 🌟 INSTANT UI UPDATE — Sheet write fires in background
+            # Persist the FN route before changing the local UI state.
             home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
             # WO# format: FN{MMDDYYYY}-{City} {ST}-{N}
@@ -6884,10 +6875,20 @@ text-decoration:none;">📨 Default Mail</a>
                 } for addr, metrics in stop_metrics.items()]),
             }
 
-            save_fn_to_sheet(GAS_WEB_APP_URL, fn_payload, session_state=st.session_state, db_engine=DB_ENGINE)
+            # Commit to the source this app reads before moving the card.
+            try:
+                if DB_ENGINE is None:
+                    raise RuntimeError("Railway database is unavailable")
+                _fn_result = _da.save_to_field_nation(DB_ENGINE, _fn_wo_full, fn_payload)
+                if not _fn_result.get("success"):
+                    raise RuntimeError(str(_fn_result))
+            except Exception as _fn_save_e:
+                _log_err("save_to_field_nation", _fn_save_e)
+                st.error(f"Could not move route to Field Nation: {_fn_save_e}")
+                st.stop()
+            fetch_sent_records_from_sheet.clear()
             st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
-            # 🌐 Move OnFleet tasks into the Field Nation team in parallel
-            # with the sheet write — appears in OnFleet's FN team view.
+            # Move OnFleet tasks into the Field Nation team after the DB save.
             # Wrapped + pre-checked so a missing team id or thread error can
             # never block the rerun and break the checkbox UX.
             try:
@@ -6903,7 +6904,7 @@ text-decoration:none;">📨 Default Mail</a>
                     )
             except Exception as _fn_team_e:
                 _log_err("fn_assign_sync", _fn_team_e)
-            st.session_state[f"reverted_{cluster_hash}"] = True  # 🌟 Block stale sheet match until background write completes
+            st.session_state[f"reverted_{cluster_hash}"] = False  # Postgres row is committed before rerender
             st.toast("✅ Saved to Field Nation Tab")
             st.rerun(scope="app")  # security audit L6 - bucket re-sort is app-scoped
         
@@ -8668,8 +8669,11 @@ def run_pod_tab(pod_name):
             if c.get('is_removal') and not st.session_state.get(f"show_cvs_kiosk_removal_{pod_name}", False):
                 continue
             # Fallback to calculated status
-            if c.get('status') == 'Ready': ready.append(c) #
-            else: review.append(c) #
+            if (c.get('status') == 'Ready'
+                    and float(st.session_state.get(f'_rate_master_{pod_name}_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
+                ready.append(c)
+            else:
+                review.append(c)
 
     # 🌐 FN-GHOST RECONSTRUCTION — the actual fix for the empty-FN-tab bug.
     # FN-status sheet rows whose tasks have moved to OnFleet state=1 won't
@@ -10917,8 +10921,11 @@ with tabs[6]:
             if orig == "declined": d_dec.append(c)
             else: d_ready.append(c)
         else:
-            if c.get('status') == 'Ready': d_ready.append(c) 
-            else: d_flagged.append(c)
+            if (c.get('status') == 'Ready'
+                    and float(st.session_state.get(f'_rate_master_Global_Digital_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
+                d_ready.append(c)
+            else:
+                d_flagged.append(c)
                 
     # 🌐 FN-GHOST RECONSTRUCTION (Digital pool) — mirrors the per-pod path.
     # Digital routes rarely go to FN, but when they do (e.g. a service ticket

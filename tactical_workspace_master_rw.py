@@ -6982,7 +6982,7 @@ text-decoration:none;">📨 Default Mail</a>
             _lp_html = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐ {_metrics['lplus_cnt']}</span>" if _metrics.get('lplus_cnt', 0) > 0 else ""
             _esc_n   = sum(1 for _t in cluster['data'] if _t.get('full') == _addr and _t.get('escalated'))
             _esc_html= f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {_esc_n}</span>" if _esc_n > 0 else ""
-            _da      = f"+ {_addr}" if _metrics.get('is_new') else _addr
+            _display_addr = f"+ {_addr}" if _metrics.get('is_new') else _addr
             _vp      = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{_metrics['venue_name']} — </span>" if _metrics.get('venue_name') else ""
             _tp      = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{_metrics['t_count']} Tasks</span>"
             _ih      = f"<span style='font-size:13px;margin-left:6px;'>{_pill_str}</span>" if _pill_str else ""
@@ -7051,7 +7051,7 @@ text-decoration:none;">📨 Default Mail</a>
                 f"<details class='fn-loc-row'>"
                 f"<summary class='fn-loc-summary'>"
                 f"<span class='fn-chevron'>›</span>"
-                f"{_vp}<span style='font-weight:700;color:#0f172a;'>{_da}</span>{_k_html}{_di_html}{_bo_html}{_lp_html}{_esc_html} &nbsp;{_tp}{_ih}"
+                f"{_vp}<span style='font-weight:700;color:#0f172a;'>{_display_addr}</span>{_k_html}{_di_html}{_bo_html}{_lp_html}{_esc_html} &nbsp;{_tp}{_ih}"
                 f"</summary>{_cb}</details>"
             )
         st.markdown(

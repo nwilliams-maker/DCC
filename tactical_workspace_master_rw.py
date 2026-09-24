@@ -143,17 +143,17 @@ def esc(value):
     except Exception:
         return ""
 
-# Security audit M11 - pagination for the Awaiting Confirmation panels.
-# A busy pod can hold ~89 route cards, each a large HTML block plus a
-# nested fragment - enough to freeze the browser. This renders ~20 cards
+# Pagination for route panels. A busy pod can hold many route cards,
+# each with several widgets and potentially expensive route calculations.
+# Render at most 12 cards
 # per page with prev/next controls. `page_key` must be unique per panel
 # per pod (run_pod_tab runs once per pod for admin/manager). Returns
 # (page_slice, start_index) so callers keep stable global indices.
-def _paginate_panel(items, page_key, per_page=20):
+def _paginate_panel(items, page_key, per_page=12):
     try:
         items = list(items or [])
         total = len(items)
-        if True:  # pagination removed May 2026 — state-group collapse handles long lists
+        if total <= per_page:
             return items, 0
         n_pages = (total + per_page - 1) // per_page
         _sk = f"_panel_page_{page_key}"
@@ -8975,11 +8975,9 @@ def run_pod_tab(pod_name):
         st.info(f"No active tasks pending in the {pod_name} region.")
         return
 
-    # 🚀 Opt B — Lazy-load the Folium map. Wrapping in a collapsed expander
-    # defers the heavy Leaflet iframe + marker render until the dispatcher
-    # clicks. Most operational interactions don't need the map, so this
-    # removes ~100KB of HTML/JS from the default page weight.
-    with st.expander("🗺️ Master Route Map", expanded=False):
+    # Streamlit executes a collapsed expander's contents on every rerun.
+    # Build the Folium map only when the dispatcher asks to view it.
+    if st.checkbox("🗺️ Show Master Route Map", key=f"show_map_{pod_name}"):
         # 🌟 THE FIX: Prevent IndexError if there are Ghost routes but no Live routes!
         map_center = cls[0]['center'] if cls else [39.8283, -98.5795]
         m = folium.Map(location=map_center, zoom_start=6 if cls else 4, tiles="cartodbpositron")
@@ -9112,7 +9110,19 @@ def run_pod_tab(pod_name):
             elif not ready: st.info("No tasks ready for dispatch.")
             else:
                 sorted_ready = group_and_sort_by_proximity(ready)
-                _pg_items, _pg_start = _paginate_panel(sorted_ready, f"{pod_name}_ready", per_page=25)
+                _pg_items, _pg_start = _paginate_panel(sorted_ready, f"{pod_name}_ready")
+                # Filter contractor rows once per panel rather than converting
+                # the whole DataFrame to strings for every route card.
+                _ready_ics = pd.DataFrame()
+                if not ic_df.empty:
+                    _lat_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lat'), 'Lat')
+                    _lng_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lng'), 'Lng')
+                    if _lat_col in ic_df.columns and _lng_col in ic_df.columns:
+                        _ready_ics = ic_df[
+                            ~ic_df.astype(str).apply(
+                                lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1
+                            )
+                        ].dropna(subset=[_lat_col, _lng_col])
                 current_state = None
                 for i, c in enumerate(_pg_items, start=_pg_start):
                     # 🌟 Insert State Header
@@ -9121,19 +9131,12 @@ def run_pod_tab(pod_name):
                         st.markdown(f"<div class='dcc-state-header' data-state-key='{current_state}'><span class='dcc-state-chevron'>▸</span>📍 {current_state}</div>", unsafe_allow_html=True)
                         
                     badges = ""
-                    if not ic_df.empty:
-                        lat_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lat'), 'Lat')
-                        lng_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'lng'), 'Lng')
-                        loc_col = next((col for col in ic_df.columns if str(col).strip().lower() == 'location'), 'Location')
-                        if lat_col in ic_df.columns and lng_col in ic_df.columns:
-                            v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
-                            if not v_ics.empty:
-                                v_ics['d'] = v_ics.apply(lambda x: haversine(c['center'][0], c['center'][1], x[lat_col], x[lng_col]), axis=1)
-                                closest_ic = v_ics.sort_values('d').iloc[0]
-                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
-                                est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
-                                est_rate = est_pay / c['stops'] if c['stops'] > 0 else 0
-                                if closest_ic['d'] > 60: badges += " 📡"
+                    if not _ready_ics.empty:
+                        _nearest_distance = _ready_ics.apply(
+                            lambda x: haversine(c['center'][0], c['center'][1], x[_lat_col], x[_lng_col]), axis=1
+                        ).min()
+                        if _nearest_distance > 60:
+                            badges += " 📡"
 
                     esc_pill = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
                     inst_pill = f" | 🛠️ {c.get('inst_count', 0)} Installs" if c.get('inst_count', 0) > 0 else "" 
@@ -9150,7 +9153,7 @@ def run_pod_tab(pod_name):
             elif not review: st.info("No flagged tasks requiring review.")
             else:
                 sorted_review = group_and_sort_by_proximity(review)
-                _pg_items, _pg_start = _paginate_panel(sorted_review, f"{pod_name}_flagged", per_page=25)
+                _pg_items, _pg_start = _paginate_panel(sorted_review, f"{pod_name}_flagged")
                 current_state = None
                 for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
@@ -9639,7 +9642,7 @@ def run_pod_tab(pod_name):
             elif not digital_ready: st.info("No digital service tasks pending.")
             else:
                 sorted_digi = group_and_sort_by_proximity(digital_ready)
-                _pg_items, _pg_start = _paginate_panel(sorted_digi, f"{pod_name}_digital", per_page=25)
+                _pg_items, _pg_start = _paginate_panel(sorted_digi, f"{pod_name}_digital")
                 current_state = None
                 for i, c in enumerate(_pg_items, start=_pg_start):
                     if c['state'] != current_state:
@@ -10809,9 +10812,7 @@ def _render_global_tab_body():
     # 🌟 THE FIX: Inject the blue prompt right above the map if no data exists
 
 
-    # 🚀 Opt B — Lazy-load the Global master map. The map was building all
-    # 5 pods + ghosts on every Global view render; collapsed by default now.
-    with st.expander("🗺️ Master Route Map", expanded=False):
+    if st.checkbox("🗺️ Show Master Route Map", key="show_global_map"):
         st_folium(global_map, height=500, use_container_width=True, key="global_master_map", returned_objects=[])
 
 
@@ -11024,8 +11025,8 @@ with tabs[6]:
         st.info("Click '🚀 Initialize Data' at the top right to fetch data.")
     else:
         # 4. 🗺️ MAP & LEGEND
-        # 🚀 Opt B — Lazy-load the Digital pool map.
-        with st.expander("🗺️ Master Route Map", expanded=False):
+        # Skip Folium's map and iframe until requested.
+        if st.checkbox("🗺️ Show Master Route Map", key="show_digital_map"):
             # 🌟 THE FIX: Safe coordinate extraction
             map_center_digi = global_digital[0]['center'] if global_digital else [39.8283, -98.5795]
             m_digi = folium.Map(location=map_center_digi, zoom_start=4, tiles="cartodbpositron")

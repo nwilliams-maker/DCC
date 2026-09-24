@@ -47,7 +47,7 @@ if not ONFLEET_KEY or not MAPBOX_TOKEN:
     st.info("I couldn't find your keys in Railway's 'Variables' tab. Please double-check that you added ONFLEET_KEY and MAPBOX_TOKEN there.")
     st.stop()
 
-PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/portal-dcc-rw.html"
+PORTAL_BASE_URL = os.environ.get("PORTAL_BASE_URL") or "https://nwilliams-maker.github.io/DCC/TerraboostRouteRequest.html"
 # Legacy Google backend variables are retained only so old helper code can
 # import cleanly during the Railway/Postgres cutover. Production route state
 # no longer depends on Google Sheets or Apps Script.
@@ -6478,7 +6478,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f"To view the complete route details—including total stops, estimated mileage, and time—please click the secure link below to access your Route Summary.\n\n"
             f"⚠️ ACTION REQUIRED:\n"
             f"You must confirm by selecting 'Accept' or 'Decline' directly through the portal link.\n\n"
-            f"Route Summary Link:\n"
+            f"Terraboost Route Request Link:\n"
             f"{PORTAL_BASE_URL}?route={link_id}&v2=true"
         )
     

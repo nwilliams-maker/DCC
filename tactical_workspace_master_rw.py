@@ -5907,6 +5907,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
     is_fn = (route_state == "field_nation")
+    # Route cards that bypass Generate Link still need this value.
+    fn_checked = is_fn
 
     # Default ic for FN routes — overridden below if not is_fn
     ic = {"name": "Field Nation", "location": f"{cluster['center'][0]},{cluster['center'][1]}", "d": 0}
@@ -8979,12 +8981,10 @@ def run_pod_tab(pod_name):
     # 🌟 Halt execution HERE, right after the cards render!
     if not is_initialized:
         st.info(f"No {pod_name} tasks initialized. Click '🚀 Initialize Data' at the top right.")
-        return
         
     # 🌟 THE FIX: Don't hide the tab if there are pending sent routes!
     if not cls and not pod_ghosts and not sent_ghosts and not finalized_ghosts:
         st.info(f"No active tasks pending in the {pod_name} region.")
-        return
 
     # 🚀 Opt B — Lazy-load the Folium map. Wrapping in a collapsed expander
     # defers the heavy Leaflet iframe + marker render until the dispatcher

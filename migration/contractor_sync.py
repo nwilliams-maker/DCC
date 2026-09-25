@@ -33,6 +33,47 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 ONFLEET_API_URL = "https://onfleet.com/api/v2"
 
+# Fallback pod assignment when Monday's Pod Color is blank/unmapped.
+# This mirrors DCC's live pod geography so a newly added IC/FA can still
+# become an OnFleet driver instead of sitting indefinitely in the retry queue.
+STATE_TO_POD = {
+    **{s: "Blue" for s in ("AL","AR","FL","IL","IA","LA","MI","MN","MS","MO","NC","SC","WI","OR","WA","NV")},
+    **{s: "Green" for s in ("CO","DC","GA","IN","KY","MD","NJ","OH","UT")},
+    **{s: "Orange" for s in ("AK","AZ","CA","HI","ID")},
+    **{s: "Purple" for s in ("KS","MT","NE","NM","ND","OK","SD","TN","TX","WY")},
+    **{s: "Red" for s in ("CT","DE","ME","MA","NH","NY","PA","RI","VT","VA","WV")},
+}
+STATE_NAME_TO_ABBR = {
+    "ALABAMA":"AL","ALASKA":"AK","ARIZONA":"AZ","ARKANSAS":"AR","CALIFORNIA":"CA",
+    "COLORADO":"CO","CONNECTICUT":"CT","DELAWARE":"DE","FLORIDA":"FL","GEORGIA":"GA",
+    "HAWAII":"HI","IDAHO":"ID","ILLINOIS":"IL","INDIANA":"IN","IOWA":"IA","KANSAS":"KS",
+    "KENTUCKY":"KY","LOUISIANA":"LA","MAINE":"ME","MARYLAND":"MD","MASSACHUSETTS":"MA",
+    "MICHIGAN":"MI","MINNESOTA":"MN","MISSISSIPPI":"MS","MISSOURI":"MO","MONTANA":"MT",
+    "NEBRASKA":"NE","NEVADA":"NV","NEW HAMPSHIRE":"NH","NEW JERSEY":"NJ","NEW MEXICO":"NM",
+    "NEW YORK":"NY","NORTH CAROLINA":"NC","NORTH DAKOTA":"ND","OHIO":"OH","OKLAHOMA":"OK",
+    "OREGON":"OR","PENNSYLVANIA":"PA","RHODE ISLAND":"RI","SOUTH CAROLINA":"SC",
+    "SOUTH DAKOTA":"SD","TENNESSEE":"TN","TEXAS":"TX","UTAH":"UT","VERMONT":"VT",
+    "VIRGINIA":"VA","WASHINGTON":"WA","WEST VIRGINIA":"WV","WISCONSIN":"WI","WYOMING":"WY",
+    "DISTRICT OF COLUMBIA":"DC",
+}
+
+def _infer_pod_from_location(location: Any) -> str | None:
+    text = str(location or "").strip().upper()
+    if not text:
+        return None
+    # Prefer explicit USPS abbreviations.
+    m = re.search(r"(?:,|\s)\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?|\s|,|$)", text)
+    if m and m.group(1) in STATE_TO_POD:
+        return STATE_TO_POD[m.group(1)]
+    # Fall back to full state names.
+    for name, abbr in STATE_NAME_TO_ABBR.items():
+        if re.search(rf"\b{re.escape(name)}\b", text):
+            return STATE_TO_POD.get(abbr)
+    return None
+
+def _resolved_pod(source: dict[str, Any]) -> str | None:
+    return _clean_text(source.get("pod_color")) or _infer_pod_from_location(source.get("location"))
+
 
 def _onfleet_headers() -> dict[str, str] | None:
     key = (os.environ.get("ONFLEET_KEY") or "").strip()
@@ -85,9 +126,9 @@ def _onfleet_list_workers() -> list[dict[str, Any]]:
 
 def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, Any]], workers: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconcile a recent Monday contractor with Onfleet, without duplicate drivers."""
-    pod = _clean_text(source.get("pod_color"))
+    pod = _resolved_pod(source)
     if not pod:
-        return {"status": "skipped", "reason": "missing pod color"}
+        return {"status": "failed", "reason": "pod could not be resolved from Pod Color or location/state"}
 
     pod_norm = _norm_title(pod)
     expected_team = f"pod: {pod_norm}"
@@ -643,7 +684,7 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
             ))
         }
     eligible = [src for src in all_sources
-                if src.get("email") in pending_emails and src.get("name") and src.get("pod_color")]
+                if src.get("email") in pending_emails and src.get("name") and _resolved_pod(src)]
     # Audit contractors already in Postgres. Those rows may have been imported
     # or created before the retry queue existed, so zero DB inserts alone does
     # not prove that all new ICs exist in Onfleet.
@@ -652,7 +693,7 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         if row.get("created_at") and row["created_at"] >= datetime.now(timezone.utc) - timedelta(days=14)
     }
     audit = [src for src in sources if src.get("email") in recent_db
-             and src.get("name") and src.get("pod_color")
+             and src.get("name") and _resolved_pod(src)
              and src.get("email") not in pending_emails]
     result["onfleet_recent_db_audited"] = len(audit)
     if eligible or audit:

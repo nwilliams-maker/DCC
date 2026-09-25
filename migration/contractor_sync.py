@@ -124,6 +124,30 @@ def _onfleet_list_workers() -> list[dict[str, Any]]:
     return workers
 
 
+def _onfleet_routing_destination_id(address: str) -> str:
+    """Create an OnFleet Destination for a contractor's home/routing address."""
+    address = _clean_text(address)
+    if not address:
+        raise RuntimeError("contractor address is missing")
+    payload = {
+        "address": {
+            "unparsed": address,
+        }
+    }
+    destination = _onfleet_request("POST", "/destinations", json=payload).json()
+    destination_id = str(destination.get("id") or "").strip()
+    if not destination_id:
+        raise RuntimeError("OnFleet destination creation returned no id")
+    return destination_id
+
+
+def _worker_routing_address_present(worker: dict[str, Any]) -> bool:
+    addresses = worker.get("addresses") or {}
+    if not isinstance(addresses, dict):
+        return False
+    return bool(addresses.get("routing"))
+
+
 def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, Any]], workers: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconcile a recent Monday contractor with Onfleet, without duplicate drivers."""
     pod = _resolved_pod(source)
@@ -152,24 +176,37 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
     if worker is None:
         if not phone:
             return {"status": "failed", "reason": "valid phone required to create OnFleet driver"}
+        address = _clean_text(source.get("location"))
+        if not address:
+            return {"status": "failed", "reason": "valid address required to create OnFleet driver"}
+        routing_destination_id = _onfleet_routing_destination_id(address)
         payload = {
             "name": _clean_text(source.get("name")),
             "phone": "+1" + phone if len(phone) == 10 else phone,
             "teams": [team.get("id")],
+            "addresses": {"routing": routing_destination_id},
+            # Keep the original Monday text too so future syncs can detect
+            # when the source address changed without geocoding comparisons.
+            "metadata": [
+                {"name": "Address", "type": "string", "value": address}
+            ],
         }
         if email:
             payload["email"] = email
-        address = _clean_text(source.get("location"))
-        if address:
-            payload["metadata"] = [
-                {"name": "Address", "type": "string", "value": address}
-            ]
         worker = _onfleet_request("POST", "/workers", json=payload).json()
-        workers.append({**worker, "phone": payload["phone"], "email": email, "teams": payload["teams"]})
+        workers.append({
+            **worker,
+            "phone": payload["phone"],
+            "email": email,
+            "teams": payload["teams"],
+            "addresses": payload["addresses"],
+            "metadata": payload["metadata"],
+        })
         return {
             "status": "created",
             "worker_id": worker.get("id"),
             "team": team.get("name"),
+            "routing_address_added": True,
         }
 
     worker_id = worker.get("id")
@@ -184,18 +221,42 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
         update_payload["teams"] = list(existing_team_ids)
 
     address = _clean_text(source.get("location"))
+    routing_address_added = False
     if address:
         existing_metadata = [
             m for m in (worker.get("metadata") or [])
             if _norm_title(m.get("name")) != "address"
         ]
+        prior_source_address = next(
+            (
+                str(m.get("value") or "").strip()
+                for m in (worker.get("metadata") or [])
+                if _norm_title(m.get("name")) == "address"
+            ),
+            "",
+        )
+
+        # Backfill the real OnFleet routing/home address if absent. Also
+        # refresh it when Monday's source address changes.
+        if (not _worker_routing_address_present(worker)
+                or _norm_title(prior_source_address) != _norm_title(address)):
+            routing_destination_id = _onfleet_routing_destination_id(address)
+            update_payload["addresses"] = {"routing": routing_destination_id}
+            routing_address_added = True
+
         existing_metadata.append({"name": "Address", "type": "string", "value": address})
         update_payload["metadata"] = existing_metadata
 
     if update_payload:
         _onfleet_request("PUT", f"/workers/{worker_id}", json=update_payload)
         worker.update(update_payload)
-        return {"status": "updated", "worker_id": worker_id, "team": team.get("name"), "address_added": bool(address)}
+        return {
+            "status": "updated",
+            "worker_id": worker_id,
+            "team": team.get("name"),
+            "address_added": bool(address),
+            "routing_address_added": routing_address_added,
+        }
 
     return {"status": "already_present", "worker_id": worker_id, "team": team.get("name")}
 

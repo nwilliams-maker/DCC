@@ -214,11 +214,43 @@ def process_decision(
 
     event_payload = {
         "decision": decision, "signature": signature, "notes": notes, "phone": phone,
+        # 🛒 Shopify store link support (staged only, not deployed) — preserved
+        # in the event log for auditing. Kiosk-only, guarded by
+        # _extract_kiosk_shopify_urls; empty list for non-kiosk routes.
+        "shopify_urls": _extract_kiosk_shopify_urls(route_payload.get("stopData", [])),
         "onfleet": onfleet_result,
     }
     _set_route_status(engine, wo, target_status, "processDecision", event_payload)
 
-    return {"success": True, **onfleet_result}
+    return {"success": True, "shopify_urls": event_payload["shopify_urls"], **onfleet_result}
+
+
+def _extract_kiosk_shopify_urls(stop_data) -> list[str]:
+    """Extract unique Shopify URLs from kiosk-only stops.
+
+    Guard: only kiosk-family task types (install/removal/kiosk) ever expose a
+    store link -- digital and service tasks return nothing. Staged only, not
+    deployed; upstream stop_data may not carry `shopify_url` yet, in which
+    case this returns an empty list and callers behave exactly as before.
+
+    stop_data may arrive as a list[dict] (already-parsed) or as a raw JSON
+    string (route_payload["stopData"] is stored pre-serialized by
+    tactical_workspace_master_rw.py's saveRoute payload) -- handle both."""
+    if isinstance(stop_data, str):
+        try:
+            stop_data = json.loads(stop_data)
+        except Exception:
+            return []
+    urls: list[str] = []
+    for stop in (stop_data or []):
+        if not isinstance(stop, dict):
+            continue
+        url = stop.get('shopify_url') or stop.get('shopifyUrl')
+        task_type = str(stop.get('task_type') or '').lower()
+        if url and ('kiosk' in task_type or 'install' in task_type or 'remov' in task_type):
+            if url not in urls:
+                urls.append(url)
+    return urls
 
 def _log_event(conn, wo: str, action: str, payload: dict[str, Any]) -> None:
     conn.execute(

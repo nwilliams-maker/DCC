@@ -188,6 +188,22 @@
                                </div>`
                             : '';
 
+                        // 🛒 Shopify store link support (staged only, not deployed) —
+                        // pull unique Shopify URLs off kiosk-family stops only
+                        // (install/removal/kiosk). Digital/service stops never carry
+                        // a store link, so a non-kiosk route silently yields [].
+                        let shopifyUrls = [];
+                        try {
+                            const sd2 = typeof d.stopData === 'string' ? JSON.parse(d.stopData) : (d.stopData || []);
+                            for (const stop of (sd2 || [])) {
+                                const url = stop.shopify_url || stop.shopifyUrl;  // handle both snake_case and camelCase
+                                const taskType = String((stop.task_type || stop.taskType || '')).toLowerCase();
+                                if (url && (taskType.includes('install') || taskType.includes('removal') || taskType.includes('kiosk'))) {
+                                    if (!shopifyUrls.includes(url)) shopifyUrls.push(url);  // dedupe
+                                }
+                            }
+                        } catch (e) { /* swallow */ }
+
                         // [H4] All values below come from the GAS getRoute payload
                         // (untrusted) — every interpolation is run through esc().
                         document.getElementById('summaryZone').innerHTML = `
@@ -199,6 +215,18 @@
                             <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Unique Locations:</span> <span class="font-bold text-slate-900">${esc(d.lCnt)}</span></div>
                             <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Total Tasks:</span> <span class="font-bold text-slate-900">${esc(d.tCnt)}</span></div>
                             ${(d.kCnt > 0) ? `<div class="flex justify-between text-emerald-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🛠️ Kiosk Installs:</span> <span>${esc(d.kCnt)}</span></div>` : ''}
+                            ${(d.kCnt > 0 && shopifyUrls && shopifyUrls.length > 0) ? `
+                              <div class="flex items-center gap-3 pb-3 mb-3 border-b border-slate-100">
+                                <span>🛒 Shopify Stores:</span>
+                                <span class="text-blue-600 font-bold">
+                                  ${shopifyUrls.map(url => {
+                                      let hostname = url;
+                                      try { hostname = new URL(url).hostname; } catch (e) { /* not a valid absolute URL — fall back to raw string */ }
+                                      return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="hover:underline">${esc(hostname)}</a>`;
+                                  }).join(', ')}
+                                </span>
+                              </div>
+                            ` : ''}
                             ${(d.rCnt > 0) ? `<div class="flex justify-between text-orange-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🗑️ Kiosk Removals:</span> <span>${esc(d.rCnt)}</span></div>` : ''}
                             ${(d.dCnt > 0) ? `<div class="flex justify-between text-teal-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🔌 Digital Tasks:</span> <span>${esc(d.dCnt)}</span></div>` : ''}
                             <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Est. Total Time On-Duty:</span> <span class="font-bold text-slate-900">${esc(d.time)}</span></div>

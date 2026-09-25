@@ -685,26 +685,43 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         }
     eligible = [src for src in all_sources
                 if src.get("email") in pending_emails and src.get("name") and _resolved_pod(src)]
-    # Audit contractors already in Postgres. Those rows may have been imported
-    # or created before the retry queue existed, so zero DB inserts alone does
-    # not prove that all new ICs exist in Onfleet.
+    # Reconcile the ENTIRE current route-eligible IC/FA roster against OnFleet.
+    # Earlier versions only created workers for brand-new Postgres inserts and
+    # merely *reported* recent DB rows missing from OnFleet. That left imported
+    # or previously-synced contractors permanently stale. The Monday IC/FA board
+    # is authoritative here: ACTIVE / IN TRAINING / NEED INSURANCE contractors
+    # with a valid identity and resolvable pod should exist as OnFleet drivers.
+    route_eligible = [
+        src for src in all_sources
+        if str(src.get("ic_list") or "").strip().upper()
+           in {"ACTIVE", "IN TRAINING", "NEED INSURANCE"}
+        and src.get("email")
+        and src.get("name")
+        and normalize_phone(src.get("phone"))
+        and _resolved_pod(src)
+    ]
+
+    # Retain the prior 14-day audit metrics for visibility, but do not stop at
+    # auditing: missing current drivers are now actually reconciled below.
     recent_db = {
         normalize_email(row.get("email")) for row in existing_rows
         if row.get("created_at") and row["created_at"] >= datetime.now(timezone.utc) - timedelta(days=14)
     }
-    audit = [src for src in sources if src.get("email") in recent_db
-             and src.get("name") and _resolved_pod(src)
-             and src.get("email") not in pending_emails]
+    audit = [src for src in all_sources if src.get("email") in recent_db
+             and src.get("name") and _resolved_pod(src)]
     result["onfleet_recent_db_audited"] = len(audit)
-    if eligible or audit:
+    result["onfleet_reconcile_candidates"] = len(route_eligible)
+
+    if route_eligible:
         try:
             teams_payload = _onfleet_request("GET", "/teams").json()
             teams = teams_payload if isinstance(teams_payload, list) else (teams_payload.get("teams") or [])
             workers = _onfleet_list_workers()
         except Exception as exc:
-            result["onfleet_failed"] += len(eligible)
+            result["onfleet_failed"] += len(route_eligible)
             result["onfleet_error"] = str(exc)
             return result
+
         worker_phones = {normalize_phone(w.get("phone")) for w in workers}
         worker_emails = {normalize_email(w.get("email")) for w in workers}
         missing = [src for src in audit if
@@ -712,7 +729,11 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                    and src.get("email") not in worker_emails]
         result["onfleet_recent_db_missing"] = len(missing)
         result["onfleet_recent_db_missing_names"] = [src["name"] for src in missing[:20]]
-        for source in eligible:
+
+        # Reconcile every current eligible contractor. _onfleet_sync_new_contractor
+        # is idempotent: it creates when absent, updates team/address when needed,
+        # and returns already_present without writing when OnFleet is current.
+        for source in route_eligible:
             try:
                 of_result = _onfleet_sync_new_contractor(source, teams, workers)
             except Exception as exc:
@@ -723,11 +744,16 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
             if status in {"created", "updated", "already_present"}:
                 with engine.begin() as conn:
                     conn.execute(sa.text("""
-                        UPDATE contractor_onfleet_sync SET synced_at = now()
-                        WHERE email = :email
+                        INSERT INTO contractor_onfleet_sync (email, synced_at)
+                        VALUES (:email, now())
+                        ON CONFLICT (email) DO UPDATE SET synced_at = EXCLUDED.synced_at
                     """), {"email": source["email"]})
             if status == "failed":
-                result["details"].append({"name": source["name"], "status": "onfleet_failed", "reason": of_result.get("reason")})
+                result["details"].append({
+                    "name": source["name"],
+                    "status": "onfleet_failed",
+                    "reason": of_result.get("reason"),
+                })
     return result
 
 

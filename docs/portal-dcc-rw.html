@@ -123,10 +123,9 @@
         // (the write cutover) in migration/README.md is actually done and
         // verified -- see that file's "Step 6 rollback" note.
         const webAppUrl = "https://portal-api-production-226b.up.railway.app";
-        // The Revamp app has its own Postgres database. Once its portal-api
-        // service is deployed, set this to that service's public HTTPS URL.
+        // The Revamp app has its own Postgres database and portal API.
         // The first lookup remains on DCC so existing emailed links keep working.
-        const revampWebAppUrl = "";
+        const revampWebAppUrl = "https://revamp-portal-api-production.up.railway.app";
 
         async function loadRoute(routeId) {
             const query = `?action=getRoute&routeId=${encodeURIComponent(routeId)}`;

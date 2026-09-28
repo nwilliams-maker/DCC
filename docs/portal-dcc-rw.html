@@ -123,6 +123,23 @@
         // (the write cutover) in migration/README.md is actually done and
         // verified -- see that file's "Step 6 rollback" note.
         const webAppUrl = "https://portal-api-production-226b.up.railway.app";
+        // The Revamp app has its own Postgres database and portal API.
+        // The first lookup remains on DCC so existing emailed links keep working.
+        const revampWebAppUrl = "https://revamp-portal-api-production.up.railway.app";
+
+        async function loadRoute(routeId) {
+            const query = `?action=getRoute&routeId=${encodeURIComponent(routeId)}`;
+            const response = await fetch(`${webAppUrl}${query}`);
+            if (!response.ok) throw new Error(`DCC route lookup failed: ${response.status}`);
+            const result = await response.json();
+            if (!result.error) return { result, apiUrl: webAppUrl };
+            if (result.error !== "This route link has expired or the route was not found." || !revampWebAppUrl) {
+                return { result, apiUrl: webAppUrl };
+            }
+            const revampResponse = await fetch(`${revampWebAppUrl}${query}`);
+            if (!revampResponse.ok) throw new Error(`Revamp route lookup failed: ${revampResponse.status}`);
+            return { result: await revampResponse.json(), apiUrl: revampWebAppUrl };
+        }
 
         // [L10] Single source of truth for the route stop limit (was inconsistently
         // 9 / 11 / 25 across UI copy and code).
@@ -155,15 +172,16 @@
                 window.currentRouteId = routeId;
                 document.getElementById('summaryZone').innerHTML = `<p class="text-slate-500 font-bold animate-pulse">Loading intelligence...</p>`;
 
-                fetch(`${webAppUrl}?action=getRoute&routeId=${routeId}`)
-                    .then(r => r.json())
-                    .then(res => {
+                loadRoute(routeId)
+                    .then(({ result: res, apiUrl }) => {
                         if (res.error) {
                             // [H4] res.error is untrusted GAS output — escape before innerHTML.
                             document.getElementById('summaryZone').innerHTML = `<div class="text-red-500 font-bold">⚠️ ${esc(res.error)}</div>`;
                             return;
                         }
                         const d = res.payload; window.payloadData = d;
+                        // Submit to the same database that supplied this route.
+                        window.currentApiUrl = apiUrl;
 
                         // 🩺 Quest Diagnostics hours warning (May 18 2026).
                         // Quest venues are only open 7:00 AM – 4:00 PM. Count stops with
@@ -271,7 +289,7 @@
                     wo: window.payloadData.wo || ""
                 };
 
-                const response = await fetch(webAppUrl, {
+                const response = await fetch(window.currentApiUrl || webAppUrl, {
                     method: 'POST',
                     headers: { "Content-Type": "text/plain;charset=utf-8" },
                     body: JSON.stringify(gasPayload)

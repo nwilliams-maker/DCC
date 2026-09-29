@@ -613,10 +613,15 @@ def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
         except ValueError:
             continue
         if created >= cutoff and source.get("email") and source.get("name"):
-            intake.append({key: source.get(key) for key in (
+            row = {key: source.get(key) for key in (
                 "monday_item_id", "monday_created_at", "email", "name", "phone",
                 "location", "ic_list", "pod_color", "digital_certified", "unrestricted",
-            )})
+            )}
+            # DCC is the pod source of truth. Forward the same resolved pod
+            # DCC uses for its own OnFleet reconciliation, not only the raw
+            # Monday Pod Color cell.
+            row["pod_color"] = _resolved_pod(source)
+            intake.append(row)
 
     counts = {"status": "ok", "sent": 0, "added": 0, "updated": 0}
     for start in range(0, len(intake), 100):

@@ -58,7 +58,8 @@ STATE_NAME_TO_ABBR = {
 }
 
 def _infer_pod_from_location(location: Any) -> str | None:
-    text = str(location or "").strip().upper()
+    raw = str(location or "").strip()
+    text = raw.upper()
     if not text:
         return None
     # Prefer explicit USPS abbreviations.
@@ -69,6 +70,34 @@ def _infer_pod_from_location(location: Any) -> str | None:
     for name, abbr in STATE_NAME_TO_ABBR.items():
         if re.search(rf"\b{re.escape(name)}\b", text):
             return STATE_TO_POD.get(abbr)
+
+    # DCC is the source of truth for pod geography. If the Monday Location
+    # text does not itself contain a state, resolve it through the same Mapbox
+    # geocoder DCC already uses, then map the returned U.S. region to a pod.
+    token = (os.environ.get("MAPBOX_TOKEN") or "").strip()
+    if token:
+        try:
+            resp = requests.get(
+                "https://api.mapbox.com/geocoding/v5/mapbox.places/"
+                + requests.utils.quote(raw, safe="")
+                + ".json",
+                params={
+                    "access_token": token,
+                    "limit": 3,
+                    "country": "US",
+                    "autocomplete": "false",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for feature in (resp.json() or {}).get("features") or []:
+                if not _mapbox_match_is_acceptable(raw, feature):
+                    continue
+                state, _ = _mapbox_result_state_zip(feature)
+                if state in STATE_TO_POD:
+                    return STATE_TO_POD[state]
+        except Exception:
+            pass
     return None
 
 def _resolved_pod(source: dict[str, Any]) -> str | None:

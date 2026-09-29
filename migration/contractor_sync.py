@@ -352,7 +352,7 @@ def _fetch_board_rows() -> tuple[dict[str, str], list[dict[str, Any]]]:
         columns { id title type }
         items_page(limit:500) {
           cursor
-          items { id name updated_at column_values { id text value } }
+          items { id name created_at updated_at column_values { id text value } }
         }
       }
     }
@@ -370,7 +370,7 @@ def _fetch_board_rows() -> tuple[dict[str, str], list[dict[str, Any]]]:
     query($cursor:String!) {
       next_items_page(limit:500, cursor:$cursor) {
         cursor
-        items { id name updated_at column_values { id text value } }
+        items { id name created_at updated_at column_values { id text value } }
       }
     }
     """
@@ -391,6 +391,7 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         return _clean_text(v.get("text"))
     source = {
         "monday_item_id": str(item.get("id") or ""),
+        "monday_created_at": item.get("created_at"),
         "monday_updated_at": item.get("updated_at"),
         "email": normalize_email(txt("email")),
         "name": txt("name") or _clean_text(item.get("name")),
@@ -589,6 +590,47 @@ def _recent_source(source: dict[str, Any], lookback_hours: int) -> bool:
         return True
 
 
+def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Send the September 24 onward board intake to Revamp's own database.
+
+    Repeated hourly deliveries are intentional; the receiver upserts by email.
+    The bridge is disabled until both its URL and dedicated token are set.
+    """
+    url = (os.environ.get("REVAMP_CONTRACTOR_SYNC_URL") or "").strip()
+    token = (os.environ.get("REVAMP_CONTRACTOR_SYNC_TOKEN") or "").strip()
+    if not url or not token:
+        return {"status": "not_configured"}
+    if not url.startswith("https://"):
+        raise RuntimeError("REVAMP_CONTRACTOR_SYNC_URL must use HTTPS")
+
+    cutoff = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # midnight Chicago, CDT
+    intake = []
+    for source in sources:
+        try:
+            created = datetime.fromisoformat(str(source.get("monday_created_at") or "").replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if created >= cutoff and source.get("email") and source.get("name"):
+            intake.append({key: source.get(key) for key in (
+                "monday_item_id", "monday_created_at", "email", "name", "phone",
+                "location", "ic_list", "pod_color", "digital_certified", "unrestricted",
+            )})
+
+    counts = {"status": "ok", "sent": 0, "added": 0, "updated": 0}
+    for start in range(0, len(intake), 100):
+        batch = intake[start:start + 100]
+        resp = requests.post(url, headers={"Authorization": f"Bearer {token}"},
+                             json={"contractors": batch}, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        counts["sent"] += len(batch)
+        counts["added"] += int(payload.get("added", 0))
+        counts["updated"] += int(payload.get("updated", 0))
+    return counts
+
+
 def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, Any]:
     if engine is None:
         db_url = (os.environ.get("DATABASE_URL") or "").strip()
@@ -617,6 +659,12 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         "details": [],
         "mapped_columns": sorted(mapping),
     }
+    try:
+        result["revamp_intake"] = _forward_revamp_intake(all_sources)
+    except Exception as exc:
+        # A Revamp outage must not stop the existing DCC sync. The next hourly
+        # run retries this idempotent delivery.
+        result["revamp_intake"] = {"status": "failed", "error": str(exc)}
 
     with engine.begin() as conn:
         conn.execute(sa.text("""

@@ -1,7 +1,9 @@
 import pytest
+from unittest.mock import patch
 
 from migration.contractor_sync import (
     _build_update,
+    _forward_revamp_intake,
     _preserve_blank,
     normalize_email,
     normalize_phone,
@@ -69,3 +71,26 @@ def test_build_update_preserves_blanks_and_unknown_bools():
         "pod_color": "Green",
         "unrestricted": True,
     }
+
+
+def test_revamp_delivery_uses_board_creation_date_and_retries_idempotently(monkeypatch):
+    monkeypatch.setenv("REVAMP_CONTRACTOR_SYNC_URL", "https://revamp.example/internal/contractors/sync")
+    monkeypatch.setenv("REVAMP_CONTRACTOR_SYNC_TOKEN", "test-token")
+    sources = [
+        {"monday_item_id": "1", "monday_created_at": "2026-09-24T04:59:59Z",
+         "name": "Old", "email": "old@example.com"},
+        {"monday_item_id": "2", "monday_created_at": "2026-09-24T05:00:00Z",
+         "name": "New", "email": "new@example.com", "phone": "3125551212",
+         "location": "Chicago, IL", "ic_list": "ACTIVE"},
+    ]
+
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"added": 1, "updated": 0}
+
+    with patch("migration.contractor_sync.requests.post", return_value=Response()) as post:
+        result = _forward_revamp_intake(sources)
+    assert result == {"status": "ok", "sent": 1, "added": 1, "updated": 0}
+    assert post.call_args.kwargs["json"]["contractors"][0]["monday_item_id"] == "2"

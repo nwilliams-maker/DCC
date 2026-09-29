@@ -126,6 +126,8 @@
         // The Revamp app has its own Postgres database and portal API.
         // The first lookup remains on DCC so existing emailed links keep working.
         const revampWebAppUrl = "https://revamp-portal-api-production.up.railway.app";
+        const formspreeUrl = "https://formspree.io/f/meerlqll";
+        const PRIMARY_FORMSPREE_EMAIL = "nwilliams@terraboost.biz";
 
         async function loadRoute(routeId) {
             const query = `?action=getRoute&routeId=${encodeURIComponent(routeId)}`;
@@ -298,9 +300,54 @@
                 const result = await response.json();
                 console.log("GAS Response:", JSON.stringify(result));
 
-                // GAS now sends the dispatcher email directly via Gmail in processDecision.
-                // Formspree call removed — was emailing one hardcoded address regardless of
-                // who dispatched the route.
+                // Restore the per-dispatcher response notification that existed
+                // before the GAS -> Railway cutover. The route payload captures the
+                // logged-in sender's email/name when the route is generated.
+                const _disp_email = (window.payloadData && window.payloadData.dispatcherEmail)
+                    ? String(window.payloadData.dispatcherEmail).trim()
+                    : PRIMARY_FORMSPREE_EMAIL;
+                const _disp_name = (window.payloadData && window.payloadData.dispatcherName)
+                    ? String(window.payloadData.dispatcherName).trim()
+                    : "";
+
+                try {
+                    const notifyResponse = await fetch(formspreeUrl, {
+                        method: 'POST',
+                        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            _subject: `${decision}: WO #${window.payloadData.wo} (${window.payloadData.icn})`,
+                            _to: _disp_email,
+                            _replyto: _disp_email,
+                            email: _disp_email,
+                            "Dispatcher": _disp_name || _disp_email,
+                            "Dispatcher Email": _disp_email,
+                            "Decision": decision,
+                            "Contractor": window.payloadData.icn,
+                            "Work Order #": window.payloadData.wo,
+                            "Electronic Signature": sig || "N/A",
+                            "Counter Offer": counter || "None",
+                            "Notes/Reason": notes || "None",
+                            "Total Compensation": `$${window.payloadData.comp}`,
+                            "Total Tasks": window.payloadData.tCnt,
+                            "Unique Locations": window.payloadData.lCnt,
+                            "Kiosk Installs": window.payloadData.kCnt || 0,
+                            "Kiosk Removals": window.payloadData.rCnt || 0,
+                            "Digital Tasks": window.payloadData.dCnt || 0,
+                            "Mileage": `${window.payloadData.mi} Miles`,
+                            "Est. Drive Time": window.payloadData.time,
+                            "Due Date": window.payloadData.due || "N/A",
+                            "Onfleet Auto-Assign": result.onfleetSuccess ? "SUCCESS" : "FAILED/SKIPPED",
+                            "Onfleet Msg": result.onfleetMsg || "N/A",
+                            "Onfleet Route Created": result.routeSuccess ? "YES" : "NO",
+                            "Onfleet Route Msg": result.routeMsg || "N/A"
+                        })
+                    });
+                    if (!notifyResponse.ok) {
+                        console.error("Dispatcher notification failed:", notifyResponse.status);
+                    }
+                } catch (notifyErr) {
+                    console.error("Dispatcher notification error:", notifyErr);
+                }
 
                 // Hide the form UI
                 document.getElementById('icMode').classList.add('hidden');

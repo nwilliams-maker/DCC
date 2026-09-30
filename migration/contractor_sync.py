@@ -620,9 +620,11 @@ def _recent_source(source: dict[str, Any], lookback_hours: int) -> bool:
 
 
 def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
-    """Send the September 24 onward board intake to Revamp's own database.
+    """Send the full current Monday IC/FA roster to Revamp's database.
 
-    Repeated hourly deliveries are intentional; the receiver upserts by email.
+    Repeated deliveries are intentional; the receiver upserts by email.
+    This must not be limited by contractor creation date: older active ICs
+    still need to exist in the Revamp/Postgres contractor dropdown.
     The bridge is disabled until both its URL and dedicated token are set.
     """
     url = (os.environ.get("REVAMP_CONTRACTOR_SYNC_URL") or "").strip()
@@ -632,16 +634,9 @@ def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
     if not url.startswith("https://"):
         raise RuntimeError("REVAMP_CONTRACTOR_SYNC_URL must use HTTPS")
 
-    cutoff = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # midnight Chicago, CDT
     intake = []
     for source in sources:
-        try:
-            created = datetime.fromisoformat(str(source.get("monday_created_at") or "").replace("Z", "+00:00"))
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if created >= cutoff and source.get("email") and source.get("name"):
+        if source.get("email") and source.get("name"):
             row = {key: source.get(key) for key in (
                 "monday_item_id", "monday_created_at", "email", "name", "phone",
                 "location", "ic_list", "pod_color", "digital_certified", "unrestricted",

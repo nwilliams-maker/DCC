@@ -14,20 +14,29 @@ import sqlalchemy as sa
 BOARD_ID = int(os.environ.get("MONDAY_CONTRACTOR_BOARD_ID", "5840676529"))
 MONDAY_API_URL = "https://api.monday.com/v2"
 
-COLUMN_ALIASES = {
-    "email": {"email", "email address", "e-mail", "e mail"},
-    "name": {"name", "contractor", "contractor name", "ic", "ic name", "independent contractor"},
-    "phone": {"phone", "phone number", "mobile", "cell", "cell phone"},
-    "location": {"location", "address", "home location", "service area", "city state", "city/state"},
-    "ic_list": {"ic list", "ic_list", "list", "contractor list"},
-    "pod_color": {"pod color", "pod", "pod_color", "pod colour"},
-    "digital_certified": {"digital certified", "digital certification", "digital_certified", "digital cert"},
-    "unrestricted": {"unrestricted", "unrestricted ic", "full access"},
-    "ic_status": {"ic status", "status", "contractor status"},
-    "inactive_reason": {"reason for inactive status", "inactive reason", "reason inactive"},
+COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "email": ("email", "email address", "e-mail", "e mail"),
+    "name": ("name", "contractor name", "ic name", "contractor", "independent contractor", "ic"),
+    "phone": ("phone", "phone number", "cell phone", "mobile", "cell"),
+    # Monday's map-type "*Location" column holds the full formatted address
+    # (street, city, state) plus a map pin; the hidden "*Address" text column
+    # is street-line only. Location first; see also the type preference in
+    # _discover_mapping.
+    "location": ("location", "home location", "address", "home address", "street address",
+                 "city state", "city/state", "service area"),
+    "ic_list": ("ic list", "ic_list", "contractor list", "list"),
+    "pod_color": ("pod color", "pod_color", "pod colour", "pod"),
+    "digital_certified": ("digital certified", "digital_certified", "digital certification", "digital cert"),
+    "unrestricted": ("unrestricted", "unrestricted ic", "full access"),
+    "ic_status": ("ic status", "contractor status", "status"),
+    "inactive_reason": ("reason for inactive status", "inactive reason", "reason inactive"),
 }
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
+US_STATES = frozenset(
+    "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
+    "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR".split()
+)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -56,6 +65,33 @@ STATE_NAME_TO_ABBR = {
     "VIRGINIA":"VA","WASHINGTON":"WA","WEST VIRGINIA":"WV","WISCONSIN":"WI","WYOMING":"WY",
     "DISTRICT OF COLUMBIA":"DC",
 }
+
+def state_from_location(location: Any) -> str | None:
+    """USPS state code from an address: last real 2-letter code, else a full state name."""
+    text = str(location or "").upper()
+    if not text.strip():
+        return None
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", text)):
+        if tok in STATE_TO_POD:
+            return tok
+    for part in reversed([p.strip() for p in text.split(",")]):
+        part = re.sub(r"\s+\d{5}(?:-\d{4})?$", "", part)
+        if part in STATE_NAME_TO_ABBR:
+            return STATE_NAME_TO_ABBR[part]
+    for name in sorted(STATE_NAME_TO_ABBR, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", text):
+            return STATE_NAME_TO_ABBR[name]
+    return None
+
+
+def resolved_pod(location: Any, monday_pod: Any = None) -> str | None:
+    """Pod from the address state (source of truth); Monday pod only as fallback."""
+    st = state_from_location(location)
+    if st and st in STATE_TO_POD:
+        return STATE_TO_POD[st]
+    return _clean_text(monday_pod)
+
+
 
 def _infer_pod_from_location(location: Any) -> str | None:
     raw = str(location or "").strip()
@@ -101,7 +137,7 @@ def _infer_pod_from_location(location: Any) -> str | None:
     return None
 
 def _resolved_pod(source: dict[str, Any]) -> str | None:
-    return _clean_text(source.get("pod_color")) or _infer_pod_from_location(source.get("location"))
+    return resolved_pod(source.get("location"), source.get("pod_color"))
 
 
 def _onfleet_headers() -> dict[str, str] | None:
@@ -251,7 +287,7 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
 
     address = _clean_text(source.get("location"))
     routing_address_added = False
-    if address:
+    if address and state_from_location(address):
         existing_metadata = [
             m for m in (worker.get("metadata") or [])
             if _norm_title(m.get("name")) != "address"
@@ -274,7 +310,8 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
             routing_address_added = True
 
         existing_metadata.append({"name": "Address", "type": "string", "value": address})
-        update_payload["metadata"] = existing_metadata
+        if existing_metadata != (worker.get("metadata") or []):
+            update_payload["metadata"] = existing_metadata
 
     if update_payload:
         _onfleet_request("PUT", f"/workers/{worker_id}", json=update_payload)
@@ -363,6 +400,15 @@ def _discover_mapping(columns: list[dict[str, Any]]) -> dict[str, str]:
         matches = [by_title[a] for a in aliases if a in by_title]
         if matches:
             mapping[field] = matches[0]
+    # A real Monday map/location column beats any same-named text column: it
+    # carries the full address and its own coordinates.
+    location_typed = [
+        str(c.get("id")) for c in columns
+        if str(c.get("type") or "").lower() == "location"
+        and _norm_title(c.get("title")) in COLUMN_ALIASES["location"]
+    ]
+    if location_typed:
+        mapping["location"] = location_typed[0]
     missing = [f for f in ("email",) if f not in mapping]
     if missing:
         raise RuntimeError(
@@ -436,7 +482,24 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
     availability = _availability_class(source)
     if availability:
         source["ic_list"] = availability
+    loc_val = vals.get(mapping.get("location") or "") or {}
+    source["monday_lat"], source["monday_lng"] = _monday_location_coords(loc_val.get("value"))
     return source
+
+
+def _monday_location_coords(raw: Any) -> tuple[float | None, float | None]:
+    """lat/lng from a Monday location column's JSON value, if valid (U.S.)."""
+    if not raw:
+        return None, None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        lat, lng = float(data.get("lat")), float(data.get("lng"))
+    except Exception:
+        return None, None
+    if not (-179.9 <= lng <= -66.0 and 18.0 <= lat <= 72.0):
+        return None, None
+    return lat, lng
+
 
 
 def _availability_class(source: dict[str, Any], insurance_window_days: int = 90) -> str | None:
@@ -595,6 +658,8 @@ def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str,
     out: dict[str, Any] = {}
     for field in ("name", "phone", "location", "ic_list", "pod_color"):
         incoming = _clean_text(source.get(field))
+        if field == "location" and not state_from_location(incoming):
+            continue
         if incoming and incoming != existing.get(field):
             out[field] = incoming
     for field in ("digital_certified", "unrestricted"):
@@ -639,7 +704,7 @@ def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
         if source.get("email") and source.get("name"):
             row = {key: source.get(key) for key in (
                 "monday_item_id", "monday_created_at", "email", "name", "phone",
-                "location", "ic_list", "pod_color", "digital_certified", "unrestricted",
+                "location", "monday_lat", "monday_lng", "ic_list", "pod_color", "digital_certified", "unrestricted",
             )}
             # DCC is the pod source of truth. Forward the same resolved pod
             # DCC uses for its own OnFleet reconciliation, not only the raw
@@ -748,7 +813,9 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                     })
                     continue
 
-                lat, lng = _geocode(source.get("location"))
+                lat, lng = (source.get("monday_lat"), source.get("monday_lng"))
+                if lat is None or lng is None:
+                    lat, lng = _geocode(source.get("location"))
                 row = {
                     "email": email,
                     "name": name,
@@ -790,8 +857,10 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 _clean_text(source.get("location"))
                 and (existing.get("lat") is None or existing.get("lng") is None)
             ):
-                lat, lng = _geocode(updates.get("location") or source.get("location"))
-                if lat is not None and lng is not None:
+                lat, lng = (source.get("monday_lat"), source.get("monday_lng"))
+                if lat is None or lng is None:
+                    lat, lng = _geocode(updates.get("location") or source.get("location"))
+                if "location" in updates or (lat is not None and lng is not None):
                     updates["lat"] = lat
                     updates["lng"] = lng
             if not updates:
@@ -908,3 +977,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

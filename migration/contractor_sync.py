@@ -14,17 +14,22 @@ import sqlalchemy as sa
 BOARD_ID = int(os.environ.get("MONDAY_CONTRACTOR_BOARD_ID", "5840676529"))
 MONDAY_API_URL = "https://api.monday.com/v2"
 
+# Ordered by priority: the first alias that exists on the board wins. These
+# were sets, whose iteration order is random per process, so "location" could
+# silently flip between the full "*Location" map column and the hidden,
+# street-only "*Address" column from one restart to the next.
 COLUMN_ALIASES = {
-    "email": {"email", "email address", "e-mail", "e mail"},
-    "name": {"name", "contractor", "contractor name", "ic", "ic name", "independent contractor"},
-    "phone": {"phone", "phone number", "mobile", "cell", "cell phone"},
-    "location": {"location", "address", "home location", "service area", "city state", "city/state"},
-    "ic_list": {"ic list", "ic_list", "list", "contractor list"},
-    "pod_color": {"pod color", "pod", "pod_color", "pod colour"},
-    "digital_certified": {"digital certified", "digital certification", "digital_certified", "digital cert"},
-    "unrestricted": {"unrestricted", "unrestricted ic", "full access"},
-    "ic_status": {"ic status", "status", "contractor status"},
-    "inactive_reason": {"reason for inactive status", "inactive reason", "reason inactive"},
+    "email": ("email", "email address", "e-mail", "e mail"),
+    "name": ("name", "contractor name", "ic name", "contractor", "independent contractor", "ic"),
+    "phone": ("phone", "phone number", "cell phone", "mobile", "cell"),
+    "location": ("location", "home location", "address", "home address", "street address",
+                 "city state", "city/state", "service area"),
+    "ic_list": ("ic list", "ic_list", "contractor list", "list"),
+    "pod_color": ("pod color", "pod_color", "pod colour", "pod"),
+    "digital_certified": ("digital certified", "digital_certified", "digital certification", "digital cert"),
+    "unrestricted": ("unrestricted", "unrestricted ic", "full access"),
+    "ic_status": ("ic status", "contractor status", "status"),
+    "inactive_reason": ("reason for inactive status", "inactive reason", "reason inactive"),
 }
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
@@ -62,10 +67,11 @@ def _infer_pod_from_location(location: Any) -> str | None:
     text = raw.upper()
     if not text:
         return None
-    # Prefer explicit USPS abbreviations.
-    m = re.search(r"(?:,|\s)\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?|\s|,|$)", text)
-    if m and m.group(1) in STATE_TO_POD:
-        return STATE_TO_POD[m.group(1)]
+    # Prefer explicit USPS abbreviations - the LAST real one, so street
+    # suffixes like "Ct" (Court) earlier in the address aren't read as CT.
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", text)):
+        if tok in STATE_TO_POD:
+            return STATE_TO_POD[tok]
     # Fall back to full state names.
     for name, abbr in STATE_NAME_TO_ABBR.items():
         if re.search(rf"\b{re.escape(name)}\b", text):
@@ -101,7 +107,10 @@ def _infer_pod_from_location(location: Any) -> str | None:
     return None
 
 def _resolved_pod(source: dict[str, Any]) -> str | None:
-    return _clean_text(source.get("pod_color")) or _infer_pod_from_location(source.get("location"))
+    # Nick's state map (STATE_TO_POD) is the source of truth for pods
+    # (2026-09-30): derive from the address first; the Monday Pod Color cell
+    # is only a fallback when no state can be resolved.
+    return _infer_pod_from_location(source.get("location")) or _clean_text(source.get("pod_color"))
 
 
 def _onfleet_headers() -> dict[str, str] | None:
@@ -177,6 +186,9 @@ def _worker_routing_address_present(worker: dict[str, Any]) -> bool:
     return bool(addresses.get("routing"))
 
 
+UPDATE_EXISTING_ONFLEET_WORKERS = False
+
+
 def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, Any]], workers: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconcile a recent Monday contractor with Onfleet, without duplicate drivers."""
     pod = _resolved_pod(source)
@@ -241,6 +253,13 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
     worker_id = worker.get("id")
     if not worker_id:
         return {"status": "failed", "reason": "matched OnFleet driver has no id"}
+
+    # Existing OnFleet drivers are FROZEN (Nick's rule, 2026-09-30): the
+    # current IC list was corrected and syncs only ADD new ICs. Do not move
+    # teams or rewrite routing addresses for drivers that already exist; a
+    # specific IC's address/team is changed deliberately, one at a time.
+    if not UPDATE_EXISTING_ONFLEET_WORKERS:
+        return {"status": "already_present", "worker_id": worker_id}
 
     existing_team_ids = set(worker.get("teams") or [])
     target_team_id = team.get("id")
@@ -363,6 +382,15 @@ def _discover_mapping(columns: list[dict[str, Any]]) -> dict[str, str]:
         matches = [by_title[a] for a in aliases if a in by_title]
         if matches:
             mapping[field] = matches[0]
+    # A real Monday map/location column (full address + pin) beats any
+    # same-named text column such as the street-only "*Address".
+    location_typed = [
+        str(c.get("id")) for c in columns
+        if str(c.get("type") or "").lower() == "location"
+        and _norm_title(c.get("title")) in COLUMN_ALIASES["location"]
+    ]
+    if location_typed:
+        mapping["location"] = location_typed[0]
     missing = [f for f in ("email",) if f not in mapping]
     if missing:
         raise RuntimeError(
@@ -426,6 +454,8 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "name": txt("name") or _clean_text(item.get("name")),
         "phone": txt("phone"),
         "location": txt("location"),
+        "monday_lat": None,
+        "monday_lng": None,
         "ic_list": txt("ic_list"),
         "pod_color": txt("pod_color"),
         "digital_certified": parse_bool(txt("digital_certified")),
@@ -433,6 +463,19 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "ic_status": txt("ic_status"),
         "inactive_reason": txt("inactive_reason"),
     }
+    loc_val = vals.get(mapping.get("location") or "") or {}
+    try:
+        pin = json.loads(loc_val.get("value") or "null") or {}
+        lat, lng = float(pin.get("lat")), float(pin.get("lng"))
+        if 18.0 <= lat <= 72.0 and -179.9 <= lng <= -66.0:
+            source["monday_lat"], source["monday_lng"] = lat, lng
+    except Exception:
+        pass
+    # Pod follows the state map (text-only check here: no geocoding per item).
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", str(source.get("location") or "").upper())):
+        if tok in STATE_TO_POD:
+            source["pod_color"] = STATE_TO_POD[tok]
+            break
     availability = _availability_class(source)
     if availability:
         source["ic_list"] = availability
@@ -593,7 +636,9 @@ def _geocode(location: str | None) -> tuple[float | None, float | None]:
 
 def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for field in ("name", "phone", "location", "ic_list", "pod_color"):
+    # location / pod_color are frozen for existing ICs (2026-09-30 rule):
+    # syncs only add new ICs; one IC's address is changed deliberately.
+    for field in ("name", "phone", "ic_list"):
         incoming = _clean_text(source.get(field))
         if incoming and incoming != existing.get(field):
             out[field] = incoming
@@ -640,6 +685,7 @@ def _forward_revamp_intake(sources: list[dict[str, Any]]) -> dict[str, Any]:
             row = {key: source.get(key) for key in (
                 "monday_item_id", "monday_created_at", "email", "name", "phone",
                 "location", "ic_list", "pod_color", "digital_certified", "unrestricted",
+                "monday_lat", "monday_lng",
             )}
             # DCC is the pod source of truth. Forward the same resolved pod
             # DCC uses for its own OnFleet reconciliation, not only the raw

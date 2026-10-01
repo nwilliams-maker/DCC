@@ -33,6 +33,10 @@ COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
 }
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
+US_STATES = frozenset(
+    "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
+    "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR".split()
+)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -61,6 +65,33 @@ STATE_NAME_TO_ABBR = {
     "VIRGINIA":"VA","WASHINGTON":"WA","WEST VIRGINIA":"WV","WISCONSIN":"WI","WYOMING":"WY",
     "DISTRICT OF COLUMBIA":"DC",
 }
+
+def state_from_location(location: Any) -> str | None:
+    """USPS state code from an address: last real 2-letter code, else a full state name."""
+    text = str(location or "").upper()
+    if not text.strip():
+        return None
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", text)):
+        if tok in STATE_TO_POD:
+            return tok
+    for part in reversed([p.strip() for p in text.split(",")]):
+        part = re.sub(r"\s+\d{5}(?:-\d{4})?$", "", part)
+        if part in STATE_NAME_TO_ABBR:
+            return STATE_NAME_TO_ABBR[part]
+    for name in sorted(STATE_NAME_TO_ABBR, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", text):
+            return STATE_NAME_TO_ABBR[name]
+    return None
+
+
+def resolved_pod(location: Any, monday_pod: Any = None) -> str | None:
+    """Pod from the address state (source of truth); Monday pod only as fallback."""
+    st = state_from_location(location)
+    if st and st in STATE_TO_POD:
+        return STATE_TO_POD[st]
+    return _clean_text(monday_pod)
+
+
 
 def _infer_pod_from_location(location: Any) -> str | None:
     raw = str(location or "").strip()
@@ -106,7 +137,7 @@ def _infer_pod_from_location(location: Any) -> str | None:
     return None
 
 def _resolved_pod(source: dict[str, Any]) -> str | None:
-    return _clean_text(source.get("pod_color")) or _infer_pod_from_location(source.get("location"))
+    return resolved_pod(source.get("location"), source.get("pod_color"))
 
 
 def _onfleet_headers() -> dict[str, str] | None:
@@ -256,7 +287,7 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
 
     address = _clean_text(source.get("location"))
     routing_address_added = False
-    if address:
+    if address and state_from_location(address):
         existing_metadata = [
             m for m in (worker.get("metadata") or [])
             if _norm_title(m.get("name")) != "address"
@@ -279,7 +310,8 @@ def _onfleet_sync_new_contractor(source: dict[str, Any], teams: list[dict[str, A
             routing_address_added = True
 
         existing_metadata.append({"name": "Address", "type": "string", "value": address})
-        update_payload["metadata"] = existing_metadata
+        if existing_metadata != (worker.get("metadata") or []):
+            update_payload["metadata"] = existing_metadata
 
     if update_payload:
         _onfleet_request("PUT", f"/workers/{worker_id}", json=update_payload)
@@ -626,6 +658,8 @@ def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str,
     out: dict[str, Any] = {}
     for field in ("name", "phone", "location", "ic_list", "pod_color"):
         incoming = _clean_text(source.get(field))
+        if field == "location" and not state_from_location(incoming):
+            continue
         if incoming and incoming != existing.get(field):
             out[field] = incoming
     for field in ("digital_certified", "unrestricted"):

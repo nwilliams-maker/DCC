@@ -5232,6 +5232,30 @@ def get_task_pill(cluster_data):
     return f" | 🛠️ {k_n} Kiosk" if k_n > 0 else ""
 
 
+# 🌟 Shopify store link support (staged only, not deployed) — extracts unique
+# Shopify URLs from a route's stop_data, restricted to kiosk-family tasks
+# (install/removal/kiosk). Digital + service tasks never carry a store link,
+# so this silently returns [] for non-kiosk routes — no behavior change there.
+def _extract_shopify_urls_for_display(stop_data, task_type_filter="kiosk"):
+    """Extract unique Shopify URLs from stop_data, filtered to kiosk tasks only."""
+    urls = []
+    if not isinstance(stop_data, list):
+        try:
+            if isinstance(stop_data, str):
+                stop_data = json.loads(stop_data)
+        except Exception:
+            return urls
+    for stop in (stop_data or []):
+        if not isinstance(stop, dict):
+            continue
+        url = stop.get('shopify_url') or stop.get('shopifyUrl')
+        task_type = str(stop.get('task_type') or stop.get('taskType') or '').lower()
+        if url and ('kiosk' in task_type or 'install' in task_type or 'remov' in task_type):
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
 # 🌟 NEW HELPER: Groups clusters by State, then sorts them by geographical proximity
 def group_and_sort_by_proximity(bucket):
     if not bucket: return []
@@ -6665,6 +6689,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "kioskId": next((str(t.get("kiosk_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("kiosk_id","")).strip()), ""),
                         "venueId": next((str(t.get("venue_id","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("venue_id","")).strip()), ""),
                         "locationInVenue": next((str(t.get("location_in_venue","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("location_in_venue","")).strip()), ""),
+                        # 🛒 Shopify store link (staged only, not deployed) — first
+                        # non-empty value wins when multiple tasks at the same
+                        # address differ. TODO: Populate shopify_url from:
+                        # - Onfleet task metadata field?
+                        # - Monday.com board query (venue_id ↔ store_url)?
+                        # - DCC config table (client_company ↔ store_url)?
+                        # For now, upstream must provide it; empty string is safe.
+                        "shopify_url": next((str(t.get("shopify_url","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("shopify_url","")).strip()), ""),
                         "campaigns": list({
                             (t.get("client_company",""), t.get("escalated",False), str(t.get("boosted_standard","")).lower()):
                             {"name": t.get("client_company",""), "esc": t.get("escalated",False), "bs": str(t.get("boosted_standard","")).lower()}
@@ -9753,10 +9785,13 @@ def run_pod_tab(pod_name):
                     tasks_cnt, stops_cnt = len(c['data']), c['stops']
                     wo_display = c.get('wo', ic_name)
                     _pill_sent = get_task_pill(c.get('data', []))
+                    # 🛒 Shopify store link support (staged only) — kiosk-only, guarded by inst count via pill helper.
+                    _sent_shopify_urls = _extract_shopify_urls_for_display(c.get('data', []))
+                    _sent_shopify_pill = f" | 🛒 {len(_sent_shopify_urls)} Store Link{'s' if len(_sent_shopify_urls) > 1 else ''}" if _sent_shopify_urls else ""
                     
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}{_sent_shopify_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             _venues_html = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;">
     <div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;">
@@ -9815,6 +9850,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                                 is_fn=(ic_name == "Field Nation"),
                                 has_kiosks=(_sent_kiosk_total > 0),
                             )
+                            if _sent_shopify_urls:
+                                _sent_shopify_links_md = " · ".join(
+                                    f"[{re.sub(r'^https?://', '', u)}]({u})" for u in _sent_shopify_urls
+                                )
+                                st.markdown(f"🛒 **Shopify Store{'s' if len(_sent_shopify_urls) > 1 else ''}:** {_sent_shopify_links_md}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -9929,6 +9969,9 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
                     _k_total = sum(_k_by_addr.values())
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
+                    # 🛒 Shopify store link support (staged only) — kiosk-only, guarded by _k_total.
+                    _acc_shopify_urls = _extract_shopify_urls_for_display(c['data']) if _k_total > 0 else []
+                    _acc_shopify_pill = f" | 🛒 {len(_acc_shopify_urls)} Store Link{'s' if len(_acc_shopify_urls) > 1 else ''}" if _acc_shopify_urls else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         if ic_name == "Field Nation":
@@ -9936,7 +9979,7 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             _acc_fn_badge = f"🌐 {format_fn_card_title(_acc_fn_prov)} | "
                         else:
                             _acc_fn_badge = ""
-                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(_acc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}{_k_pill}{_acc_shopify_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -9952,6 +9995,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             render_finalization_checklist(cluster_hash, pod_name, "chk", is_fn=(ic_name == "Field Nation"), has_kiosks=(_k_total > 0))
                             if _k_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
+                                if _acc_shopify_urls:
+                                    _acc_shopify_links_md = " · ".join(
+                                        f"[{re.sub(r'^https?://', '', u)}]({u})" for u in _acc_shopify_urls
+                                    )
+                                    st.markdown(f"🛒 **Shopify Store{'s' if len(_acc_shopify_urls) > 1 else ''}:** {_acc_shopify_links_md}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -9971,8 +10019,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                     with exp_col:
                         _gk_total = g.get('kCnt', 0) or 0
                         _gk_pill = f" | 🛠️ {_gk_total} Kiosk" if _gk_total > 0 else ""
+                        # 🛒 Shopify store link support (staged only) — kiosk-only, guarded by _gk_total.
+                        _gacc_shopify_urls = _extract_shopify_urls_for_display(g.get('stop_data', [])) if _gk_total > 0 else []
+                        _gacc_shopify_pill = f" | 🛒 {len(_gacc_shopify_urls)} Store Link{'s' if len(_gacc_shopify_urls) > 1 else ''}" if _gacc_shopify_urls else ""
                         _gacc_fn_badge = "🌐 " if g_ic_name == "Field Nation" else ""
-                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                        with st.expander(_gacc_fn_badge + f"✅ {g.get('wo', g_ic_name)} | ${comp} | Due: {due}{_gk_pill}{_gacc_shopify_pill}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -9982,6 +10033,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             render_finalization_checklist(ghost_hash, pod_name, "g_chk", is_fn=(g_ic_name == "Field Nation"), has_kiosks=(_gk_total > 0))
                             if _gk_total > 0:
                                 st.link_button("🛍️ Order Kiosks on Shopify", url="https://admin.shopify.com/store/terraboost/draft_orders/new", use_container_width=True)
+                                if _gacc_shopify_urls:
+                                    _gacc_shopify_links_md = " · ".join(
+                                        f"[{re.sub(r'^https?://', '', u)}]({u})" for u in _gacc_shopify_urls
+                                    )
+                                    st.markdown(f"🛒 **Shopify Store{'s' if len(_gacc_shopify_urls) > 1 else ''}:** {_gacc_shopify_links_md}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -10059,9 +10115,12 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             _fk_by_addr[_venue] = _fk_by_addr.get(_venue, 0) + 1
                     _fk_total = sum(_fk_by_addr.values())
                     _fk_pill = f" | 🛠️ {_fk_total} Kiosk" if _fk_total > 0 else ""
+                    # 🛒 Shopify store link support (staged only) — kiosk-only, guarded by _fk_total.
+                    _fin_shopify_urls = _extract_shopify_urls_for_display(c['data']) if _fk_total > 0 else []
+                    _fin_shopify_pill = f" | 🛒 {len(_fin_shopify_urls)} Store Link{'s' if len(_fin_shopify_urls) > 1 else ''}" if _fin_shopify_urls else ""
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
-                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}{_fk_pill}{_fin_shopify_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
                             u_locs = []
                             for tk in c['data']:
                                 if tk['full'] not in u_locs: u_locs.append(tk['full'])
@@ -10074,6 +10133,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                                 loc_rows.append(f"<li>{_fv_prefix}{l}{_k_tag}</li>")
                             _fin_venues = venue_section(make_venue_details(c['data']))
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{ic_name}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_fin_venues}</div>""", unsafe_allow_html=True)
+                            if _fin_shopify_urls:
+                                _fin_shopify_links_md = " · ".join(
+                                    f"[{re.sub(r'^https?://', '', u)}]({u})" for u in _fin_shopify_urls
+                                )
+                                st.markdown(f"🛒 **Shopify Store{'s' if len(_fin_shopify_urls) > 1 else ''}:** {_fin_shopify_links_md}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):
@@ -10094,7 +10158,10 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                     with exp_col:
                         _gfk_total = g.get('kCnt', 0) or 0
                         _gfk_pill = f" | 🛠️ {_gfk_total} Kiosk" if _gfk_total > 0 else ""
-                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}  ·  :gray[{tasks_cnt} tasks]"):
+                        # 🛒 Shopify store link support (staged only) — kiosk-only, guarded by _gfk_total.
+                        _gfin_shopify_urls = _extract_shopify_urls_for_display(g.get('stop_data', [])) if _gfk_total > 0 else []
+                        _gfin_shopify_pill = f" | 🛒 {len(_gfin_shopify_urls)} Store Link{'s' if len(_gfin_shopify_urls) > 1 else ''}" if _gfin_shopify_urls else ""
+                        with st.expander(f"🏁 {wo_display} | ${comp} | Due: {due}{_gfk_pill}{_gfin_shopify_pill}  ·  :gray[{tasks_cnt} tasks]"):
                             raw_locs = [s.strip() for s in g.get('locs', '').split('|') if s.strip()]
                             if len(raw_locs) >= 3: task_locs = raw_locs[1:-1]
                             else: task_locs = raw_locs
@@ -10102,6 +10169,11 @@ padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:no
                             _gfin_venues = venue_section(make_venue_details_ghost(u_locs, stop_data=g.get('stop_data', []))) if u_locs else ""
                             g_ic_name_fin = g.get('contractor_name', 'Unknown')
                             st.markdown(f"""<div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; margin-bottom:10px;"><div style="background:#f8fafc; border-bottom:1px solid #e2e8f0; padding:8px 12px;"><span style="font-size:9px; font-weight:900; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em;">Route Summary</span></div><div style="padding:12px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Contractor</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{g_ic_name_fin}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Stops / Tasks</div><div style="font-size:14px; font-weight:800; color:#0f172a;">{stops_cnt} <span style="color:#94a3b8; font-size:11px; font-weight:500;">Stops / {tasks_cnt} Tasks</span></div></div></div><div style="padding:10px 14px; display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9;"><div><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Due Date</div><div style="font-size:13px; font-weight:700; color:#0f172a;">{due}</div></div><div style="text-align:right;"><div style="font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:2px;">Total Compensation</div><div style="font-size:18px; font-weight:900; color:#16a34a;">${comp}</div></div></div>{_gfin_venues}</div>""", unsafe_allow_html=True)
+                            if _gfin_shopify_urls:
+                                _gfin_shopify_links_md = " · ".join(
+                                    f"[{re.sub(r'^https?://', '', u)}]({u})" for u in _gfin_shopify_urls
+                                )
+                                st.markdown(f"🛒 **Shopify Store{'s' if len(_gfin_shopify_urls) > 1 else ''}:** {_gfin_shopify_links_md}")
                     with btn_col:
                         if not _is_dispatch_associate():
                             with st.popover("↩️"):

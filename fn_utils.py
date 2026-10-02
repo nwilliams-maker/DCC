@@ -246,14 +246,34 @@ def _fn_window():
         return "", ""
 
 
-def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: int = 1):
+def _is_kiosk_task_type(task_type) -> bool:
+    """True if a task_type string is kiosk-family (install/removal/kiosk).
+    Shared guard used everywhere a Shopify store link may be exposed -- digital
+    and service tasks never carry a store link and must return False here."""
+    tt = str(task_type or "").strip().lower()
+    return bool(tt) and ("kiosk" in tt or "install" in tt or "remov" in tt)
+
+
+def _cluster_has_kiosk_task(cluster: dict) -> bool:
+    """True if ANY task in this cluster's data is a kiosk-family task. Drives
+    whether the FN CSV gets a Shopify URL column at all -- non-kiosk clusters
+    keep a clean CSV with no Shopify column."""
+    return any(_is_kiosk_task_type(t.get('task_type', '')) for t in (cluster.get('data', []) or []))
+
+
+def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: int = 1, include_shopify: bool = False):
     """Yield one CSV row per unique stop address in this cluster. Used by both
     generate_fn_upload (single cluster) and generate_combined_fn_upload (many).
 
     bundle_number: integer that becomes the value of the "Bundle" column for every
     row from this cluster. The combined generator passes 1, 2, 3, ... for each
     cluster so the dispatcher can sort/group all rows belonging to one route in the
-    final spreadsheet. Single-cluster generate_fn_upload always passes 1."""
+    final spreadsheet. Single-cluster generate_fn_upload always passes 1.
+
+    include_shopify: when True, append a per-slot Shopify URL custom column
+    (kiosk tasks only, blank for non-kiosk slots). Callers decide this once per
+    CSV (via _cluster_has_kiosk_task) so every row in the file has the same
+    column count -- non-kiosk CSVs never grow this column at all."""
     stop_task_map: dict = {}
     _seen_keys: dict = {}
     for t in cluster.get('data', []):
@@ -316,6 +336,11 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
             if slot_idx == 1:
                 custom_cols.append(_csv_safe(venue_id))
             custom_cols.append(_csv_safe(combined_loc))
+            # 🛒 Shopify store link (staged only, not deployed) — kiosk tasks
+            # only. Blank cell for non-kiosk slots so the column stays clean.
+            if include_shopify:
+                _slot_shopify = str(task.get('shopify_url', '') or '').strip() if _is_kiosk_task_type(task_type) else ''
+                custom_cols.append(_csv_safe(_slot_shopify))
 
         # Pad empty slots up to 5
         filled = len(tasks[:5])
@@ -324,11 +349,20 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
             if slot_idx == 1:
                 custom_cols.append("")
             custom_cols.append("")
+            if include_shopify:
+                custom_cols.append("")
 
         yield base_row + custom_cols
 
 
-def _fn_csv_headers():
+def _fn_csv_headers(include_shopify: bool = False):
+    """Build the FN mass-upload CSV header row.
+
+    include_shopify: when True, adds a "N. Shopify URL" column after each
+    slot's "N. Location in Venue" header. Callers only pass True when the
+    cluster/combined-set has at least one kiosk-family task (see
+    _cluster_has_kiosk_task) -- non-kiosk CSVs stay exactly as they were
+    before this feature, with no Shopify columns at all."""
     base_headers = [
         "Bundle",
         "Location Name", "Address #1", "City", "State", "Postal Code", "Country",
@@ -342,6 +376,8 @@ def _fn_csv_headers():
         if n == 1:
             custom_headers.append("1. Venue ID")
         custom_headers.append(f"{n}. Location in Venue")
+        if include_shopify:
+            custom_headers.append(f"{n}. Shopify URL")
     return base_headers + custom_headers
 
 
@@ -361,13 +397,17 @@ def generate_fn_upload(stop_metrics: dict, cluster: dict, due, final_pay: float,
         start_date = str(due)
         end_date   = str(due)
 
-    rows = list(_fn_stop_rows(cluster, start_date, end_date))
+    # 🛒 Shopify store link (staged only, not deployed) — only add the column
+    # when this cluster actually has a kiosk-family task. Keeps non-kiosk CSVs
+    # unchanged.
+    _include_shopify = _cluster_has_kiosk_task(cluster)
+    rows = list(_fn_stop_rows(cluster, start_date, end_date, include_shopify=_include_shopify))
     if not rows:
         return None, 0
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(_fn_csv_headers())
+    writer.writerow(_fn_csv_headers(include_shopify=_include_shopify))
     writer.writerows(rows)
 
     bytes_buf = io.BytesIO(buf.getvalue().encode('utf-8'))
@@ -464,9 +504,14 @@ def generate_combined_fn_upload(clusters: list):
     _bundle_counts = _Counter(addr_bundle.values())
     _single_stop_bundles = {b for b, c in _bundle_counts.items() if c == 1}
 
+    # 🛒 Shopify store link (staged only, not deployed) — only add the column
+    # when ANY contributing cluster has a kiosk-family task. Keeps combined
+    # CSVs with zero kiosk work unchanged.
+    _include_shopify = any(_cluster_has_kiosk_task(cluster) for cluster in (clusters or []))
+
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(_fn_csv_headers())
+    writer.writerow(_fn_csv_headers(include_shopify=_include_shopify))
 
     total_stops = 0
     for key, tasks in addr_tasks.items():
@@ -520,6 +565,11 @@ def generate_combined_fn_upload(clusters: list):
             if slot_idx == 1:
                 custom_cols.append(_csv_safe(venue_id))
             custom_cols.append(_csv_safe(combined_loc))
+            # 🛒 Shopify store link (staged only, not deployed) — kiosk tasks
+            # only. Blank cell for non-kiosk slots so the column stays clean.
+            if _include_shopify:
+                _slot_shopify = str(task.get('shopify_url', '') or '').strip() if _is_kiosk_task_type(task_type) else ''
+                custom_cols.append(_csv_safe(_slot_shopify))
 
         # Pad empty slots up to 5.
         filled = len(tasks[:5])
@@ -528,6 +578,8 @@ def generate_combined_fn_upload(clusters: list):
             if slot_idx == 1:
                 custom_cols.append("")
             custom_cols.append("")
+            if _include_shopify:
+                custom_cols.append("")
 
         writer.writerow(base_row + custom_cols)
         total_stops += 1

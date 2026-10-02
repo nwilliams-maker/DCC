@@ -937,6 +937,21 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
         result["onfleet_recent_db_missing"] = len(missing)
         result["onfleet_recent_db_missing_names"] = [src["name"] for src in missing[:20]]
 
+        # Report September 24 onward Monday intake separately from the 14-day
+        # Postgres audit. The board creation time defines this requested cohort.
+        intake_cutoff = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # midnight Chicago, CDT
+        intake = []
+        for src in all_sources:
+            try:
+                created = datetime.fromisoformat(str(src.get("monday_created_at") or "").replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if created >= intake_cutoff:
+                intake.append(src)
+        result["sep24_intake_count"] = len(intake)
+
         # Reconcile every current eligible contractor. _onfleet_sync_new_contractor
         # is idempotent: it creates when absent, updates team/address when needed,
         # and returns already_present without writing when OnFleet is current.
@@ -961,6 +976,24 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                     "status": "onfleet_failed",
                     "reason": of_result.get("reason"),
                 })
+        result["sep24_intake"] = []
+        for src in intake:
+            phone = normalize_phone(src.get("phone"))
+            email = normalize_email(src.get("email"))
+            matches = {str(w.get("id")) for w in workers if
+                       (phone and normalize_phone(w.get("phone")) == phone)
+                       or (email and normalize_email(w.get("email")) == email)}
+            result["sep24_intake"].append({
+                "item_id": src.get("monday_item_id"),
+                "name": src.get("name"),
+                "created_at": src.get("monday_created_at"),
+                "availability": src.get("ic_list"),
+                "onfleet": "present" if len(matches) == 1 else
+                           "conflict" if len(matches) > 1 else "missing",
+                "pod_resolved": bool(_resolved_pod(src)),
+                "phone_valid": bool(phone),
+                "email_valid": bool(email),
+            })
     return result
 
 
